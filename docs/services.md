@@ -24,6 +24,16 @@ For a local SSH daemon, the eventual model is:
 
 The same shape applies to HTTP, databases, and other TCP services. The major difference between current VX6 and that future state is the missing discovery and routing layer.
 
+## Naming Direction
+
+The intended naming pattern is a composition of node identity and service identity, for example:
+
+- `surya.ssh`
+- `surya.blog`
+- `surya.files`
+
+The exact wire format and naming policy are not fixed yet, but the operational goal is simple: the user chooses a node name and service name, and VX6 resolves the current reachable endpoint behind that name.
+
 ## Why Raw IPv6 Is Still Visible Today
 
 Direct IPv6 connectivity is the transport base, but it is not by itself a naming or discovery system.
@@ -35,4 +45,4 @@ To hide changing IPv6 addresses cleanly, VX6 needs:
 - a way to publish and refresh those records
 - a way for other peers to look them up
 
-VX6 now has the first three pieces in bootstrap form: persistent identity, signed endpoint records, and publish/lookup through a known VX6 node. It still lacks decentralized replication, automatic refresh, and service-level routing.
+VX6 now has the first bootstrap pieces: persistent identity, signed endpoint records, publish/lookup through known VX6 nodes, automatic republish on daemon start, and cached registry snapshots. It still lacks service-level routing and a real decentralized mesh lookup layer.
