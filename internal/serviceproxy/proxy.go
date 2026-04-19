@@ -8,8 +8,10 @@ import (
 	"net"
 	"sync"
 
+	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/secure"
 )
 
 const maxRequestSize = 4 * 1024
@@ -18,8 +20,12 @@ type ConnectRequest struct {
 	ServiceName string `json:"service_name"`
 }
 
-func HandleInbound(conn net.Conn, services map[string]string) error {
-	reqPayload, err := proto.ReadLengthPrefixed(conn, maxRequestSize)
+func HandleInbound(conn net.Conn, id identity.Identity, services map[string]string) error {
+	secureConn, err := secure.Server(conn, proto.KindServiceConn, id)
+	if err != nil {
+		return err
+	}
+	reqPayload, err := proto.ReadLengthPrefixed(secureConn, maxRequestSize)
 	if err != nil {
 		return err
 	}
@@ -40,10 +46,10 @@ func HandleInbound(conn net.Conn, services map[string]string) error {
 	}
 	defer targetConn.Close()
 
-	return proxyDuplex(conn, targetConn)
+	return proxyDuplex(secureConn, targetConn)
 }
 
-func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, resolveRemote func(context.Context) (string, error)) error {
+func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, resolveRemote func(context.Context) (string, error)) error {
 	listener, err := net.Listen("tcp", localListen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", localListen, err)
@@ -82,16 +88,20 @@ func ServeLocalForward(ctx context.Context, localListen string, service record.S
 			if err := proto.WriteHeader(remoteConn, proto.KindServiceConn); err != nil {
 				return
 			}
+			secureConn, err := secure.Client(remoteConn, proto.KindServiceConn, id)
+			if err != nil {
+				return
+			}
 
 			payload, err := json.Marshal(ConnectRequest{ServiceName: service.ServiceName})
 			if err != nil {
 				return
 			}
-			if err := proto.WriteLengthPrefixed(remoteConn, payload); err != nil {
+			if err := proto.WriteLengthPrefixed(secureConn, payload); err != nil {
 				return
 			}
 
-			_ = proxyDuplex(localConn, remoteConn)
+			_ = proxyDuplex(localConn, secureConn)
 		}()
 	}
 }

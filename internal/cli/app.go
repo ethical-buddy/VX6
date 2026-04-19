@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/vx6/vx6/internal/config"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/serviceproxy"
@@ -174,7 +176,12 @@ func runSend(ctx context.Context, args []string) error {
 	if *nodeName == "" {
 		return errors.New("send requires --name or a configured node name via vx6 init")
 	}
-	if _, err := identity.NewStoreForConfig(store.Path()); err != nil {
+	identityStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return err
+	}
+	id, err := identityStore.Load()
+	if err != nil {
 		return err
 	}
 
@@ -190,11 +197,12 @@ func runSend(ctx context.Context, args []string) error {
 		NodeName: *nodeName,
 		FilePath: *filePath,
 		Address:  *address,
+		Identity: id,
 	}
 
 	result, err := transfer.SendFile(ctx, req)
 	if err != nil && *peerName != "" {
-		resolvedAddr, resolveErr := refreshPeerFromBootstraps(ctx, store, cfg, *peerName)
+		resolvedAddr, resolveErr := refreshPeerFromNetwork(ctx, store, cfg, *peerName)
 		if resolveErr == nil && resolvedAddr != req.Address {
 			req.Address = resolvedAddr
 			result, err = transfer.SendFile(ctx, req)
@@ -303,15 +311,23 @@ func runConnect(ctx context.Context, args []string) error {
 		return err
 	}
 
-	serviceRec, err := resolveServiceFromBootstraps(ctx, cfg.Node.BootstrapAddrs, *serviceName)
+	serviceRec, err := resolveServiceDistributed(ctx, cfg, *serviceName)
+	if err != nil {
+		return err
+	}
+	identityStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return err
+	}
+	id, err := identityStore.Load()
 	if err != nil {
 		return err
 	}
 
 	fmt.Fprintf(os.Stdout, "forwarding %s to %s on %s\n", *serviceName, serviceRec.Address, *localListen)
 
-	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, func(resolveCtx context.Context) (string, error) {
-		refreshed, err := resolveServiceFromBootstraps(resolveCtx, cfg.Node.BootstrapAddrs, *serviceName)
+	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, func(resolveCtx context.Context) (string, error) {
+		refreshed, err := resolveServiceDistributed(resolveCtx, cfg, *serviceName)
 		if err != nil {
 			return "", err
 		}
@@ -364,7 +380,13 @@ func runDiscoverPublish(ctx context.Context, args []string) error {
 		*address = cfg.Node.AdvertiseAddr
 	}
 	if *address == "" {
-		return errors.New("discover publish requires --addr or a configured advertise address")
+		_, port, err := net.SplitHostPort(cfg.Node.ListenAddr)
+		if err == nil {
+			*address, _ = netutil.DetectAdvertiseAddress(port)
+		}
+	}
+	if *address == "" {
+		return errors.New("discover publish requires --addr, a configured advertise address, or a detectable global IPv6 address")
 	}
 
 	identityStore, err := identity.NewStoreForConfig(store.Path())
@@ -778,38 +800,113 @@ func resolveAddress(store *config.Store, value string) (string, error) {
 	return peer.Address, nil
 }
 
+func resolveNodeDistributed(ctx context.Context, cfgFile config.File, name string) (record.EndpointRecord, error) {
+	candidates := discoveryCandidates(cfgFile)
+	visited := map[string]struct{}{}
+
+	for _, addr := range candidates {
+		if _, ok := visited[addr]; ok {
+			continue
+		}
+		visited[addr] = struct{}{}
+
+		rec, err := discovery.Resolve(ctx, addr, name, "")
+		if err == nil {
+			return rec, nil
+		}
+	}
+
+	registry, err := loadLocalRegistry(cfgFile.Node.DataDir)
+	if err == nil {
+		if rec, err := registry.ResolveLocal(name, ""); err == nil {
+			return rec, nil
+		}
+	}
+
+	return record.EndpointRecord{}, fmt.Errorf("node %q could not be resolved from configured network candidates", name)
+}
+
+func resolveServiceDistributed(ctx context.Context, cfgFile config.File, service string) (record.ServiceRecord, error) {
+	candidates := discoveryCandidates(cfgFile)
+	visited := map[string]struct{}{}
+
+	for _, addr := range candidates {
+		if _, ok := visited[addr]; ok {
+			continue
+		}
+		visited[addr] = struct{}{}
+
+		rec, err := discovery.ResolveService(ctx, addr, service)
+		if err == nil {
+			return rec, nil
+		}
+	}
+
+	registry, err := loadLocalRegistry(cfgFile.Node.DataDir)
+	if err == nil {
+		if rec, err := registry.ResolveServiceLocal(service); err == nil {
+			return rec, nil
+		}
+	}
+
+	return record.ServiceRecord{}, fmt.Errorf("service %q could not be resolved from configured network candidates", service)
+}
+
+func discoveryCandidates(cfgFile config.File) []string {
+	seen := map[string]struct{}{}
+	var out []string
+
+	add := func(addr string) {
+		if addr == "" {
+			return
+		}
+		if _, ok := seen[addr]; ok {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+
+	for _, addr := range cfgFile.Node.BootstrapAddrs {
+		add(addr)
+	}
+	for _, peer := range cfgFile.Peers {
+		add(peer.Address)
+	}
+	if registry, err := loadLocalRegistry(cfgFile.Node.DataDir); err == nil {
+		nodes, _ := registry.Snapshot()
+		for _, rec := range nodes {
+			add(rec.Address)
+		}
+	}
+	return out
+}
+
+func loadLocalRegistry(dataDir string) (*discovery.Registry, error) {
+	if dataDir == "" {
+		dataDir = "./data/inbox"
+	}
+	return discovery.NewRegistry(filepath.Join(dataDir, "registry.json"))
+}
+
 func resolvePeerForSend(ctx context.Context, store *config.Store, cfgFile config.File, name string) (string, error) {
 	peer, err := store.ResolvePeer(name)
 	if err == nil {
 		return peer.Address, nil
 	}
 
-	return refreshPeerFromBootstraps(ctx, store, cfgFile, name)
+	return refreshPeerFromNetwork(ctx, store, cfgFile, name)
 }
 
-func refreshPeerFromBootstraps(ctx context.Context, store *config.Store, cfgFile config.File, name string) (string, error) {
-	for _, bootstrapAddr := range cfgFile.Node.BootstrapAddrs {
-		rec, err := discovery.Resolve(ctx, bootstrapAddr, name, "")
-		if err != nil {
-			continue
-		}
-		if err := store.AddPeer(rec.NodeName, rec.Address); err != nil {
-			return "", err
-		}
-		return rec.Address, nil
+func refreshPeerFromNetwork(ctx context.Context, store *config.Store, cfgFile config.File, name string) (string, error) {
+	rec, err := resolveNodeDistributed(ctx, cfgFile, name)
+	if err != nil {
+		return "", err
 	}
-
-	return "", fmt.Errorf("peer %q not found locally and could not be resolved from configured bootstraps", name)
-}
-
-func resolveServiceFromBootstraps(ctx context.Context, bootstraps []string, service string) (record.ServiceRecord, error) {
-	for _, bootstrapAddr := range bootstraps {
-		rec, err := discovery.ResolveService(ctx, bootstrapAddr, service)
-		if err == nil {
-			return rec, nil
-		}
+	if err := store.AddPeer(rec.NodeName, rec.Address); err != nil {
+		return "", err
 	}
-	return record.ServiceRecord{}, fmt.Errorf("service %q could not be resolved from configured bootstraps", service)
+	return rec.Address, nil
 }
 
 func printUsage(w io.Writer) {

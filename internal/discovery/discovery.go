@@ -222,6 +222,24 @@ func (r *Registry) Snapshot() ([]record.EndpointRecord, []record.ServiceRecord) 
 	return out, serviceOut
 }
 
+func (r *Registry) ResolveLocal(name, nodeID string) (record.EndpointRecord, error) {
+	return r.resolve(name, nodeID)
+}
+
+func (r *Registry) ResolveServiceLocal(fullName string) (record.ServiceRecord, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	rec, ok := r.serviceByName[fullName]
+	if !ok {
+		return record.ServiceRecord{}, fmt.Errorf("service record not found")
+	}
+	if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
+		return record.ServiceRecord{}, err
+	}
+	return rec, nil
+}
+
 func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []record.ServiceRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -14,8 +14,10 @@ import (
 
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
 )
@@ -47,6 +49,16 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
+	}
+	if cfg.AdvertiseAddr == "" {
+		_, port, err := net.SplitHostPort(cfg.ListenAddr)
+		if err == nil {
+			addr, detectErr := netutil.DetectAdvertiseAddress(port)
+			if detectErr == nil {
+				cfg.AdvertiseAddr = addr
+				fmt.Fprintf(log, "auto-detected advertise address %s\n", cfg.AdvertiseAddr)
+			}
+		}
 	}
 
 	listener, err := net.Listen("tcp6", cfg.ListenAddr)
@@ -100,7 +112,12 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 			switch kind {
 			case proto.KindFileTransfer:
-				result, err := transfer.ReceiveFile(reader, cfg.DataDir)
+				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
+				if err != nil {
+					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+				result, err := transfer.ReceiveFile(secureConn, cfg.DataDir)
 				if err != nil {
 					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
@@ -130,7 +147,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				}
 				fmt.Fprintf(log, "processed discovery request from %s\n", conn.RemoteAddr().String())
 			case proto.KindServiceConn:
-				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Services); err != nil {
+				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
@@ -149,12 +166,23 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			return
 		}
 
+		targets := map[string]struct{}{}
 		for _, addr := range cfg.BootstrapAddrs {
+			targets[addr] = struct{}{}
+		}
+		nodes, _ := cfg.Registry.Snapshot()
+		for _, cached := range nodes {
+			if cached.Address != "" && cached.Address != cfg.AdvertiseAddr {
+				targets[cached.Address] = struct{}{}
+			}
+		}
+
+		for addr := range targets {
 			if _, err := discovery.Publish(ctx, addr, rec); err != nil {
-				fmt.Fprintf(log, "bootstrap publish to %s failed: %v\n", addr, err)
+				fmt.Fprintf(log, "discovery publish to %s failed: %v\n", addr, err)
 				continue
 			}
-			fmt.Fprintf(log, "published endpoint record to bootstrap %s\n", addr)
+			fmt.Fprintf(log, "published endpoint record to %s\n", addr)
 
 			for serviceName := range cfg.Services {
 				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
@@ -169,14 +197,14 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 
 			records, services, err := discovery.Snapshot(ctx, addr)
 			if err != nil {
-				fmt.Fprintf(log, "bootstrap snapshot from %s failed: %v\n", addr, err)
+				fmt.Fprintf(log, "discovery snapshot from %s failed: %v\n", addr, err)
 				continue
 			}
 			if err := cfg.Registry.Import(records, services); err != nil {
-				fmt.Fprintf(log, "bootstrap import from %s failed: %v\n", addr, err)
+				fmt.Fprintf(log, "discovery import from %s failed: %v\n", addr, err)
 				continue
 			}
-			fmt.Fprintf(log, "synced %d node records and %d service records from bootstrap %s\n", len(records), len(services), addr)
+			fmt.Fprintf(log, "synced %d node records and %d service records from %s\n", len(records), len(services), addr)
 		}
 	}
 

@@ -13,6 +13,9 @@ The project is built around one executable: `vx6`. The same binary is intended t
 - Signed endpoint record generation for future discovery
 - Bootstrap discovery registry for publish and resolve through known VX6 nodes
 - Automatic publish and bootstrap sync when the daemon runs with advertise and bootstrap config
+- Automatic advertise-address detection when `advertise_addr` is not configured and a global IPv6 is available
+- Encrypted authenticated transport for file transfer and service proxy sessions
+- Distributed lookup across bootstrap nodes, peers, and cached registry nodes
 - Simple CLI with no external dependencies
 - Linux-first development baseline
 - Clean repository structure for future identity, discovery, and routing work
@@ -42,7 +45,7 @@ go build ./cmd/vx6
 Initialize node state once on each machine:
 
 ```bash
-./vx6 init --name receiver-lab --listen '[::]:4242' --advertise '[2001:db8::10]:4242' --bootstrap '[2001:db8::1]:4242' --data-dir ./data/inbox
+./vx6 init --name receiver-lab --listen '[::]:4242' --bootstrap '[2001:db8::1]:4242' --data-dir ./data/inbox
 ```
 
 Inspect the local identity:
@@ -98,11 +101,14 @@ When `vx6 node` runs with a configured advertise address and bootstrap addresses
 - publishes its signed endpoint record on startup
 - republishes periodically
 - pulls a snapshot of known records from bootstrap nodes into a local registry cache
+- serves encrypted file and service sessions
+
+If `advertise_addr` is not configured, `vx6 node` now tries to detect a global IPv6 address automatically using local interface addresses.
 
 When `vx6 send --to <name>` runs, VX6 now:
 
 - checks the local peer book first
-- if needed, resolves the name from configured bootstrap nodes
+- if needed, resolves the name from configured bootstrap nodes, known peers, and cached registry nodes
 - saves the resolved address locally
 - retries with the refreshed address if a stale local address fails
 
@@ -119,14 +125,15 @@ For SSH specifically, the later shape would look more like `vx6 expose ssh --tar
 
 ## Current Discovery Model
 
-Right now, VX6 has a bootstrap discovery stage. A known VX6 node can temporarily act as a registry for signed endpoint records, and other nodes can publish or resolve through it.
+Right now, VX6 has a distributed bootstrap discovery stage. Known VX6 nodes can act as registries for signed endpoint and service records, and nodes can publish or resolve through bootstraps, peers, and cached registry nodes.
 
 That means:
 
 - if you set up VX6 on several devices today, they can use one or more known bootstrap nodes to publish and resolve signed endpoint records
 - VX6 can now help with address changes because the daemon republishes and other nodes can re-resolve by name
 - nodes now keep a local cached registry snapshot from bootstrap nodes
-- there is still no true DHT, recursive peer flood lookup, quorum, or fully automatic cross-peer search mesh yet
+- nodes also replicate discovery records across cached peers over time
+- there is still no full Kademlia-style DHT, quorum, or recursive flood-search mesh yet
 
 The earlier design documents point toward a decentralized discovery layer. That is still the target. The expected path is:
 
@@ -148,11 +155,13 @@ So the answer today is no: you do not yet get zero-configuration communication b
 
 ## Status
 
-VX6 is at an early bootstrap stage. The current milestone establishes one executable, one daemon-style node runtime, one local config model, one persistent cryptographic identity, one signed endpoint record format, automatic bootstrap publish/sync, and a bootstrap discovery path that the larger system can build on.
+VX6 is at an early distributed-bootstrap stage. The current milestone establishes one executable, one daemon-style node runtime, one local config model, one persistent cryptographic identity, signed node and service records, encrypted file/service transport, automatic advertise detection, and distributed publish/lookup across bootstraps plus cached peers.
 
 ## Run as a Service
 
 For Linux service operation, see [docs/systemd.md](./docs/systemd.md) and the example unit in `deployments/systemd/vx6.service`.
+
+For a current operator walkthrough, see [docs/SETUP.md](./docs/SETUP.md).
 
 ## Contributing
 
