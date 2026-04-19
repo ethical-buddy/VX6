@@ -2,14 +2,16 @@
 
 VX6 is an IPv6-first transport and service fabric for direct, host-to-host connectivity without central tunnel infrastructure.
 
-This repository currently ships the first executable building block: a small Go CLI that opens a `tcp6` connection and streams a file to a remote IPv6 listener. The long-term project direction is larger than that, but the codebase starts with a narrow, working transport primitive.
+The project is built around one executable: `vx6`. The same binary is intended to act as a node, transfer endpoint, and later a routing and proxy participant. The current stage is intentionally small: a node can listen on `tcp6`, accept file transfers, and another node can send files to it using a simple framed protocol.
 
-## Current Scope
+## Current Stage
 
+- Single `vx6` executable for node and sender roles
 - IPv6-only file transfer over `tcp6`
+- Human-readable node names included in transfer metadata
 - Simple CLI with no external dependencies
 - Linux-first development baseline
-- Clean repository structure for future networking components
+- Clean repository structure for future identity, discovery, and routing work
 
 ## Repository Layout
 
@@ -20,6 +22,7 @@ VX6/
 ├── internal/             # Non-exported application packages
 ├── .gitignore
 ├── CONTRIBUTING.md
+├── LICENSE
 ├── go.mod
 └── README.md
 ```
@@ -32,30 +35,73 @@ Build the binary:
 go build ./cmd/vx6
 ```
 
-Start a receiver on another machine with an IPv6 listener on port `4242`:
+Initialize node state once on each machine:
 
 ```bash
-nc -6 -l 4242 > received.bin
+./vx6 init --name receiver-lab --listen [::]:4242 --data-dir ./data/inbox
 ```
 
-Send a file:
+Start the node:
 
 ```bash
-./vx6 send --file ./example.bin --addr [2001:db8::10]:4242
+./vx6 node
 ```
 
-The current sender writes raw file bytes to the socket. The receiving side can be any IPv6-capable TCP listener that reads from standard input.
+Register a peer by name:
+
+```bash
+./vx6 peer add --name receiver-lab --addr [2001:db8::10]:4242
+```
+
+Send a file to that named peer:
+
+```bash
+./vx6 send --file ./example.bin --to receiver-lab
+```
+
+The receive side and send side use the same binary. Transfers include a small metadata header carrying the sender node name, file name, and file size before the payload stream.
+
+## Service Sharing Direction
+
+The current milestone moves files, not arbitrary TCP services. The intended service model is:
+
+- every machine runs one `vx6` node
+- the node owns naming, peer state, and connection policy
+- services such as SSH, HTTP, or custom TCP applications are published through the node
+- remote users connect to a VX6 service name, and the node resolves that to the current endpoint or forwarding path
+
+For SSH specifically, the later shape would look more like `vx6 expose ssh --target 127.0.0.1:22 --name lab-ssh` and `vx6 connect lab-ssh`, with VX6 handling endpoint lookup and the raw IPv6 address staying out of the user flow.
+
+## Current Discovery Model
+
+Right now, two devices still need an initial address exchange. `vx6 peer add` only saves a local mapping from a human-readable name to `[ipv6]:port`.
+
+That means:
+
+- if you set up VX6 on two devices today, they can communicate once one side knows the other side's reachable IPv6 endpoint
+- VX6 currently removes repeated manual typing, not the need for first contact
+- there is no DHT, gossip layer, bootstrap mesh, or automatic endpoint update yet
+
+The earlier design documents point toward a decentralized discovery layer. That is still the target. The expected path is:
+
+1. local node identity and peer state
+2. stable naming and signed endpoint records
+3. bootstrap peers
+4. decentralized lookup and endpoint refresh
+5. service publication and forwarding
+
+So the answer today is no: you do not yet get zero-configuration communication between two fresh devices without exchanging an address somehow. The end goal is also not a permanent central server. It is a decentralized discovery system, but that layer still needs to be built.
 
 ## Design Principles
 
 - IPv6 is a first-class constraint, not an optional fallback.
 - The codebase should stay small, inspectable, and easy to reason about.
-- Initial transport primitives should be reliable before higher-level discovery and routing layers are added.
+- Initial transport primitives should be reliable before higher-level discovery, naming, and routing layers are added.
 - Documentation should describe the system plainly and precisely.
 
 ## Status
 
-VX6 is at an early bootstrap stage. The present milestone establishes repository conventions and a working IPv6 transfer command that the larger system can build on.
+VX6 is at an early bootstrap stage. The current milestone establishes one executable, one simple node runtime, one local config model, and one transfer protocol that the larger system can build on.
 
 ## Contributing
 
