@@ -50,6 +50,9 @@ func NewStore(path string) (*Store, error) {
 }
 
 func DefaultPath() (string, error) {
+	if p := os.Getenv("VX6_CONFIG_PATH"); p != "" {
+		return p, nil
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config directory: %w", err)

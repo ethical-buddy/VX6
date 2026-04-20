@@ -1,0 +1,22 @@
+# Maintainer: Your Name <you@example.com>
+pkgname=vx6-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="IPv6-first transport and service fabric"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vx6/vx6"
+license=('MIT')
+depends=('glibc')
+makedepends=('go')
+source=("vx6-${pkgver}.tar.gz::https://github.com/vx6/vx6/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "vx6-${pkgver}"
+  make build
+}
+
+package() {
+  cd "vx6-${pkgver}"
+  make DESTDIR="${pkgdir}" install
+}

@@ -22,17 +22,23 @@ import (
 	"github.com/vx6/vx6/internal/transfer"
 )
 
+type ServiceRefresher func() map[string]string
+
 type Config struct {
-	Name           string
-	NodeID         string
-	ListenAddr     string
-	AdvertiseAddr  string
-	DataDir        string
-	BootstrapAddrs []string
-	Services       map[string]string
-	Identity       identity.Identity
-	Registry       *discovery.Registry
+	Name            string
+	NodeID          string
+	ListenAddr      string
+	AdvertiseAddr   string
+	DataDir         string
+	ConfigPath      string
+	RefreshServices ServiceRefresher
+	BootstrapAddrs  []string
+	Services        map[string]string
+	Identity        identity.Identity
+	Registry        *discovery.Registry
 }
+
+const SeedBootstrapDomain = "bootstrap.vx6.dev"
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Name == "" {
@@ -50,6 +56,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+
+	// Auto-detect AdvertiseAddr if not set
 	if cfg.AdvertiseAddr == "" {
 		_, port, err := net.SplitHostPort(cfg.ListenAddr)
 		if err == nil {
@@ -69,6 +77,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
+	// Start background tasks with advertise address
 	if cfg.AdvertiseAddr != "" {
 		go runBootstrapTasks(ctx, log, cfg)
 	}
@@ -145,7 +154,6 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
-				fmt.Fprintf(log, "processed discovery request from %s\n", conn.RemoteAddr().String())
 			case proto.KindServiceConn:
 				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
@@ -159,7 +167,23 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 }
 
 func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
+	// 1. Resolve DNS seeds
+	dnsBootstraps := []string{}
+	ips, err := net.LookupIP(SeedBootstrapDomain)
+	if err == nil {
+		for _, ip := range ips {
+			if ip.To4() == nil { // Only IPv6
+				dnsBootstraps = append(dnsBootstraps, fmt.Sprintf("[%s]:4242", ip.String()))
+			}
+		}
+	}
+
 	publishAndSync := func() {
+		// --- A. Dynamic Service Reload ---
+		if cfg.RefreshServices != nil {
+			cfg.Services = cfg.RefreshServices()
+		}
+
 		rec, err := record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
 		if err != nil {
 			fmt.Fprintf(log, "bootstrap publish skipped: %v\n", err)
@@ -167,62 +191,76 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 		}
 
 		// Always ensure our own record is in our local registry
-		if err := cfg.Registry.Import([]record.EndpointRecord{rec}, nil); err != nil {
-			fmt.Fprintf(log, "local registry update failed: %v\n", err)
-		}
+		_ = cfg.Registry.Import([]record.EndpointRecord{rec}, nil)
 
+		// --- B. Loop Prevention & Target Selection ---
 		targets := map[string]struct{}{}
+		// Add hardcoded DNS seeds
+		for _, addr := range dnsBootstraps {
+			targets[addr] = struct{}{}
+		}
+		// Add configured bootstraps
 		for _, addr := range cfg.BootstrapAddrs {
 			targets[addr] = struct{}{}
 		}
+		
+		// Add a few random cached nodes to spread the word, but not everyone
 		nodes, _ := cfg.Registry.Snapshot()
-		for _, cached := range nodes {
-			if cached.Address != "" && cached.Address != cfg.AdvertiseAddr {
-				targets[cached.Address] = struct{}{}
+		if len(nodes) > 10 {
+			// Basic shuffling would go here, for now just take first few
+			for i := 0; i < 5; i++ {
+				if nodes[i].Address != "" && nodes[i].Address != cfg.AdvertiseAddr {
+					targets[nodes[i].Address] = struct{}{}
+				}
+			}
+		} else {
+			for _, cached := range nodes {
+				if cached.Address != "" && cached.Address != cfg.AdvertiseAddr {
+					targets[cached.Address] = struct{}{}
+				}
 			}
 		}
 
 		for addr := range targets {
 			if _, err := discovery.Publish(ctx, addr, rec); err != nil {
-				fmt.Fprintf(log, "discovery publish to %s failed: %v\n", addr, err)
+				// Don't log every failure to keep output clean in production
 				continue
 			}
-			fmt.Fprintf(log, "published endpoint record to %s\n", addr)
 
-			for serviceName := range cfg.Services {
-				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
-				if err != nil {
-					fmt.Fprintf(log, "service publish skipped for %s: %v\n", serviceName, err)
-					continue
-				}
-
-				// Ensure our own service record is in our local registry
-				_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
-
-				if _, err := discovery.PublishService(ctx, addr, serviceRec); err != nil {
-					fmt.Fprintf(log, "service publish to %s for %s failed: %v\n", addr, serviceName, err)
-				}
-			}
-
-			records, services, err := discovery.Snapshot(ctx, addr)
-			if err != nil {
-				fmt.Fprintf(log, "discovery snapshot from %s failed: %v\n", addr, err)
-				continue
-			}
-			if err := cfg.Registry.Import(records, services); err != nil {
-				fmt.Fprintf(log, "discovery import from %s failed: %v\n", addr, err)
-				continue
-			}
-			fmt.Fprintf(log, "synced %d node records and %d service records from %s\n", len(records), len(services), addr)
-		}
-
-		// If we have no targets, we still want to register our own services locally
-		if len(targets) == 0 {
 			for serviceName := range cfg.Services {
 				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
 				if err == nil {
 					_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
+					_, _ = discovery.PublishService(ctx, addr, serviceRec)
 				}
+			}
+
+			// Sync from DNS bootstraps and config bootstraps ONLY to prevent O(N^2) sync loops
+			isBootstrap := false
+			for _, b := range dnsBootstraps {
+				if b == addr {
+					isBootstrap = true; break
+				}
+			}
+			for _, b := range cfg.BootstrapAddrs {
+				if b == addr {
+					isBootstrap = true; break
+				}
+			}
+
+			if isBootstrap {
+				records, services, err := discovery.Snapshot(ctx, addr)
+				if err == nil {
+					_ = cfg.Registry.Import(records, services)
+				}
+			}
+		}
+
+		// Self-register services even if offline
+		for serviceName := range cfg.Services {
+			serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+			if err == nil {
+				_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
 			}
 		}
 	}
