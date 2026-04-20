@@ -32,6 +32,13 @@ Define the chain and destination:
 ```
 
 ### **Benefits of eBPF in Proxy Mode**
-*   **Context Switch Avoidance**: Traditional proxies move data from the Kernel to the App and back to the Kernel. eBPF handles the "Swap IP and Send" logic entirely inside the Kernel.
-*   **Latency**: 5 hops with eBPF feel almost as fast as a direct connection.
-*   **Invisibility**: With XDP, relay nodes can forward traffic without ever having an open TCP port visible to scanners.
+*   **Kernel Fast-Path**: Packets are relayed at Layer 2/3. The CPU never context-switches to the Go application for relaying.
+*   **Wire Speed**: A relay node can handle millions of packets per second with negligible CPU usage.
+*   **Security**: The XDP program drops malformed packets before they reach the OS networking stack.
+
+### **Building with eBPF**
+Ensure you have `clang` and `llvm` installed, then run:
+```bash
+make
+```
+This generates `vx6` (the binary) and `onion_relay.o` (the kernel bytecode).

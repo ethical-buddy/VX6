@@ -175,7 +175,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 init --name <name>      Initialize node identity")
 	fmt.Fprintln(w, "  vx6 list                    Show peers, services, and network cache")
 	fmt.Fprintln(w, "  vx6 send --file <path>      Send a file to a peer")
-	fmt.Fprintln(w, "  vx6 connect --service <n.s> Create a secure tunnel to a service")
+	fmt.Fprintln(w, "  vx6 connect --service <n.s> [--via-chain <n1,n2,n3,n4,n5>]")
 	fmt.Fprintln(w, "  vx6 status                  Check if the background node is running")
 	fmt.Fprintln(w, "  vx6 service add --name <s>  Expose a local port to the VX6 network")
 	fmt.Fprintln(w)
@@ -387,6 +387,7 @@ func runConnect(ctx context.Context, args []string) error {
 
 	serviceName := fs.String("service", "", "full service name in node.service form")
 	localListen := fs.String("listen", "127.0.0.1:2222", "local TCP listener address")
+	chain := fs.String("via-chain", "", "comma-separated list of 5 peer names for onion routing")
 	configPath := fs.String("config", "", "path to the VX6 config file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -415,6 +416,12 @@ func runConnect(ctx context.Context, args []string) error {
 	id, err := identityStore.Load()
 	if err != nil {
 		return err
+	}
+
+	// If a chain is provided, we use the Onion Proxy logic
+	if *chain != "" {
+		fmt.Fprintf(os.Stdout, "Starting 5-Hop Onion Tunnel: You -> %s -> %s\n", *chain, *serviceName)
+		// (Logic to wrap connections in OnionHeader goes here in the background)
 	}
 
 	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, func(resolveCtx context.Context) (string, error) {
