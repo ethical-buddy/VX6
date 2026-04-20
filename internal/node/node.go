@@ -3,6 +3,7 @@ package node
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/netutil"
+	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/secure"
@@ -154,6 +156,16 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
+			case proto.KindOnion:
+				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
+				if err != nil {
+					return
+				}
+				var oh proto.OnionHeader
+				if err := json.Unmarshal(payload, &oh); err != nil {
+					return
+				}
+				_ = onion.Forward(ctx, oh)
 			case proto.KindServiceConn:
 				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)

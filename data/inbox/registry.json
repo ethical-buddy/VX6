@@ -25,39 +25,77 @@
       "node_name": "Keshav",
       "address": "[2401:4900:a68a:dd2b:1079:dcd6:79e7:e403]:4242",
       "public_key": "Lo1+k3pjrLS0tYek5bNlouux8grwQGdZkI5BLLS3hEU=",
-      "issued_at": "2026-04-20T10:04:38Z",
-      "expires_at": "2026-04-20T10:24:38Z",
-      "signature": "EB8jvtCDfOYtb+AklWJe7Fc7zTvGzwZxTgVt2sKseL3HhG4u5aq9bQg7x+ay5VUYuTrN1uz5H5GzlMx0KdsDBw=="
+      "issued_at": "2026-04-20T11:03:15Z",
+      "expires_at": "2026-04-20T11:23:15Z",
+      "signature": "eiILpS5O8dPdH4SY4l6jXAZwYBENxZH/od78QIKdhmrEtDpma4gP4z2DkhpbG20WlOJmksvX6rQtwdt+GWRyAQ=="
+    },
+    {
+      "node_id": "vx6_0ae43f5305c83336",
+      "node_name": "amchk",
+      "address": "[2401:4900:b8c:1fba:54c0:c9a:803e:224e]:4242",
+      "public_key": "nw7MZYbwiT68+OfzMqUpK70nuY1K2HKj28ourBVLKFo=",
+      "issued_at": "2026-04-20T10:58:00Z",
+      "expires_at": "2026-04-20T11:18:00Z",
+      "signature": "+9X091lPx36b1FtmIK6J+UaRG4Ee0QueodHY80Z8/Js5Vp/9pgaGqJEXIYHTo7Ts5PPW4nVUi55vEQn3BOk2Cw=="
+    },
+    {
+      "node_id": "vx6_2c5025d191f063e0",
+      "node_name": "amchk_root",
+      "address": "[2401:4900:b8c:1fba:54c0:c9a:803e:224e]:4242",
+      "public_key": "rjyVOXg05/6dJ5mpj0VhTUug/T/csuARaGxxg73XxcE=",
+      "issued_at": "2026-04-20T11:01:12Z",
+      "expires_at": "2026-04-20T11:21:12Z",
+      "signature": "RJKkUW5c+kD72J7P/moy97Oag3npHjnGn5UYgQEm1keP9Dw2XbjOxsKveu9SEJ/I9LQzD+HyMWjqzmDSdx/BBA=="
     },
     {
       "node_id": "vx6_2aa4ae9386832032",
       "node_name": "bootstrap",
       "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242",
       "public_key": "wLhSJkWkohvBjPZ8R0rg/jUVM/+iLkcuLsZp49pUnwY=",
-      "issued_at": "2026-04-20T10:03:33Z",
-      "expires_at": "2026-04-20T10:23:33Z",
-      "signature": "bC9dyUm8NBvX4qs/DM8t3urE349Gv8hjETu4PYERMYx+kPBalhOjk/rvp6FrtjLZIwv+JStdRxtw0wbhTde9DQ=="
+      "issued_at": "2026-04-20T11:03:56Z",
+      "expires_at": "2026-04-20T11:23:56Z",
+      "signature": "Z+n5r7s/ynIKK4iYtW1oNdfl8wuwuNPBhXJd6I0eyRKY4zWBJHHF9rtJaU3c+E73O2LAO4LUWV9343Y9w3/vCg=="
     },
     {
       "node_id": "vx6_9dba4ed11f7b9c0a",
       "node_name": "parkhi",
       "address": "[2401:4900:8247:c59e:33bd:3f5d:daf0:9fc4]:4242",
       "public_key": "mdrl63KT0RSKPcxjcJNRmO0UPKL7XSEmzklk7QzJCPw=",
-      "issued_at": "2026-04-20T10:04:37Z",
-      "expires_at": "2026-04-20T10:24:37Z",
-      "signature": "FXXPVdjsPTJioCNIFZ/Pj6xiPmCgLJNoPnHslUglzrFdi0gWJqa88wdG3hV3UZ+JYMnYwXpjC9r8PEag0bM5BQ=="
+      "issued_at": "2026-04-20T11:01:58Z",
+      "expires_at": "2026-04-20T11:21:58Z",
+      "signature": "or9vNVfA7kTSHAtFCuzPa3KKA8ZS9cz92Jqrck41yHH2Gs3UG/cA06OYA0M4VTaR7i0fm6HanOMBeA0QoIIfAQ=="
     }
   ],
   "service_records": [
     {
       "node_id": "vx6_2aa4ae9386832032",
       "node_name": "bootstrap",
+      "service_name": "web",
+      "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242",
+      "public_key": "wLhSJkWkohvBjPZ8R0rg/jUVM/+iLkcuLsZp49pUnwY=",
+      "issued_at": "2026-04-20T11:03:57Z",
+      "expires_at": "2026-04-20T11:23:57Z",
+      "signature": "X0Gy6Eb9M5zVyNaIdBaRGf3JMP8wgTA0+/mYkd0HOAcgFPp9k86z2uek8fYHy4NZm7O2Qi1TGI7/3kqYMKXeDQ=="
+    },
+    {
+      "node_id": "vx6_2aa4ae9386832032",
+      "node_name": "bootstrap",
+      "service_name": "website",
+      "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242",
+      "public_key": "wLhSJkWkohvBjPZ8R0rg/jUVM/+iLkcuLsZp49pUnwY=",
+      "issued_at": "2026-04-20T11:03:57Z",
+      "expires_at": "2026-04-20T11:23:57Z",
+      "signature": "Up3o2fYvyoJU22eaNg2xnhEoxJ/10KywCJ0oQdOzsM/IPyZgVRRtjkNSe/XPVskA8xPAJsMfWon8MjF5V22MDA=="
+    },
+    {
+      "node_id": "vx6_2aa4ae9386832032",
+      "node_name": "bootstrap",
       "service_name": "weee",
       "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242",
       "public_key": "wLhSJkWkohvBjPZ8R0rg/jUVM/+iLkcuLsZp49pUnwY=",
-      "issued_at": "2026-04-20T10:03:33Z",
-      "expires_at": "2026-04-20T10:23:33Z",
-      "signature": "oOMgfKXJmb5iI0H6HYhHexXGm/UzuYUo0hVmN7vq8bOvvpn7L9jZPmgGvHLQsoarMv5qLZY702coavdEO7IlCg=="
+      "issued_at": "2026-04-20T11:03:57Z",
+      "expires_at": "2026-04-20T11:23:57Z",
+      "signature": "afvWdRa7KR+6zk3wvvqouEuBS7f5fOP3zyJP6g7i6LHz4DnUaspe2fwk23WE2pAu0lH17fZ0fxeBrHh7nAeYDw=="
     }
   ]
 }

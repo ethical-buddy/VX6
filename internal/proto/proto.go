@@ -13,7 +13,15 @@ const (
 	KindDiscoveryReq byte = 2
 	KindDiscoveryRes byte = 3
 	KindServiceConn  byte = 4
+	KindOnion        byte = 5 // New: Onion-routed traffic
 )
+
+type OnionHeader struct {
+	HopCount int      `json:"hop_count"` // Current hop (0-4)
+	Hops     [5]string `json:"hops"`      // IPv6 addresses of the 5 nodes
+	FinalDst string   `json:"final_dst"` // The ultimate destination (e.g., 127.0.0.1:8000)
+	Payload  []byte   `json:"payload"`   // The actual encrypted data
+}
 
 func WriteHeader(w io.Writer, kind byte) error {
 	var header [5]byte

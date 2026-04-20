@@ -1,0 +1,7 @@
+vx6 node "test-node" (vx6_2aa4ae9386832032) listening on [::1]:4242
+[ONION] Received Hop 1/5. Next: [::1]:4242
+[ONION] Received Hop 2/5. Next: [::1]:4242
+[ONION] Received Hop 3/5. Next: [::1]:4242
+[ONION] Received Hop 4/5. Next: [::1]:4242
+[ONION] Received Hop 5/5. Next: [::1]:4242
+[ONION] Reached Exit Node. Delivering to: 127.0.0.1:9999
