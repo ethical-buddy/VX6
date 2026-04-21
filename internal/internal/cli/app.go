@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
@@ -435,7 +434,7 @@ func runNode(ctx context.Context, args []string) error {
 
 	reloadCh := make(chan struct{}, 1)
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP)
+	registerReloadSignal(sigCh)
 	defer signal.Stop(sigCh)
 	go func() {
 		for {
@@ -528,10 +527,10 @@ func runReload(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read node pid file: %w", err)
 	}
-	if err := syscall.Kill(pid, 0); err != nil {
+	if err := processExists(pid); err != nil {
 		return fmt.Errorf("check node process: %w", err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+	if err := sendReloadSignal(pid); err != nil {
 		return fmt.Errorf("signal node reload: %w", err)
 	}
 	fmt.Printf("reload_sent\tmode=signal\tpid=%d\n", pid)
@@ -1625,39 +1624,41 @@ func acquireNodeLock(configPath string) (*nodeRuntimeLock, error) {
 		return nil, fmt.Errorf("create runtime directory: %w", err)
 	}
 
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			if pid, readErr := readNodePID(pidPath); readErr == nil && pid > 0 {
+				if existsErr := processExists(pid); existsErr == nil {
+					return nil, runningNodeError(pidPath)
+				}
+			}
+			_ = os.Remove(pidPath)
+			if removeErr := os.Remove(lockPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				return nil, fmt.Errorf("clear stale runtime lock: %w", removeErr)
+			}
+			lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o644)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open runtime lock: %w", err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = lockFile.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return nil, runningNodeError(pidPath)
-		}
-		return nil, fmt.Errorf("lock runtime state: %w", err)
-	}
 	if err := lockFile.Truncate(0); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
 		return nil, fmt.Errorf("reset runtime lock: %w", err)
 	}
 	if _, err := lockFile.Seek(0, 0); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
 		return nil, fmt.Errorf("seek runtime lock: %w", err)
 	}
 	if _, err := fmt.Fprintf(lockFile, "%d\n", os.Getpid()); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
 		return nil, fmt.Errorf("write runtime lock: %w", err)
 	}
 	if err := lockFile.Sync(); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
 		return nil, fmt.Errorf("sync runtime lock: %w", err)
 	}
 	if err := writePIDFile(pidPath, os.Getpid()); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
 		return nil, err
 	}
@@ -1672,7 +1673,6 @@ func (l *nodeRuntimeLock) Close() error {
 	_ = os.Remove(l.pidPath)
 	_ = os.Remove(l.controlPath)
 	_ = l.file.Truncate(0)
-	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
 	err := l.file.Close()
 	l.file = nil
 	_ = os.Remove(l.lockPath)
