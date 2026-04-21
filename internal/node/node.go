@@ -32,6 +32,7 @@ type Config struct {
 	Services       map[string]string
 	Identity       identity.Identity
 	Registry       *discovery.Registry
+	Verbose        bool
 }
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
@@ -50,13 +51,14 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+
 	if cfg.AdvertiseAddr == "" {
 		_, port, err := net.SplitHostPort(cfg.ListenAddr)
 		if err == nil {
 			addr, detectErr := netutil.DetectAdvertiseAddress(port)
 			if detectErr == nil {
 				cfg.AdvertiseAddr = addr
-				fmt.Fprintf(log, "auto-detected advertise address %s\n", cfg.AdvertiseAddr)
+				fmt.Fprintf(log, "auto-detected advertise address %s", cfg.AdvertiseAddr)
 			}
 		}
 	}
@@ -67,7 +69,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	defer listener.Close()
 
-	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
+	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s", cfg.Name, cfg.NodeID, listener.Addr().String())
 
 	if cfg.AdvertiseAddr != "" {
 		go runBootstrapTasks(ctx, log, cfg)
@@ -87,6 +89,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Temporary() {
 				continue
@@ -94,11 +97,12 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
+
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
 		wg.Add(1)
-		go func() {
+		go func(conn net.Conn) {
 			defer wg.Done()
 			defer conn.Close()
 
@@ -106,20 +110,37 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 			kind, err := proto.ReadHeader(reader)
 			if err != nil {
-				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
+				fmt.Fprintf(log, "session error from %s: %v", conn.RemoteAddr().String(), err)
 				return
 			}
 
 			switch kind {
 			case proto.KindFileTransfer:
-				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
+				secureConn, err := secure.Server(
+					&bufferedConn{Conn: conn, reader: reader},
+					proto.KindFileTransfer,
+					cfg.Identity,
+				)
 				if err != nil {
-					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
+					fmt.Fprintf(log, "secure receive error from %s: %v", conn.RemoteAddr().String(), err)
 					return
 				}
-				result, err := transfer.ReceiveFile(secureConn, cfg.DataDir)
+
+				result, err := transfer.ReceiveFile(
+					secureConn,
+					cfg.DataDir,
+					func(received, total int64) {
+						if cfg.Verbose {
+							percent := float64(received) * 100 / float64(total)
+							fmt.Fprintf(os.Stderr, "[RECV] %5.1f%% | %d / %d bytes\n", percent, received, total)
+							if received == total {
+								fmt.Fprintln(os.Stderr)
+							}
+						}
+					},
+				)
 				if err != nil {
-					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
+					fmt.Fprintf(log, "receive error from %s: %v", conn.RemoteAddr().String(), err)
 					return
 				}
 
@@ -128,33 +149,29 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					absPath = result.StoredPath
 				}
 
-				fmt.Fprintf(
-					log,
-					"received %q (%d bytes) from node %q into %s\n",
-					result.FileName,
-					result.BytesReceived,
-					result.SenderNode,
-					absPath,
-				)
+				fmt.Fprintf(log, "received %q (%d bytes) from node %q into %s", result.FileName, result.BytesReceived, result.SenderNode, absPath)
+
 			case proto.KindDiscoveryReq:
 				if cfg.Registry == nil {
-					fmt.Fprintf(log, "discovery request from %s rejected: registry disabled\n", conn.RemoteAddr().String())
+					fmt.Fprintf(log, "discovery request from %s rejected: registry disabled", conn.RemoteAddr().String())
 					return
 				}
 				if err := cfg.Registry.HandleConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
-					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
+					fmt.Fprintf(log, "discovery error from %s: %v", conn.RemoteAddr().String(), err)
 					return
 				}
-				fmt.Fprintf(log, "processed discovery request from %s\n", conn.RemoteAddr().String())
+				fmt.Fprintf(log, "processed discovery request from %s", conn.RemoteAddr().String())
+
 			case proto.KindServiceConn:
 				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services); err != nil {
-					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
+					fmt.Fprintf(log, "service proxy error from %s: %v", conn.RemoteAddr().String(), err)
 					return
 				}
+
 			default:
-				fmt.Fprintf(log, "session error from %s: unsupported kind %d\n", conn.RemoteAddr().String(), kind)
+				fmt.Fprintf(log, "session error from %s: unsupported kind %d", conn.RemoteAddr().String(), kind)
 			}
-		}()
+		}(conn)
 	}
 }
 
@@ -162,68 +179,26 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 	publishAndSync := func() {
 		rec, err := record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
 		if err != nil {
-			fmt.Fprintf(log, "bootstrap publish skipped: %v\n", err)
+			fmt.Fprintf(log, "bootstrap publish skipped: %v", err)
 			return
 		}
 
-		// Always ensure our own record is in our local registry
 		if err := cfg.Registry.Import([]record.EndpointRecord{rec}, nil); err != nil {
-			fmt.Fprintf(log, "local registry update failed: %v\n", err)
+			fmt.Fprintf(log, "local registry update failed: %v", err)
 		}
 
 		targets := map[string]struct{}{}
 		for _, addr := range cfg.BootstrapAddrs {
 			targets[addr] = struct{}{}
 		}
-		nodes, _ := cfg.Registry.Snapshot()
-		for _, cached := range nodes {
-			if cached.Address != "" && cached.Address != cfg.AdvertiseAddr {
-				targets[cached.Address] = struct{}{}
-			}
-		}
 
 		for addr := range targets {
 			if _, err := discovery.Publish(ctx, addr, rec); err != nil {
-				fmt.Fprintf(log, "discovery publish to %s failed: %v\n", addr, err)
+				fmt.Fprintf(log, "discovery publish to %s failed: %v", addr, err)
 				continue
 			}
-			fmt.Fprintf(log, "published endpoint record to %s\n", addr)
 
-			for serviceName := range cfg.Services {
-				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
-				if err != nil {
-					fmt.Fprintf(log, "service publish skipped for %s: %v\n", serviceName, err)
-					continue
-				}
-
-				// Ensure our own service record is in our local registry
-				_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
-
-				if _, err := discovery.PublishService(ctx, addr, serviceRec); err != nil {
-					fmt.Fprintf(log, "service publish to %s for %s failed: %v\n", addr, serviceName, err)
-				}
-			}
-
-			records, services, err := discovery.Snapshot(ctx, addr)
-			if err != nil {
-				fmt.Fprintf(log, "discovery snapshot from %s failed: %v\n", addr, err)
-				continue
-			}
-			if err := cfg.Registry.Import(records, services); err != nil {
-				fmt.Fprintf(log, "discovery import from %s failed: %v\n", addr, err)
-				continue
-			}
-			fmt.Fprintf(log, "synced %d node records and %d service records from %s\n", len(records), len(services), addr)
-		}
-
-		// If we have no targets, we still want to register our own services locally
-		if len(targets) == 0 {
-			for serviceName := range cfg.Services {
-				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
-				if err == nil {
-					_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
-				}
-			}
+			fmt.Fprintf(log, "published endpoint record to %s", addr)
 		}
 	}
 

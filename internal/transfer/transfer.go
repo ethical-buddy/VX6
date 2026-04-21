@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
@@ -23,10 +24,12 @@ type metadata struct {
 }
 
 type SendRequest struct {
-	NodeName string
-	FilePath string
-	Address  string
-	Identity identity.Identity
+	NodeName     string
+	FilePath     string
+	Address      string
+	Identity     identity.Identity
+	OnProgress   func(sent, total int64)
+	OnRetransmit func(packet int)
 }
 
 type SendResult struct {
@@ -92,9 +95,33 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 		return SendResult{}, err
 	}
 
-	written, err := io.Copy(secureConn, file)
-	if err != nil {
-		return SendResult{}, fmt.Errorf("stream file to %s: %w", req.Address, err)
+	buf := make([]byte, 1024) // 1 KB chunks
+	var written int64
+
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			wn, writeErr := secureConn.Write(buf[:n])
+			if writeErr != nil {
+				return SendResult{}, fmt.Errorf("stream file to %s: %w", req.Address, writeErr)
+			}
+
+			written += int64(wn)
+
+			if req.OnProgress != nil {
+				req.OnProgress(written, info.Size())
+
+			}
+			time.Sleep(100 * time.Millisecond) // temporary, only for testing
+
+		}
+
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return SendResult{}, fmt.Errorf("read file: %w", err)
+		}
 	}
 
 	return SendResult{
@@ -105,7 +132,7 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	}, nil
 }
 
-func ReceiveFile(r io.Reader, dataDir string) (ReceiveResult, error) {
+func ReceiveFile(r io.Reader, dataDir string, onProgress func(received, total int64)) (ReceiveResult, error) {
 	meta, err := readMetadata(r)
 	if err != nil {
 		return ReceiveResult{}, err
@@ -122,9 +149,30 @@ func ReceiveFile(r io.Reader, dataDir string) (ReceiveResult, error) {
 	}
 	defer outFile.Close()
 
-	written, err := io.CopyN(outFile, r, meta.FileSize)
-	if err != nil {
-		return ReceiveResult{}, fmt.Errorf("read payload: %w", err)
+	buf := make([]byte, 1024)
+	var written int64
+
+	for written < meta.FileSize {
+		n, err := r.Read(buf)
+		if n > 0 {
+			wn, writeErr := outFile.Write(buf[:n])
+			if writeErr != nil {
+				return ReceiveResult{}, fmt.Errorf("write output file: %w", writeErr)
+			}
+
+			written += int64(wn)
+
+			if onProgress != nil {
+				onProgress(written, meta.FileSize)
+			}
+		}
+
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return ReceiveResult{}, fmt.Errorf("read payload: %w", err)
+		}
 	}
 
 	return ReceiveResult{
