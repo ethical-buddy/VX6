@@ -40,11 +40,12 @@ func TestStoreRoundTrip(t *testing.T) {
 func TestRuntimePIDPathUsesConfigDirectory(t *testing.T) {
 	t.Parallel()
 
-	path, err := RuntimePIDPath("/tmp/vx6/config.json")
+	configPath := filepath.FromSlash("/tmp/vx6/config.json")
+	path, err := RuntimePIDPath(configPath)
 	if err != nil {
 		t.Fatalf("runtime pid path: %v", err)
 	}
-	if path != "/tmp/vx6/node.pid" {
+	if path != filepath.Join(filepath.Dir(configPath), "node.pid") {
 		t.Fatalf("unexpected pid path %q", path)
 	}
 }
@@ -52,11 +53,12 @@ func TestRuntimePIDPathUsesConfigDirectory(t *testing.T) {
 func TestRuntimeLockPathUsesConfigDirectory(t *testing.T) {
 	t.Parallel()
 
-	path, err := RuntimeLockPath("/tmp/vx6/config.json")
+	configPath := filepath.FromSlash("/tmp/vx6/config.json")
+	path, err := RuntimeLockPath(configPath)
 	if err != nil {
 		t.Fatalf("runtime lock path: %v", err)
 	}
-	if path != "/tmp/vx6/node.lock" {
+	if path != filepath.Join(filepath.Dir(configPath), "node.lock") {
 		t.Fatalf("unexpected lock path %q", path)
 	}
 }
@@ -64,23 +66,26 @@ func TestRuntimeLockPathUsesConfigDirectory(t *testing.T) {
 func TestRuntimeControlPathUsesConfigDirectory(t *testing.T) {
 	t.Parallel()
 
-	path, err := RuntimeControlPath("/tmp/vx6/config.json")
+	configPath := filepath.FromSlash("/tmp/vx6/config.json")
+	path, err := RuntimeControlPath(configPath)
 	if err != nil {
 		t.Fatalf("runtime control path: %v", err)
 	}
-	if path != "/tmp/vx6/node.control.json" {
+	if path != filepath.Join(filepath.Dir(configPath), "node.control.json") {
 		t.Fatalf("unexpected control path %q", path)
 	}
 }
 
 func TestDefaultPathsUseHomeDirectory(t *testing.T) {
-	t.Setenv("HOME", "/tmp/vx6-home")
+	home := filepath.Join(t.TempDir(), "vx6-home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	configPath, err := DefaultPath()
 	if err != nil {
 		t.Fatalf("default config path: %v", err)
 	}
-	if configPath != "/tmp/vx6-home/.config/vx6/config.json" {
+	if configPath != filepath.Join(home, ".config", "vx6", "config.json") {
 		t.Fatalf("unexpected config path %q", configPath)
 	}
 
@@ -88,7 +93,7 @@ func TestDefaultPathsUseHomeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default data dir: %v", err)
 	}
-	if dataDir != "/tmp/vx6-home/.local/share/vx6" {
+	if dataDir != filepath.Join(home, ".local", "share", "vx6") {
 		t.Fatalf("unexpected data dir %q", dataDir)
 	}
 
@@ -96,7 +101,7 @@ func TestDefaultPathsUseHomeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default download dir: %v", err)
 	}
-	if downloadDir != "/tmp/vx6-home/Downloads" {
+	if downloadDir != filepath.Join(home, "Downloads") {
 		t.Fatalf("unexpected download dir %q", downloadDir)
 	}
 }

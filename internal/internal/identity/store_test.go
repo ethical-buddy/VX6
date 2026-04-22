@@ -74,13 +74,15 @@ func TestNewStoreForConfigUsesDistinctIdentityFilesForCustomConfigs(t *testing.T
 }
 
 func TestDefaultPathUsesHomeConfigDirectory(t *testing.T) {
-	t.Setenv("HOME", "/tmp/vx6-home")
+	home := filepath.Join(t.TempDir(), "vx6-home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	path, err := DefaultPath()
 	if err != nil {
 		t.Fatalf("default path: %v", err)
 	}
-	if path != "/tmp/vx6-home/.config/vx6/identity.json" {
+	if path != filepath.Join(home, ".config", "vx6", "identity.json") {
 		t.Fatalf("unexpected default identity path %q", path)
 	}
 }
