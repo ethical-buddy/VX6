@@ -49,10 +49,19 @@ func BuildAutomatedCircuit(ctx context.Context, finalTarget record.ServiceRecord
 		}
 	}
 
-	// 4. Final step: Connect to one of the destination's IntroPoints or its direct IP
+	// 4. Final step: Connect to the target IP (or IntroPoint)
+	targetAddr := finalTarget.Address
 	if finalTarget.IsHidden && len(finalTarget.IntroPoints) > 0 {
-		// In a full implementation, we'd resolve the IntroPoint ID to an IP here
-		// For now, we assume the direct address or the last relay handles it.
+		// Pick one of the 3 intro points randomly
+		targetAddr = finalTarget.IntroPoints[rand.Intn(len(finalTarget.IntroPoints))]
+	}
+
+	if targetAddr != "" {
+		req := proto.ExtendRequest{
+			NextHop:   targetAddr,
+			CircuitID: circuitID,
+		}
+		_ = sendExtend(currConn, req)
 	}
 
 	return currConn, nil

@@ -436,28 +436,28 @@ func runConnect(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// If a chain is provided, we use the Onion Proxy logic
-	if *chain != "" || serviceRec.IsHidden {
-		fmt.Fprintf(os.Stdout, "Building 5-Hop Secure Circuit to %s...\n", *serviceName)
-		
-		registry, _ := loadLocalRegistry(cfg.Node.DataDir)
-		allPeers, _ := registry.Snapshot()
-		
-		_, err := onion.BuildAutomatedCircuit(ctx, serviceRec, allPeers)
-		if err != nil {
-			return fmt.Errorf("failed to build ghost circuit: %w", err)
+	// Define the dialer (Direct or 5-Hop Onion)
+	dialer := func(resolveCtx context.Context) (net.Conn, error) {
+		if *chain != "" || serviceRec.IsHidden {
+			fmt.Fprintf(os.Stdout, "[GHOST] Building 5-Hop Secure Circuit...\n")
+			registry, _ := loadLocalRegistry(cfg.Node.DataDir)
+			allPeers, _ := registry.Snapshot()
+			return onion.BuildAutomatedCircuit(resolveCtx, serviceRec, allPeers)
 		}
-		fmt.Fprintln(os.Stdout, "Circuit established. Tunneling data...")
-	}
 
-	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, func(resolveCtx context.Context) (string, error) {
+		// Direct Dial Fallback
 		refreshed, err := resolveServiceDistributed(resolveCtx, cfg, *serviceName)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		return refreshed.Address, nil
-	})
-}
+		var d net.Dialer
+		return d.DialContext(resolveCtx, "tcp6", refreshed.Address)
+	}
+
+	fmt.Fprintf(os.Stdout, "Forwarding %s to %s\n", *serviceName, *localListen)
+	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, dialer)
+	}
+
 
 func runService(args []string) error {
 	if len(args) == 0 {

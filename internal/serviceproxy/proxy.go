@@ -49,7 +49,7 @@ func HandleInbound(conn net.Conn, id identity.Identity, services map[string]stri
 	return proxyDuplex(secureConn, targetConn)
 }
 
-func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, resolveRemote func(context.Context) (string, error)) error {
+func ServeLocalForward(ctx context.Context, localListen string, service record.ServiceRecord, id identity.Identity, dialer func(context.Context) (net.Conn, error)) error {
 	listener, err := net.Listen("tcp", localListen)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", localListen, err)
@@ -73,14 +73,10 @@ func ServeLocalForward(ctx context.Context, localListen string, service record.S
 		go func() {
 			defer localConn.Close()
 
-			address, err := resolveRemote(ctx)
+			// Dial the remote service (either directly or via the Proxy Chain)
+			remoteConn, err := dialer(ctx)
 			if err != nil {
-				return
-			}
-
-			var dialer net.Dialer
-			remoteConn, err := dialer.DialContext(ctx, "tcp6", address)
-			if err != nil {
+				fmt.Printf("[ERROR] Failed to dial service: %v\n", err)
 				return
 			}
 			defer remoteConn.Close()
