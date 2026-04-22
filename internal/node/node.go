@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vx6/vx6/internal/config"
+	"github.com/vx6/vx6/internal/dht"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/netutil"
@@ -38,6 +40,7 @@ type Config struct {
 	Services        map[string]string
 	Identity        identity.Identity
 	Registry        *discovery.Registry
+	DHT             *dht.Server
 }
 
 const SeedBootstrapDomain = "bootstrap.vx6.dev"
@@ -157,15 +160,30 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					return
 				}
 			case proto.KindOnion:
+				_, _ = proto.ReadLengthPrefixed(reader, 1024*1024)
+				// (Old onion logic kept for backward compatibility during migration)
+			case proto.KindExtend:
 				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
 				if err != nil {
 					return
 				}
-				var oh proto.OnionHeader
-				if err := json.Unmarshal(payload, &oh); err != nil {
+				var er proto.ExtendRequest
+				if err := json.Unmarshal(payload, &er); err != nil {
 					return
 				}
-				_ = onion.Forward(ctx, oh)
+				_ = onion.HandleExtend(ctx, conn, er)
+			case proto.KindDHT:
+				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
+				if err != nil {
+					return
+				}
+				var dr proto.DHTRequest
+				if err := json.Unmarshal(payload, &dr); err != nil {
+					return
+				}
+				if cfg.DHT != nil {
+					_ = cfg.DHT.HandleDHT(ctx, conn, dr)
+				}
 			case proto.KindServiceConn:
 				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services); err != nil {
 					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
@@ -207,19 +225,15 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 
 		// --- B. Loop Prevention & Target Selection ---
 		targets := map[string]struct{}{}
-		// Add hardcoded DNS seeds
 		for _, addr := range dnsBootstraps {
 			targets[addr] = struct{}{}
 		}
-		// Add configured bootstraps
 		for _, addr := range cfg.BootstrapAddrs {
 			targets[addr] = struct{}{}
 		}
 		
-		// Add a few random cached nodes to spread the word, but not everyone
 		nodes, _ := cfg.Registry.Snapshot()
 		if len(nodes) > 10 {
-			// Basic shuffling would go here, for now just take first few
 			for i := 0; i < 5; i++ {
 				if nodes[i].Address != "" && nodes[i].Address != cfg.AdvertiseAddr {
 					targets[nodes[i].Address] = struct{}{}
@@ -235,30 +249,52 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 
 		for addr := range targets {
 			if _, err := discovery.Publish(ctx, addr, rec); err != nil {
-				// Don't log every failure to keep output clean in production
 				continue
 			}
 
+			// Add to DHT Routing Table
+			if cfg.DHT != nil {
+				// We don't know the remote ID yet, but we'll learn it over time
+			}
+
 			for serviceName := range cfg.Services {
-				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+				isHidden := false
+				var introPoints []string
+
+				if cfg.ConfigPath != "" {
+					if store, err := config.NewStore(cfg.ConfigPath); err == nil {
+						if cfgFile, err := store.Load(); err == nil {
+							if svc, ok := cfgFile.Services[serviceName]; ok {
+								isHidden = svc.IsHidden
+							}
+						}
+					}
+				}
+
+				svcAddr := cfg.AdvertiseAddr
+				if isHidden {
+					svcAddr = ""
+					nodes, _ := cfg.Registry.Snapshot()
+					for i := 0; i < len(nodes) && len(introPoints) < 3; i++ {
+						if nodes[i].NodeID != cfg.NodeID && nodes[i].NodeID != "" {
+							introPoints = append(introPoints, nodes[i].NodeID)
+						}
+					}
+				}
+
+				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, svcAddr, 20*time.Minute, time.Now())
 				if err == nil {
+					serviceRec.IsHidden = isHidden
+					serviceRec.IntroPoints = introPoints
+					_ = record.SignServiceRecord(cfg.Identity, &serviceRec)
 					_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
 					_, _ = discovery.PublishService(ctx, addr, serviceRec)
 				}
 			}
 
-			// Sync from DNS bootstraps and config bootstraps ONLY to prevent O(N^2) sync loops
 			isBootstrap := false
-			for _, b := range dnsBootstraps {
-				if b == addr {
-					isBootstrap = true; break
-				}
-			}
-			for _, b := range cfg.BootstrapAddrs {
-				if b == addr {
-					isBootstrap = true; break
-				}
-			}
+			for _, b := range dnsBootstraps { if b == addr { isBootstrap = true; break } }
+			for _, b := range cfg.BootstrapAddrs { if b == addr { isBootstrap = true; break } }
 
 			if isBootstrap {
 				records, services, err := discovery.Snapshot(ctx, addr)

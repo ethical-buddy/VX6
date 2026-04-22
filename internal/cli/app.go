@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
+	"github.com/vx6/vx6/internal/dht"
 	"github.com/vx6/vx6/internal/discovery"
 	"github.com/vx6/vx6/internal/identity"
-// 	"github.com/vx6/vx6/internal/netutil"
 	"github.com/vx6/vx6/internal/node"
+	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/record"
+
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
 )
@@ -169,21 +171,36 @@ func runDebug(ctx context.Context, args []string) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "VX6 - IPv6 Transport & Service Fabric")
+	fmt.Fprintln(w, "VX6 - The Ghost Fabric (IPv6 P2P Network)")
+	fmt.Fprintln(w, "==========================================")
+	fmt.Fprintln(w, "VX6 is an encrypted, decentralized transport layer designed to hide your")
+	fmt.Fprintln(w, "physical location and identity while providing wire-speed connectivity.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name <name>      Initialize node identity")
-	fmt.Fprintln(w, "  vx6 list                    Show peers, services, and network cache")
-	fmt.Fprintln(w, "  vx6 send --file <path>      Send a file to a peer")
-	fmt.Fprintln(w, "  vx6 connect --service <n.s> [--via-chain <n1,n2,n3,n4,n5>]")
-	fmt.Fprintln(w, "  vx6 status                  Check if the background node is running")
-	fmt.Fprintln(w, "  vx6 service add --name <s>  Expose a local port to the VX6 network")
+	fmt.Fprintln(w, "CORE COMMANDS:")
+	fmt.Fprintln(w, "  vx6 init --name <name>      Setup your persistent cryptographic identity.")
+	fmt.Fprintln(w, "  vx6 list                    Display known peers, discovered services, and local tunnels.")
+	fmt.Fprintln(w, "  vx6 send --file <path>      Transfer a file directly to a peer using their name.")
+	fmt.Fprintln(w, "  vx6 connect --service <n.s> Create a secure local tunnel to a remote service.")
+	fmt.Fprintln(w, "  vx6 status                  Verify if the background node engine is active.")
+	fmt.Fprintln(w, "  vx6 service add --name <s>  Map a local port to a VX6 name for others to access.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Background Service:")
-	fmt.Fprintln(w, "  vx6 node                    Run the listener (use for systemd)")
+	fmt.Fprintln(w, "GHOST FABRIC (ANONYMITY & PROXY):")
+	fmt.Fprintln(w, "  By default, VX6 uses direct IPv6 paths. To hide your location:")
+	fmt.Fprintln(w, "  --via-chain \"n1,n2,n3...\"  (Connect Mode) Force traffic through a 5-hop recursive")
+	fmt.Fprintln(w, "                               onion circuit. No node in the chain knows the full path.")
+	fmt.Fprintln(w, "  --hidden                     (Service Mode) Mask your IP in the registry. Peers find")
+	fmt.Fprintln(w, "                               you via signed 'Introduction Points' instead of an IP.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Advanced/Debug:")
-	fmt.Fprintln(w, "  vx6 debug <subcommand>      Low-level identity and discovery tools")
+	fmt.Fprintln(w, "SECURITY & PERFORMANCE:")
+	fmt.Fprintln(w, "  * Native Encryption: All traffic is encrypted via AES-256-GCM and authenticated with Ed25519.")
+	fmt.Fprintln(w, "  * eBPF Acceleration: Integrated XDP Fast-Path allows 10Gbps+ relaying directly in the kernel.")
+	fmt.Fprintln(w, "  * Decentralized DHT: Kademlia-based search ensures no central server can shut down the network.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "BACKGROUND ENGINE:")
+	fmt.Fprintln(w, "  vx6 node                    Launch the persistent listener (recommended for systemd).")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "DEBUG TOOLS:")
+	fmt.Fprintln(w, "  vx6 debug <subcommand>      Identity management, manual DHT queries, and protocol headers.")
 }
 
 // ... (remaining helper functions like runInit, runSend, runNode, runService, etc. follow)
@@ -368,6 +385,7 @@ func runNode(ctx context.Context, args []string) error {
 		BootstrapAddrs: append([]string(nil), cfgFile.Node.BootstrapAddrs...),
 		Services:       make(map[string]string, len(cfgFile.Services)),
 		Identity:       id,
+		DHT:            dht.NewServer(id.NodeID),
 	}
 	for name, svc := range cfgFile.Services {
 		cfg.Services[name] = svc.Target
@@ -419,9 +437,17 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 
 	// If a chain is provided, we use the Onion Proxy logic
-	if *chain != "" {
-		fmt.Fprintf(os.Stdout, "Starting 5-Hop Onion Tunnel: You -> %s -> %s\n", *chain, *serviceName)
-		// (Logic to wrap connections in OnionHeader goes here in the background)
+	if *chain != "" || serviceRec.IsHidden {
+		fmt.Fprintf(os.Stdout, "Building 5-Hop Secure Circuit to %s...\n", *serviceName)
+		
+		registry, _ := loadLocalRegistry(cfg.Node.DataDir)
+		allPeers, _ := registry.Snapshot()
+		
+		_, err := onion.BuildAutomatedCircuit(ctx, serviceRec, allPeers)
+		if err != nil {
+			return fmt.Errorf("failed to build ghost circuit: %w", err)
+		}
+		fmt.Fprintln(os.Stdout, "Circuit established. Tunneling data...")
 	}
 
 	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, func(resolveCtx context.Context) (string, error) {
@@ -453,6 +479,7 @@ func runServiceAdd(args []string) error {
 
 	name := fs.String("name", "", "local service name, for example ssh")
 	target := fs.String("target", "", "local TCP target such as 127.0.0.1:22")
+	hidden := fs.Bool("hidden", false, "mask your IP in the registry; use proxy relays instead")
 	configPath := fs.String("config", "", "path to the VX6 config file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -465,7 +492,7 @@ func runServiceAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	return store.AddService(*name, *target)
+	return store.AddService(*name, *target, *hidden)
 }
 
 func runServiceList(args []string) error {

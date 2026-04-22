@@ -13,8 +13,32 @@ const (
 	KindDiscoveryReq byte = 2
 	KindDiscoveryRes byte = 3
 	KindServiceConn  byte = 4
-	KindOnion        byte = 5 // New: Onion-routed traffic
+	KindOnion        byte = 5
+	KindExtend       byte = 6
+	KindRendezvous   byte = 7
+	KindDHT          byte = 8 // New: Distributed Hash Table
 )
+
+type DHTRequest struct {
+	Action string `json:"action"` // "find_node", "find_value", "store"
+	Target string `json:"target"` // NodeID or Service Name we are looking for
+	Data   string `json:"data"`   // The value to store (e.g. a signed record)
+}
+
+type DHTResponse struct {
+	Nodes []NodeInfo `json:"nodes"` // Closest nodes to the target
+	Value string     `json:"value"` // Found address/descriptor (if any)
+}
+
+type NodeInfo struct {
+	ID   string `json:"id"`
+	Addr string `json:"addr"`
+}
+
+type ExtendRequest struct {
+	NextHop    string `json:"next_hop"`    // The address of the next node to add to the chain
+	CircuitID  string `json:"circuit_id"`  // Unique ID for this specific tunnel
+}
 
 type OnionHeader struct {
 	HopCount int      `json:"hop_count"` // Current hop (0-4)

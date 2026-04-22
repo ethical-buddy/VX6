@@ -30,7 +30,8 @@ type PeerEntry struct {
 }
 
 type ServiceEntry struct {
-	Target string `json:"target"`
+	Target   string `json:"target"`
+	IsHidden bool   `json:"is_hidden"`
 }
 
 type Store struct {
@@ -169,13 +170,13 @@ func (s *Store) ListBootstraps() ([]string, error) {
 	return out, nil
 }
 
-func (s *Store) AddService(name, target string) error {
+func (s *Store) AddService(name, target string, isHidden bool) error {
 	cfg, err := s.Load()
 	if err != nil {
 		return err
 	}
 
-	cfg.Services[name] = ServiceEntry{Target: target}
+	cfg.Services[name] = ServiceEntry{Target: target, IsHidden: isHidden}
 	return s.Save(cfg)
 }
 

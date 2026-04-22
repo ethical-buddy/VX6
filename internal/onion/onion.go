@@ -4,10 +4,67 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
+	"time"
 
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/record"
 )
+
+// BuildAutomatedCircuit picks random peers and builds a 5-hop recursive tunnel.
+func BuildAutomatedCircuit(ctx context.Context, finalTarget record.ServiceRecord, allPeers []record.EndpointRecord) (net.Conn, error) {
+	if len(allPeers) < 5 {
+		return nil, fmt.Errorf("not enough peers in registry to build a 5-hop chain (need 5, have %d)", len(allPeers))
+	}
+
+	// 1. Pick 5 random unique relays
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(allPeers), func(i, j int) { allPeers[i], allPeers[j] = allPeers[j], allPeers[i] })
+	relays := allPeers[:5]
+
+	fmt.Printf("[GHOST] Building automated circuit via: ")
+	for _, r := range relays {
+		fmt.Printf("%s -> ", r.NodeName)
+	}
+	fmt.Printf("TARGET\n")
+
+	// 2. Connect to first hop
+	currConn, err := net.Dial("tcp6", relays[0].Address)
+	if err != nil {
+		return nil, fmt.Errorf("first hop connection failed: %w", err)
+	}
+
+	circuitID := fmt.Sprintf("auto_%d", rand.Intn(1000000))
+
+	// 3. Recursively extend to the rest
+	for i := 1; i < 5; i++ {
+		req := proto.ExtendRequest{
+			NextHop:   relays[i].Address,
+			CircuitID: circuitID,
+		}
+		if err := sendExtend(currConn, req); err != nil {
+			currConn.Close()
+			return nil, err
+		}
+	}
+
+	// 4. Final step: Connect to one of the destination's IntroPoints or its direct IP
+	if finalTarget.IsHidden && len(finalTarget.IntroPoints) > 0 {
+		// In a full implementation, we'd resolve the IntroPoint ID to an IP here
+		// For now, we assume the direct address or the last relay handles it.
+	}
+
+	return currConn, nil
+}
+
+func sendExtend(conn net.Conn, req proto.ExtendRequest) error {
+	if err := proto.WriteHeader(conn, proto.KindExtend); err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(req)
+	return proto.WriteLengthPrefixed(conn, payload)
+}
 
 // Forward handles an incoming onion packet and sends it to the next hop.
 func Forward(ctx context.Context, header proto.OnionHeader) error {
