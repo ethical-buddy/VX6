@@ -1,0 +1,33 @@
+{
+  "ok": false,
+  "record": {
+    "node_id": "",
+    "node_name": "",
+    "address": "",
+    "public_key": "",
+    "issued_at": "",
+    "expires_at": "",
+    "signature": ""
+  },
+  "service_record": {
+    "node_id": "",
+    "node_name": "",
+    "service_name": "",
+    "address": "",
+    "public_key": "",
+    "issued_at": "",
+    "expires_at": "",
+    "signature": ""
+  },
+  "records": [
+    {
+      "node_id": "vx6_9dba4ed11f7b9c0a",
+      "node_name": "parkhi",
+      "address": "[2401:4900:bbab:d52a:3fc4:d1c2:b30e:f392]:4242",
+      "public_key": "mdrl63KT0RSKPcxjcJNRmO0UPKL7XSEmzklk7QzJCPw=",
+      "issued_at": "2026-04-21T13:49:21Z",
+      "expires_at": "2026-04-21T14:09:21Z",
+      "signature": "GlzKHnmklPR5oN7PJIkLmA8Es+jaAvYxQHi424aFlIUukifiYeQpEI2a5GMWWgi5ysrhnI1PfDm+K+f+8tpvBA=="
+    }
+  ]
+}

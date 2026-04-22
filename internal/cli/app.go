@@ -23,6 +23,8 @@ import (
 
 type stringListFlag []string
 
+var verbose bool
+
 func (s *stringListFlag) String() string { return fmt.Sprint([]string(*s)) }
 
 func (s *stringListFlag) Set(value string) error {
@@ -31,6 +33,18 @@ func (s *stringListFlag) Set(value string) error {
 }
 
 func Run(ctx context.Context, args []string) error {
+	global := flag.NewFlagSet("vx6", flag.ContinueOnError)
+	global.SetOutput(io.Discard)
+
+	global.BoolVar(&verbose, "v", false, "verbose output")
+	global.BoolVar(&verbose, "verbose", false, "verbose output")
+
+	if err := global.Parse(args); err != nil {
+		return err
+	}
+
+	args = global.Args()
+
 	if len(args) == 0 {
 		printUsage(os.Stderr)
 		return errors.New("missing command")
@@ -193,11 +207,44 @@ func runSend(ctx context.Context, args []string) error {
 		*address = resolvedAddr
 	}
 
+	//intial verbose output before attempting to send, so that any errors from transfer.SendFile are more likely to be seen by the user
+	if verbose {
+		fileInfo, err := os.Stat(*filePath)
+		if err == nil {
+			fmt.Fprintf(os.Stderr, "[SEND] file=%s\n", *filePath)
+			fmt.Fprintf(os.Stderr, "[SEND] size=%d bytes\n", fileInfo.Size())
+			fmt.Fprintf(os.Stderr, "[SEND] from=%s\n", *nodeName)
+			fmt.Fprintf(os.Stderr, "[SEND] to=%s\n", *address)
+		}
+	}
+
+	//verbose output during file transfer, showing progress percentage and bytes sent/total; uses carriage return to update the same line, and prints a newline when done
+
 	req := transfer.SendRequest{
 		NodeName: *nodeName,
 		FilePath: *filePath,
 		Address:  *address,
 		Identity: id,
+	}
+
+	if verbose {
+		req.OnProgress = func(sent, total int64) {
+			percent := float64(sent) * 100 / float64(total)
+
+			fmt.Fprintf(
+				os.Stderr,
+				"\r[SEND] %s -> %s | %5.1f%% | %d / %d bytes",
+				req.NodeName,
+				req.Address,
+				percent,
+				sent,
+				total,
+			)
+
+			if sent == total {
+				fmt.Fprintln(os.Stderr)
+			}
+		}
 	}
 
 	result, err := transfer.SendFile(ctx, req)
@@ -275,6 +322,7 @@ func runNode(ctx context.Context, args []string) error {
 		BootstrapAddrs: append([]string(nil), cfgFile.Node.BootstrapAddrs...),
 		Services:       make(map[string]string, len(cfgFile.Services)),
 		Identity:       id,
+		Verbose:        verbose,
 	}
 	for name, svc := range cfgFile.Services {
 		cfg.Services[name] = svc.Target
@@ -945,6 +993,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 service add --name <service> --target 127.0.0.1:22")
 	fmt.Fprintln(w, "  vx6 service list")
 	fmt.Fprintln(w, "  vx6 send [--name <node-name>] --file <path> (--addr [ipv6]:port | --to <peer-name>)")
+	fmt.Fprintln(w, "  vx6 --verbose || -v ... (for more detailed output)")
 }
 
 func runDiscoverList(args []string) error {
