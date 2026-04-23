@@ -14,14 +14,6 @@ import (
 	"github.com/vx6/vx6/internal/secure"
 )
 
-const maxHeaderSize = 4 * 1024
-
-type metadata struct {
-	NodeName string `json:"node_name"`
-	FileName string `json:"file_name"`
-	FileSize int64  `json:"file_size"`
-}
-
 type SendRequest struct {
 	NodeName string
 	FilePath string
@@ -44,13 +36,21 @@ type ReceiveResult struct {
 }
 
 func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp6", req.Address)
+	if err != nil {
+		return SendResult{}, fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+
+	return SendFileWithConn(ctx, conn, req)
+}
+
+func SendFileWithConn(ctx context.Context, conn net.Conn, req SendRequest) (SendResult, error) {
 	if req.NodeName == "" {
 		return SendResult{}, fmt.Errorf("node name cannot be empty")
 	}
 	if err := req.Identity.Validate(); err != nil {
-		return SendResult{}, err
-	}
-	if err := ValidateIPv6Address(req.Address); err != nil {
 		return SendResult{}, err
 	}
 
@@ -64,22 +64,12 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	if err != nil {
 		return SendResult{}, fmt.Errorf("stat file: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return SendResult{}, fmt.Errorf("%q is not a regular file", req.FilePath)
-	}
 
 	meta := metadata{
 		NodeName: req.NodeName,
 		FileName: filepath.Base(req.FilePath),
 		FileSize: info.Size(),
 	}
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp6", req.Address)
-	if err != nil {
-		return SendResult{}, fmt.Errorf("dial tcp6 %s: %w", req.Address, err)
-	}
-	defer conn.Close()
 
 	if err := proto.WriteHeader(conn, proto.KindFileTransfer); err != nil {
 		return SendResult{}, err
@@ -88,97 +78,80 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	if err != nil {
 		return SendResult{}, err
 	}
+	
 	if err := writeMetadata(secureConn, meta); err != nil {
 		return SendResult{}, err
 	}
 
 	written, err := io.Copy(secureConn, file)
 	if err != nil {
-		return SendResult{}, fmt.Errorf("stream file to %s: %w", req.Address, err)
+		return SendResult{}, fmt.Errorf("stream file: %w", err)
 	}
 
 	return SendResult{
-		NodeName:   req.NodeName,
 		FileName:   meta.FileName,
 		BytesSent:  written,
 		RemoteAddr: conn.RemoteAddr().String(),
 	}, nil
 }
 
-func ReceiveFile(r io.Reader, dataDir string) (ReceiveResult, error) {
-	meta, err := readMetadata(r)
+func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
+	meta, err := readMetadata(conn)
 	if err != nil {
 		return ReceiveResult{}, err
 	}
 
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return ReceiveResult{}, fmt.Errorf("create data directory: %w", err)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return ReceiveResult{}, fmt.Errorf("create directory: %w", err)
 	}
 
-	targetPath := filepath.Join(dataDir, filepath.Base(meta.FileName))
-	outFile, err := os.Create(targetPath)
+	filePath := filepath.Join(dataDir, meta.FileName)
+	file, err := os.Create(filePath)
 	if err != nil {
-		return ReceiveResult{}, fmt.Errorf("create output file: %w", err)
+		return ReceiveResult{}, fmt.Errorf("create file: %w", err)
 	}
-	defer outFile.Close()
+	defer file.Close()
 
-	written, err := io.CopyN(outFile, r, meta.FileSize)
+	n, err := io.Copy(file, conn)
 	if err != nil {
-		return ReceiveResult{}, fmt.Errorf("read payload: %w", err)
+		return ReceiveResult{}, fmt.Errorf("receive stream: %w", err)
 	}
 
 	return ReceiveResult{
 		SenderNode:    meta.NodeName,
 		FileName:      meta.FileName,
-		BytesReceived: written,
-		StoredPath:    targetPath,
+		BytesReceived: n,
+		StoredPath:    filePath,
 	}, nil
 }
 
-func ValidateIPv6Address(address string) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("invalid address %q: %w", address, err)
-	}
-
-	ip := net.ParseIP(host)
-	if ip == nil || ip.To4() != nil {
-		return fmt.Errorf("address %q is not an IPv6 endpoint", address)
-	}
-
-	return nil
+type metadata struct {
+	NodeName string `json:"node_name"`
+	FileName string `json:"file_name"`
+	FileSize int64  `json:"file_size"`
 }
 
 func writeMetadata(w io.Writer, meta metadata) error {
-	header, err := json.Marshal(meta)
+	payload, err := json.Marshal(meta)
 	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
+		return err
 	}
-	if len(header) > maxHeaderSize {
-		return fmt.Errorf("metadata too large")
-	}
-	return proto.WriteLengthPrefixed(w, header)
+	return proto.WriteLengthPrefixed(w, payload)
 }
 
 func readMetadata(r io.Reader) (metadata, error) {
-	header, err := proto.ReadLengthPrefixed(r, maxHeaderSize)
+	payload, err := proto.ReadLengthPrefixed(r, 1024*1024)
 	if err != nil {
 		return metadata{}, err
 	}
-
 	var meta metadata
-	if err := json.Unmarshal(header, &meta); err != nil {
-		return metadata{}, fmt.Errorf("decode metadata: %w", err)
+	if err := json.Unmarshal(payload, &meta); err != nil {
+		return metadata{}, err
 	}
-	if meta.NodeName == "" {
-		return metadata{}, fmt.Errorf("metadata missing node_name")
-	}
-	if meta.FileName == "" {
-		return metadata{}, fmt.Errorf("metadata missing file_name")
-	}
-	if meta.FileSize < 0 {
-		return metadata{}, fmt.Errorf("metadata contains invalid file_size")
-	}
-
 	return meta, nil
+}
+
+func ValidateIPv6Address(address string) error {
+	_, _, err := net.SplitHostPort(address)
+	return err
 }

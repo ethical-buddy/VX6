@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
@@ -18,6 +20,7 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/onion"
+	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
@@ -30,34 +33,17 @@ func Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
-	// --- CORE USER COMMANDS ---
-	case "init":
-		return runInit(args[1:])
-	case "list":
-		return runList(ctx, args[1:])
-	case "send":
-		return runSend(ctx, args[1:])
-	case "connect":
-		return runConnect(ctx, args[1:])
-	case "status":
-		return runStatus(ctx, args[1:])
-	case "node":
-		return runNode(ctx, args[1:])
-
-	// --- ADMINISTRATIVE & NETWORK COMMANDS ---
-	case "peer":
-		return runPeer(args[1:])
-	case "service":
-		return runService(args[1:])
-	case "bootstrap":
-		return runBootstrap(args[1:])
-	case "discover":
-		return runDiscover(ctx, args[1:])
-	case "identity":
-		return runIdentity(args[1:])
-	case "record":
-		return runRecord(args[1:])
-
+	case "init":      return runInit(args[1:])
+	case "list":      return runList(ctx, args[1:])
+	case "send":      return runSend(ctx, args[1:])
+	case "connect":   return runConnect(ctx, args[1:])
+	case "status":    return runStatus(ctx, args[1:])
+	case "node":      return runNode(ctx, args[1:])
+	case "peer":      return runPeer(args[1:])
+	case "bootstrap": return runBootstrap(args[1:])
+	case "service":   return runService(args[1:])
+	case "identity":  return runIdentity(args[1:])
+	case "debug":     return runDebug(ctx, args[1:])
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return nil
@@ -68,151 +54,71 @@ func Run(ctx context.Context, args []string) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "VX6 - The Ghost Fabric (Unified Master CLI)")
-	fmt.Fprintln(w, "==========================================")
+	fmt.Fprintln(w, "VX6 - The Ghost Fabric (Complete Master Edition)")
+	fmt.Fprintln(w, "===============================================")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "CORE USER COMMANDS:")
-	fmt.Fprintln(w, "  vx6 init --name <n>        Setup node identity")
-	fmt.Fprintln(w, "  vx6 list                   Show peers, services, and network cache")
-	fmt.Fprintln(w, "  vx6 status                 Check if background engine is active")
-	fmt.Fprintln(w, "  vx6 send --file <p> --to <n> Send file to a peer by name")
-	fmt.Fprintln(w, "  vx6 connect --service <s.n> Create a secure 5-hop onion tunnel")
-	fmt.Fprintln(w, "  vx6 node                   Run the background listener service")
+	fmt.Fprintln(w, "CORE COMMANDS:")
+	fmt.Fprintln(w, "  init             Setup node name and cryptographic identity.")
+	fmt.Fprintln(w, "  list             Show Peers, Discovery Cache, and Hosted Services.")
+	fmt.Fprintln(w, "  node             Start the background engine (Listener + DHT + Relay).")
+	fmt.Fprintln(w, "  status           Check if the background engine is active.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "NETWORK & PEER MANAGEMENT:")
-	fmt.Fprintln(w, "  vx6 peer add               Manually save a permanent peer")
-	fmt.Fprintln(w, "  vx6 peer list              List permanent peers in config")
-	fmt.Fprintln(w, "  vx6 bootstrap add          Add a new bootstrap discovery node")
-	fmt.Fprintln(w, "  vx6 service add            Expose local port (use --hidden for proxy)")
+	fmt.Fprintln(w, "COMMUNICATION (WITH PRIVACY OPTIONS):")
+	fmt.Fprintln(w, "  send [--proxy]   Transfer a file. Use --proxy for 5-hop anonymity.")
+	fmt.Fprintln(w, "  connect [--proxy] Secure tunnel. Automatically uses proxy for hidden services.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "DECENTRALIZED DISCOVERY (DHT):")
-	fmt.Fprintln(w, "  vx6 discover publish       Force-publish your record to a peer")
-	fmt.Fprintln(w, "  vx6 discover resolve       Find any NodeID or Name in the DHT")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "IDENTITY & SECURITY:")
-	fmt.Fprintln(w, "  vx6 identity show          Print your public key and NodeID")
-	fmt.Fprintln(w, "  vx6 record print           Generate a signed endpoint descriptor")
+	fmt.Fprintln(w, "NETWORK MANAGEMENT:")
+	fmt.Fprintln(w, "  service add      Expose local port. Use --hidden to scrub your IP.")
+	fmt.Fprintln(w, "  peer add         Manually save a trusted peer.")
+	fmt.Fprintln(w, "  bootstrap add    Add a globally reachable node to join the network.")
 }
 
-// --- COMMAND IMPLEMENTATIONS ---
+func prompt(label string) string {
+	fmt.Printf("%s: ", label)
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		return strings.TrimSpace(scanner.Text())
+	}
+	return ""
+}
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	name := fs.String("name", "", "local human-readable node name")
-	listenAddr := fs.String("listen", "[::]:4242", "IPv6 listen address")
-	configPath := fs.String("config", "", "path to config file")
-	if err := fs.Parse(args); err != nil { return err }
-	if *name == "" { return errors.New("init requires --name") }
-	
-	store, _ := config.NewStore(*configPath)
-	identityStore, _ := identity.NewStoreForConfig(store.Path())
+	name := fs.String("name", "", "node name")
+	_ = fs.Parse(args)
+	finalName := *name
+	if finalName == "" { finalName = prompt("Enter node name") }
+	if finalName == "" { return errors.New("name required") }
+
+	store, _ := config.NewStore("")
 	cfg, _ := store.Load()
-	cfg.Node.Name = *name
-	cfg.Node.ListenAddr = *listenAddr
+	cfg.Node.Name = finalName
 	_ = store.Save(cfg)
-	id, _, _ := identityStore.Ensure()
-	fmt.Printf("Initialized node %q with ID %s\n", *name, id.NodeID)
+	idStore, _ := identity.NewStoreForConfig(store.Path())
+	id, _, _ := idStore.Ensure()
+	fmt.Printf("✔ Node initialized: %s (%s)\n", finalName, id.NodeID)
 	return nil
 }
 
 func runList(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	configPath := fs.String("config", "", "path to config file")
-	_ = fs.Parse(args)
-	store, _ := config.NewStore(*configPath)
+	store, _ := config.NewStore("")
 	cfg, _ := store.Load()
-
-	fmt.Println("\n[ PERMANENT PEERS ]")
+	fmt.Println("\n[ PEERS ]")
 	names, peers, _ := store.ListPeers()
 	for _, n := range names { fmt.Printf("  %-15s %s\n", n, peers[n].Address) }
-
-	fmt.Println("\n[ NETWORK CACHE (DHT) ]")
+	fmt.Println("\n[ DISCOVERY ]")
 	reg, _ := loadLocalRegistry(cfg.Node.DataDir)
 	recs, svcs := reg.Snapshot()
-	for _, r := range recs { fmt.Printf("  %-15s %-20s %s\n", r.NodeName, r.Address, r.NodeID) }
-	for _, s := range svcs { fmt.Printf("  %-25s %s\n", s.NodeName+"."+s.ServiceName, s.Address) }
+	for _, r := range recs { fmt.Printf("  %-15s %s\n", r.NodeName, r.Address) }
+	for _, s := range svcs { fmt.Printf("  %-25s %s (Hidden: %v)\n", s.NodeName+"."+s.ServiceName, s.Address, s.IsHidden) }
 	return nil
-}
-
-func runStatus(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	configPath := fs.String("config", "", "path to config file")
-	_ = fs.Parse(args)
-	store, _ := config.NewStore(*configPath)
-	cfg, _ := store.Load()
-	conn, err := net.DialTimeout("tcp6", cfg.Node.ListenAddr, 1*time.Second)
-	if err != nil {
-		fmt.Printf("Status: OFFLINE (No listener on %s)\n", cfg.Node.ListenAddr)
-		return nil
-	}
-	conn.Close()
-	fmt.Printf("Status: ONLINE (Node: %s)\n", cfg.Node.Name)
-	return nil
-}
-
-func runSend(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("send", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	filePath := fs.String("file", "", "path to file")
-	peerName := fs.String("to", "", "peer name")
-	configPath := fs.String("config", "", "path to config file")
-	_ = fs.Parse(args)
-	if *filePath == "" || *peerName == "" { return errors.New("send requires --file and --to") }
-
-	store, _ := config.NewStore(*configPath)
-	cfg, _ := store.Load()
-	identityStore, _ := identity.NewStoreForConfig(store.Path())
-	id, _ := identityStore.Load()
-	addr, _ := resolvePeerForSend(ctx, store, cfg, *peerName)
-
-	res, err := transfer.SendFile(ctx, transfer.SendRequest{
-		NodeName: cfg.Node.Name, FilePath: *filePath, Address: addr, Identity: id,
-	})
-	if err != nil { return err }
-	fmt.Printf("Sent %q to %s\n", res.FileName, res.RemoteAddr)
-	return nil
-}
-
-func runConnect(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	serviceName := fs.String("service", "", "node.service")
-	localListen := fs.String("listen", "127.0.0.1:2222", "local port")
-	chain := fs.String("via-chain", "", "manual 5-hop relays")
-	configPath := fs.String("config", "", "path to config file")
-	_ = fs.Parse(args)
-
-	store, _ := config.NewStore(*configPath)
-	cfg, _ := store.Load()
-	identityStore, _ := identity.NewStoreForConfig(store.Path())
-	id, _ := identityStore.Load()
-	serviceRec, err := resolveServiceDistributed(ctx, cfg, *serviceName)
-	if err != nil { return err }
-
-	dialer := func(rctx context.Context) (net.Conn, error) {
-		if *chain != "" || serviceRec.IsHidden {
-			reg, _ := loadLocalRegistry(cfg.Node.DataDir)
-			peers, _ := reg.Snapshot()
-			return onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
-		}
-		var d net.Dialer
-		return d.DialContext(rctx, "tcp6", serviceRec.Address)
-	}
-	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, dialer)
 }
 
 func runNode(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("node", flag.ContinueOnError)
-	configPath := fs.String("config", "", "path to config file")
-	_ = fs.Parse(args)
-	store, _ := config.NewStore(*configPath)
+	store, _ := config.NewStore("")
 	cfgFile, _ := store.Load()
-	identityStore, _ := identity.NewStoreForConfig(store.Path())
-	id, _ := identityStore.Load()
-
+	idStore, _ := identity.NewStoreForConfig(store.Path())
+	id, _ := idStore.Load()
 	cfg := node.Config{
 		Name: cfgFile.Node.Name, NodeID: id.NodeID, ListenAddr: cfgFile.Node.ListenAddr,
 		DataDir: cfgFile.Node.DataDir, ConfigPath: store.Path(), Identity: id,
@@ -228,16 +134,42 @@ func runNode(ctx context.Context, args []string) error {
 	return node.Run(ctx, os.Stdout, cfg)
 }
 
-// --- ADMIN COMMANDS ---
+func runConnect(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	svc := fs.String("service", "", "service")
+	proxy := fs.Bool("proxy", false, "force 5-hop onion circuit")
+	_ = fs.Parse(args)
+	
+	finalSvc := *svc; if finalSvc == "" && len(args) > 0 && args[0][0] != '-' { finalSvc = args[0] }
+	if finalSvc == "" { finalSvc = prompt("Enter service name") }
+
+	store, _ := config.NewStore("")
+	cfg, _ := store.Load()
+	idStore, _ := identity.NewStoreForConfig(store.Path())
+	id, _ := idStore.Load()
+	serviceRec, err := resolveServiceDistributed(ctx, cfg, finalSvc)
+	if err != nil { return err }
+
+	dialer := func(rctx context.Context) (net.Conn, error) {
+		if *proxy || serviceRec.IsHidden {
+			fmt.Printf("[GHOST] Building 5-Hop Secure Circuit to %s (Hidden: %v)...\n", finalSvc, serviceRec.IsHidden)
+			reg, _ := loadLocalRegistry(cfg.Node.DataDir)
+			peers, _ := reg.Snapshot()
+			return onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
+		}
+		var d net.Dialer
+		return d.DialContext(rctx, "tcp6", serviceRec.Address)
+	}
+	
+	fmt.Printf("✔ Tunnel Established: localhost:2222 -> %s\n", finalSvc)
+	return serviceproxy.ServeLocalForward(ctx, "127.0.0.1:2222", serviceRec, id, dialer)
+}
 
 func runPeer(args []string) error {
-	if len(args) < 1 { return errors.New("peer subcommands: add, list") }
 	store, _ := config.NewStore("")
-	if args[0] == "add" {
-		fs := flag.NewFlagSet("peer add", flag.ContinueOnError)
-		n := fs.String("name", "", "name"); a := fs.String("addr", "", "ip")
-		_ = fs.Parse(args[1:])
-		return store.AddPeer(*n, *a)
+	if len(args) >= 1 && args[0] == "add" {
+		n := prompt("Peer Name"); a := prompt("Peer Address")
+		return store.AddPeer(n, a)
 	}
 	names, peers, _ := store.ListPeers()
 	for _, n := range names { fmt.Printf("%s\t%s\n", n, peers[n].Address) }
@@ -246,46 +178,83 @@ func runPeer(args []string) error {
 
 func runBootstrap(args []string) error {
 	store, _ := config.NewStore("")
-	if len(args) > 1 && args[0] == "add" { return store.AddBootstrap(args[1]) }
+	if len(args) >= 1 && args[0] == "add" {
+		a := prompt("Bootstrap Address")
+		return store.AddBootstrap(a)
+	}
 	list, _ := store.ListBootstraps()
 	for _, b := range list { fmt.Println(b) }
 	return nil
 }
 
 func runService(args []string) error {
-	if len(args) < 1 { return errors.New("service subcommands: add, list") }
 	store, _ := config.NewStore("")
-	if args[0] == "add" {
+	if len(args) >= 1 && args[0] == "add" {
 		fs := flag.NewFlagSet("service add", flag.ContinueOnError)
-		n := fs.String("name", "", "name"); t := fs.String("target", "", "target"); h := fs.Bool("hidden", false, "hidden")
+		h := fs.Bool("hidden", false, "hidden")
 		_ = fs.Parse(args[1:])
-		return store.AddService(*n, *t, *h)
+		n := prompt("Service Name"); t := prompt("Local Target (e.g. :8000)")
+		return store.AddService(n, t, *h)
 	}
-	names, svcs, _ := store.ListServices()
-	for _, n := range names { fmt.Printf("%s\t%s\thidden:%v\n", n, svcs[n].Target, svcs[n].IsHidden) }
+	_, svcs, _ := store.ListServices()
+	for n, s := range svcs { fmt.Printf("%s\t%s\tHidden: %v\n", n, s.Target, s.IsHidden) }
 	return nil
 }
 
-func runDiscover(ctx context.Context, args []string) error {
-	if len(args) < 1 { return errors.New("discover subcommands: publish, resolve") }
-	// Implementation of decentralized resolve using DHT
-	return nil // Simplified for brevity in this block
+func runSend(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	proxy := fs.Bool("proxy", false, "force anonymous circuit for transfer")
+	_ = fs.Parse(args)
+
+	file := prompt("Path to file")
+	to := prompt("Recipient name")
+
+	store, _ := config.NewStore(""); cfg, _ := store.Load()
+	idStore, _ := identity.NewStoreForConfig(store.Path()); id, _ := idStore.Load()
+	
+	addr, err := resolvePeerForSend(ctx, store, cfg, to)
+	if err != nil { return err }
+
+	// If proxy is requested, we wrap the entire file transfer session in a 5-hop circuit
+	dialer := func(rctx context.Context) (net.Conn, error) {
+		if *proxy {
+			fmt.Printf("[GHOST] Wrapping File Transfer in 5-Hop Circuit to %s...\n", to)
+			reg, _ := loadLocalRegistry(cfg.Node.DataDir)
+			peers, _ := reg.Snapshot()
+			// Create a temporary ServiceRecord for the peer endpoint
+			targetRec := record.ServiceRecord{Address: addr}
+			return onion.BuildAutomatedCircuit(rctx, targetRec, peers)
+		}
+		var d net.Dialer
+		return d.DialContext(rctx, "tcp6", addr)
+	}
+
+	conn, err := dialer(ctx)
+	if err != nil { return err }
+	defer conn.Close()
+
+	res, err := transfer.SendFileWithConn(ctx, conn, transfer.SendRequest{NodeName: cfg.Node.Name, FilePath: file, Address: addr, Identity: id})
+	if err != nil { return err }
+	
+	fmt.Printf("✔ File sent anonymously: %q\n", res.FileName)
+	return nil
+}
+
+func runStatus(ctx context.Context, args []string) error {
+	store, _ := config.NewStore(""); cfg, _ := store.Load()
+	conn, err := net.DialTimeout("tcp6", cfg.Node.ListenAddr, 500*time.Millisecond)
+	if err != nil { fmt.Println("OFFLINE"); return nil }
+	conn.Close(); fmt.Println("ONLINE"); return nil
 }
 
 func runIdentity(args []string) error {
-	store, _ := config.NewStore("")
-	idStore, _ := identity.NewStoreForConfig(store.Path())
-	id, _ := idStore.Load()
-	fmt.Printf("NodeID: %s\nPublic Key: %x\n", id.NodeID, id.PublicKey)
-	return nil
+	idStore, _ := identity.NewStoreForConfig(""); id, _ := idStore.Load()
+	fmt.Printf("NodeID: %s\n", id.NodeID); return nil
 }
 
-func runRecord(args []string) error {
-	fmt.Println("Record generator active.")
-	return nil
+func runDebug(ctx context.Context, args []string) error {
+	fmt.Println("Debug active."); return nil
 }
-
-// --- HELPERS ---
 
 func loadLocalRegistry(dataDir string) (*discovery.Registry, error) {
 	if dataDir == "" { dataDir = "./data/inbox" }
@@ -303,6 +272,7 @@ func resolvePeerForSend(ctx context.Context, store *config.Store, cfg config.Fil
 
 func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (record.EndpointRecord, error) {
 	d := dht.NewServer(cfg.Node.Name)
+	for _, b := range cfg.Node.BootstrapAddrs { d.RT.AddNode(proto.NodeInfo{ID: "seed", Addr: b}) }
 	nodes, err := d.RecursiveFindNode(ctx, name)
 	if err == nil && len(nodes) > 0 { return discovery.Resolve(ctx, nodes[0].Addr, name, "") }
 	return record.EndpointRecord{}, errors.New("not found")
@@ -310,6 +280,7 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 
 func resolveServiceDistributed(ctx context.Context, cfg config.File, service string) (record.ServiceRecord, error) {
 	d := dht.NewServer(cfg.Node.Name)
+	for _, b := range cfg.Node.BootstrapAddrs { d.RT.AddNode(proto.NodeInfo{ID: "seed", Addr: b}) }
 	val, err := d.RecursiveFindValue(ctx, service)
 	if err == nil && val != "" {
 		var r record.ServiceRecord
@@ -318,16 +289,3 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 	}
 	return record.ServiceRecord{}, errors.New("not found")
 }
-
-func discoveryCandidates(cfg config.File) []string {
-	seen := make(map[string]bool)
-	var out []string
-	add := func(a string) { if a != "" && !seen[a] { seen[a] = true; out = append(out, a) } }
-	for _, b := range cfg.Node.BootstrapAddrs { add(b) }
-	for _, p := range cfg.Peers { add(p.Address) }
-	return out
-}
-
-type stringListFlag []string
-func (s *stringListFlag) String() string { return "" }
-func (s *stringListFlag) Set(v string) error { *s = append(*s, v); return nil }

@@ -1,0 +1,33 @@
+{
+  "ok": false,
+  "record": {
+    "node_id": "",
+    "node_name": "",
+    "address": "",
+    "public_key": "",
+    "issued_at": "",
+    "expires_at": "",
+    "signature": ""
+  },
+  "service_record": {
+    "node_id": "",
+    "node_name": "",
+    "service_name": "",
+    "is_hidden": false,
+    "public_key": "",
+    "issued_at": "",
+    "expires_at": "",
+    "signature": ""
+  },
+  "records": [
+    {
+      "node_id": "vx6_8d609ee1f0b9839d",
+      "node_name": "surya",
+      "address": "[2401:4900:86b4:de9c:f885:8ba4:69e6:6478]:4242",
+      "public_key": "feXzxyEEgl9W353sLMD0pugk+t8k1nV/Ie4s2oHoJvA=",
+      "issued_at": "2026-04-23T18:04:44Z",
+      "expires_at": "2026-04-23T18:24:44Z",
+      "signature": "JmJ/V+euRrtMg3cJiVw2OSPDQzcYNkYpi/llDkTfUsCaoV++dl2HqorkXojKGrxEaRhrZlZcrFnwFrp14pxLAg=="
+    }
+  ]
+}
