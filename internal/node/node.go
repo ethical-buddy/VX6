@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -46,45 +45,27 @@ type Config struct {
 const SeedBootstrapDomain = "bootstrap.vx6.dev"
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
-	if cfg.Name == "" {
-		return errors.New("node name cannot be empty")
-	}
-	if cfg.NodeID == "" {
-		return errors.New("node id cannot be empty")
-	}
-	if cfg.Registry == nil {
-		return errors.New("registry cannot be nil")
-	}
-	if err := transfer.ValidateIPv6Address(cfg.ListenAddr); err != nil {
-		return fmt.Errorf("invalid listen address: %w", err)
-	}
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		return fmt.Errorf("create data directory: %w", err)
-	}
+	if cfg.Name == "" { return errors.New("node name cannot be empty") }
+	if cfg.NodeID == "" { return errors.New("node id cannot be empty") }
+	if cfg.Registry == nil { return errors.New("registry cannot be nil") }
+	if err := transfer.ValidateIPv6Address(cfg.ListenAddr); err != nil { return fmt.Errorf("invalid listen address: %w", err) }
+	_ = os.MkdirAll(cfg.DataDir, 0o755)
 
-	// Auto-detect AdvertiseAddr if not set
 	if cfg.AdvertiseAddr == "" {
-		_, port, err := net.SplitHostPort(cfg.ListenAddr)
-		if err == nil {
-			addr, detectErr := netutil.DetectAdvertiseAddress(port)
-			if detectErr == nil {
-				cfg.AdvertiseAddr = addr
-				fmt.Fprintf(log, "auto-detected advertise address %s\n", cfg.AdvertiseAddr)
-			}
-		}
+		_, port, _ := net.SplitHostPort(cfg.ListenAddr)
+		addr, detectErr := netutil.DetectAdvertiseAddress(port)
+		if detectErr == nil { cfg.AdvertiseAddr = addr }
 	}
 
 	listener, err := net.Listen("tcp6", cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
-	}
+	if err != nil { return fmt.Errorf("listen fail: %w", err) }
 	defer listener.Close()
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
-	// Start background tasks with advertise address
 	if cfg.AdvertiseAddr != "" {
 		go runBootstrapTasks(ctx, log, cfg)
+		go runLocalDiscovery(ctx, log, cfg)
 	}
 
 	go func() {
@@ -98,241 +79,118 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Temporary() {
-				continue
-			}
-			if errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			return fmt.Errorf("accept connection: %w", err)
+			if ctx.Err() != nil { return nil }
+			continue
 		}
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer conn.Close()
-
 			reader := bufio.NewReader(conn)
-
 			kind, err := proto.ReadHeader(reader)
-			if err != nil {
-				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
-				return
-			}
+			if err != nil { return }
 
 			switch kind {
 			case proto.KindFileTransfer:
-				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
-				if err != nil {
-					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				result, err := transfer.ReceiveFile(secureConn, cfg.DataDir)
-				if err != nil {
-					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-
-				absPath, pathErr := filepath.Abs(result.StoredPath)
-				if pathErr != nil {
-					absPath = result.StoredPath
-				}
-
-				fmt.Fprintf(
-					log,
-					"received %q (%d bytes) from node %q into %s\n",
-					result.FileName,
-					result.BytesReceived,
-					result.SenderNode,
-					absPath,
-				)
+				secureConn, _ := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
+				res, _ := transfer.ReceiveFile(secureConn, cfg.DataDir)
+				fmt.Fprintf(log, "received %q from %q\n", res.FileName, res.SenderNode)
 			case proto.KindDiscoveryReq:
-				if cfg.Registry == nil {
-					fmt.Fprintf(log, "discovery request from %s rejected: registry disabled\n", conn.RemoteAddr().String())
-					return
-				}
-				if err := cfg.Registry.HandleConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
-					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-			case proto.KindOnion:
-				_, _ = proto.ReadLengthPrefixed(reader, 1024*1024)
-				// (Old onion logic kept for backward compatibility during migration)
-			case proto.KindExtend:
-				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
-				if err != nil {
-					return
-				}
-				var er proto.ExtendRequest
-				if err := json.Unmarshal(payload, &er); err != nil {
-					return
-				}
-				_ = onion.HandleExtend(ctx, conn, er)
+				_ = cfg.Registry.HandleConn(&bufferedConn{Conn: conn, reader: reader})
 			case proto.KindDHT:
-				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
-				if err != nil {
-					return
-				}
+				payload, _ := proto.ReadLengthPrefixed(reader, 1024*1024)
 				var dr proto.DHTRequest
-				if err := json.Unmarshal(payload, &dr); err != nil {
-					return
-				}
-				if cfg.DHT != nil {
-					_ = cfg.DHT.HandleDHT(ctx, conn, dr)
-				}
+				_ = json.Unmarshal(payload, &dr)
+				if cfg.DHT != nil { _ = cfg.DHT.HandleDHT(ctx, conn, dr) }
+			case proto.KindExtend:
+				payload, _ := proto.ReadLengthPrefixed(reader, 1024*1024)
+				var er proto.ExtendRequest
+				_ = json.Unmarshal(payload, &er)
+				_ = onion.HandleExtend(ctx, conn, er)
 			case proto.KindServiceConn:
-				if err := serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services); err != nil {
-					fmt.Fprintf(log, "service proxy error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-			default:
-				fmt.Fprintf(log, "session error from %s: unsupported kind %d\n", conn.RemoteAddr().String(), kind)
+				_ = serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services)
 			}
 		}()
 	}
 }
 
-func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
-	// 1. Resolve DNS seeds
-	dnsBootstraps := []string{}
-	ips, err := net.LookupIP(SeedBootstrapDomain)
-	if err == nil {
-		for _, ip := range ips {
-			if ip.To4() == nil { // Only IPv6
-				dnsBootstraps = append(dnsBootstraps, fmt.Sprintf("[%s]:4242", ip.String()))
+func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
+	const multicastAddr = "[ff02::1]:4243"
+	addr, _ := net.ResolveUDPAddr("udp6", multicastAddr)
+	conn, err := net.ListenMulticastUDP("udp6", nil, addr)
+	if err != nil { return }
+	defer conn.Close()
+
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, _, err := conn.ReadFromUDP(buf)
+			if err != nil || n == 0 { return }
+			var info proto.NodeInfo
+			if err := json.Unmarshal(buf[:n], &info); err == nil && info.ID != cfg.NodeID {
+				rec := record.EndpointRecord{NodeID: info.ID, NodeName: "local-neighbor", Address: info.Addr}
+				_ = cfg.Registry.Import([]record.EndpointRecord{rec}, nil)
 			}
+		}
+	}()
+
+	ticker := time.NewTicker(15 * time.Second)
+	data, _ := json.Marshal(proto.NodeInfo{ID: cfg.NodeID, Addr: cfg.AdvertiseAddr})
+	for {
+		select {
+		case <-ctx.Done(): return
+		case <-ticker.C: _, _ = conn.WriteToUDP(data, addr)
 		}
 	}
+}
+
+func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
+	ips, _ := net.LookupIP(SeedBootstrapDomain)
+	dnsSeeds := []string{}
+	for _, ip := range ips { if ip.To4() == nil { dnsSeeds = append(dnsSeeds, fmt.Sprintf("[%s]:4242", ip.String())) } }
 
 	publishAndSync := func() {
-		// --- A. Dynamic Service Reload ---
-		if cfg.RefreshServices != nil {
-			cfg.Services = cfg.RefreshServices()
-		}
-
+		if cfg.RefreshServices != nil { cfg.Services = cfg.RefreshServices() }
 		rec, err := record.NewEndpointRecord(cfg.Identity, cfg.Name, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
-		if err != nil {
-			fmt.Fprintf(log, "bootstrap publish skipped: %v\n", err)
-			return
-		}
-
-		// Always ensure our own record is in our local registry
+		if err != nil { return }
 		_ = cfg.Registry.Import([]record.EndpointRecord{rec}, nil)
 
-		// --- B. Loop Prevention & Target Selection ---
 		targets := map[string]struct{}{}
-		for _, addr := range dnsBootstraps {
-			targets[addr] = struct{}{}
-		}
-		for _, addr := range cfg.BootstrapAddrs {
-			targets[addr] = struct{}{}
-		}
-		
+		for _, a := range dnsSeeds { targets[a] = struct{}{} }
+		for _, a := range cfg.BootstrapAddrs { targets[a] = struct{}{} }
 		nodes, _ := cfg.Registry.Snapshot()
-		if len(nodes) > 10 {
-			for i := 0; i < 5; i++ {
-				if nodes[i].Address != "" && nodes[i].Address != cfg.AdvertiseAddr {
-					targets[nodes[i].Address] = struct{}{}
-				}
-			}
-		} else {
-			for _, cached := range nodes {
-				if cached.Address != "" && cached.Address != cfg.AdvertiseAddr {
-					targets[cached.Address] = struct{}{}
-				}
-			}
-		}
+		for i := 0; i < len(nodes) && i < 5; i++ { if nodes[i].Address != "" { targets[nodes[i].Address] = struct{}{} } }
 
 		for addr := range targets {
-			if _, err := discovery.Publish(ctx, addr, rec); err != nil {
-				continue
-			}
-
-			// Add to DHT Routing Table
-			if cfg.DHT != nil {
-				// We don't know the remote ID yet, but we'll learn it over time
-			}
-
-			for serviceName := range cfg.Services {
-				isHidden := false
-				var introPoints []string
-
+			_, _ = discovery.Publish(ctx, addr, rec)
+			for name := range cfg.Services {
+				isHidden := false; var introPoints []string
 				if cfg.ConfigPath != "" {
-					if store, err := config.NewStore(cfg.ConfigPath); err == nil {
-						if cfgFile, err := store.Load(); err == nil {
-							if svc, ok := cfgFile.Services[serviceName]; ok {
-								isHidden = svc.IsHidden
-							}
-						}
+					if store, _ := config.NewStore(cfg.ConfigPath); store != nil {
+						if c, _ := store.Load(); c.Node.Name != "" { if s, ok := c.Services[name]; ok { isHidden = s.IsHidden } }
 					}
 				}
-
-				svcAddr := cfg.AdvertiseAddr
-				if isHidden {
-					svcAddr = ""
-					nodes, _ := cfg.Registry.Snapshot()
-					for i := 0; i < len(nodes) && len(introPoints) < 3; i++ {
-						if nodes[i].NodeID != cfg.NodeID && nodes[i].NodeID != "" {
-							introPoints = append(introPoints, nodes[i].NodeID)
-						}
+				svcAddr := cfg.AdvertiseAddr; if isHidden { svcAddr = "" }
+				srec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, name, svcAddr, 20*time.Minute, time.Now())
+				if err == nil {
+					srec.IsHidden = isHidden
+					if isHidden {
+						for i := 0; i < len(nodes) && len(introPoints) < 3; i++ { if nodes[i].NodeID != "" { introPoints = append(introPoints, nodes[i].NodeID) } }
+						srec.IntroPoints = introPoints
 					}
+					_ = record.SignServiceRecord(cfg.Identity, &srec)
+					_ = cfg.Registry.Import(nil, []record.ServiceRecord{srec})
+					_, _ = discovery.PublishService(ctx, addr, srec)
 				}
-
-				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, svcAddr, 20*time.Minute, time.Now())
-				if err == nil {
-					serviceRec.IsHidden = isHidden
-					serviceRec.IntroPoints = introPoints
-					_ = record.SignServiceRecord(cfg.Identity, &serviceRec)
-					_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
-					_, _ = discovery.PublishService(ctx, addr, serviceRec)
-				}
-			}
-
-			isBootstrap := false
-			for _, b := range dnsBootstraps { if b == addr { isBootstrap = true; break } }
-			for _, b := range cfg.BootstrapAddrs { if b == addr { isBootstrap = true; break } }
-
-			if isBootstrap {
-				records, services, err := discovery.Snapshot(ctx, addr)
-				if err == nil {
-					_ = cfg.Registry.Import(records, services)
-				}
-			}
-		}
-
-		// Self-register services even if offline
-		for serviceName := range cfg.Services {
-			serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
-			if err == nil {
-				_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
 			}
 		}
 	}
 
 	publishAndSync()
-
 	ticker := time.NewTicker(2 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			publishAndSync()
-		}
-	}
+	for { select { case <-ctx.Done(): return; case <-ticker.C: publishAndSync() } }
 }
 
-type bufferedConn struct {
-	net.Conn
-	reader *bufio.Reader
-}
-
-func (c *bufferedConn) Read(p []byte) (int, error) {
-	return c.reader.Read(p)
-}
+type bufferedConn struct { net.Conn; reader *bufio.Reader }
+func (c *bufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }

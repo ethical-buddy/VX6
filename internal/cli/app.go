@@ -279,6 +279,19 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 }
 
 func resolveServiceDistributed(ctx context.Context, cfg config.File, service string) (record.ServiceRecord, error) {
+	// 1. Check local registry cache first
+	reg, _ := loadLocalRegistry(cfg.Node.DataDir)
+	if reg != nil {
+		_, svcs := reg.Snapshot()
+		for _, s := range svcs {
+			if s.NodeName+"."+s.ServiceName == service {
+				return s, nil
+			}
+		}
+	}
+
+	// 2. Fallback to DHT if not in cache
+	fmt.Printf("[DHT] Service %s not in cache. Searching network...\n", service)
 	d := dht.NewServer(cfg.Node.Name)
 	for _, b := range cfg.Node.BootstrapAddrs { d.RT.AddNode(proto.NodeInfo{ID: "seed", Addr: b}) }
 	val, err := d.RecursiveFindValue(ctx, service)
@@ -287,5 +300,6 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 		_ = json.Unmarshal([]byte(val), &r)
 		return r, nil
 	}
-	return record.ServiceRecord{}, errors.New("not found")
+	return record.ServiceRecord{}, errors.New("service not found")
 }
+
