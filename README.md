@@ -4,13 +4,14 @@
 HackitiseLabs Pvt. Ltd.<br>
 <a href="https://hackitiselabs.in">hackitiselabs.in</a>|
 <br>Ilker Ozturk<br>
-<a href="https://github.com/dailker">GitHub: https://github.com/dailker </a>
+<a href="https://github.com/dailker">@dailker</a>
 </p>
 
 [![IPv6 First](https://img.shields.io/badge/IPv6-first-0F766E?style=for-the-badge)](./docs/architecture.md)
 [![Peer to Peer](https://img.shields.io/badge/peer--to--peer-service_network-1D4ED8?style=for-the-badge)](./docs/discovery.md)
 [![Localhost to Localhost](https://img.shields.io/badge/localhost-to_localhost-F59E0B?style=for-the-badge)](./docs/services.md)
 [![Linux Ready](https://img.shields.io/badge/Linux-systemd_ready-7C3AED?style=for-the-badge)](./docs/systemd.md)
+[![Windows 11/Server 2022+](https://img.shields.io/badge/Windows-11_Server_2022+-0078D4?style=for-the-badge)](./changes_for_windows/)
 
 VX6 is an IPv6-first peer-to-peer network for real services.  
 It turns local apps into network-reachable services without forcing them to stop being local.  
@@ -84,6 +85,8 @@ This is why VX6 feels simple:
 - file transfer between VX6 nodes
 - Linux systemd support
 - eBPF-assisted Linux fast-path design
+- **Windows 11 / Server 2022+ support** with TCP/QUIC transports and optional eBPF/XDP acceleration
+- **Performance testing GUI** with CLI and native Windows interfaces
 - builder-friendly model for apps and distributed systems
 
 ## Discovery Without a Permanent Center
@@ -467,6 +470,7 @@ Rules:
 
 ## Build and Test
 
+### Linux/macOS
 ```bash
 make build
 make test
@@ -477,6 +481,28 @@ or:
 ```bash
 go test ./...
 ```
+
+### Windows (AMD64 & ARM64)
+
+**Build VX6 main application:**
+```powershell
+# Windows AMD64
+$env:GOOS="windows"; $env:GOARCH="amd64"; go build -o vx6-amd64.exe ./cmd/vx6
+
+# Windows ARM64
+$env:GOOS="windows"; $env:GOARCH="arm64"; go build -o vx6-arm64.exe ./cmd/vx6
+```
+
+**Build Performance Test Tools:**
+```powershell
+cd cmd/perf-test-gui
+.\build.ps1              # CLI tool (cross-platform)
+.\build_gui.ps1          # GUI tool (Windows only, requires MinGW64)
+```
+
+For detailed build information, see:
+- [Windows Implementation Guide](./changes_for_windows/05_windows_support_complete_implementation.md)
+- [Performance Test GUI README](./cmd/perf-test-gui/README.md)
 
 ## License
 
