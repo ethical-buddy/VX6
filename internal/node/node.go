@@ -163,7 +163,13 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 		for i := 0; i < len(nodes) && i < 5; i++ { if nodes[i].Address != "" { targets[nodes[i].Address] = struct{}{} } }
 
 		for addr := range targets {
-			_, _ = discovery.Publish(ctx, addr, rec)
+			fmt.Fprintf(log, "[SYNC] Connecting to target: %s\n", addr)
+			_, err := discovery.Publish(ctx, addr, rec)
+			if err != nil {
+				fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
+				continue
+			}
+
 			for name := range cfg.Services {
 				isHidden := false; var introPoints []string
 				if cfg.ConfigPath != "" {
@@ -184,6 +190,15 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 					_, _ = discovery.PublishService(ctx, addr, srec)
 				}
 			}
+
+			// PULL: Download the phonebook from the bootstrap
+			recs, svcs, err := discovery.Snapshot(ctx, addr)
+			if err != nil {
+				fmt.Fprintf(log, "[SYNC] Snapshot from %s failed: %v\n", addr, err)
+				continue
+			}
+			_ = cfg.Registry.Import(recs, svcs)
+			fmt.Fprintf(log, "[SYNC] Successfully linked with %s. Received %d records.\n", addr, len(recs)+len(svcs))
 		}
 	}
 
