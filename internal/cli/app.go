@@ -54,23 +54,23 @@ func Run(ctx context.Context, args []string) error {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "VX6 - The Ghost Fabric (Complete Master Edition)")
-	fmt.Fprintln(w, "===============================================")
+	fmt.Fprintln(w, "VX6 - The Ghost Fabric (Final Master Build)")
+	fmt.Fprintln(w, "==========================================")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "CORE COMMANDS:")
-	fmt.Fprintln(w, "  init             Setup node name and cryptographic identity.")
-	fmt.Fprintln(w, "  list             Show Peers, Discovery Cache, and Hosted Services.")
-	fmt.Fprintln(w, "  node             Start the background engine (Listener + DHT + Relay).")
-	fmt.Fprintln(w, "  status           Check if the background engine is active.")
+	fmt.Fprintln(w, "  init             Setup persistent identity (Interactive).")
+	fmt.Fprintln(w, "  list             Show all peers, network cache, and services.")
+	fmt.Fprintln(w, "  node             Launch the background engine.")
+	fmt.Fprintln(w, "  status           Verify if the background node is active.")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "COMMUNICATION (WITH PRIVACY OPTIONS):")
-	fmt.Fprintln(w, "  send [--proxy]   Transfer a file. Use --proxy for 5-hop anonymity.")
-	fmt.Fprintln(w, "  connect [--proxy] Secure tunnel. Automatically uses proxy for hidden services.")
+	fmt.Fprintln(w, "COMMUNICATION:")
+	fmt.Fprintln(w, "  connect          Create a secure tunnel. Options: --service, --listen, --proxy")
+	fmt.Fprintln(w, "  send             Transfer files. Options: --proxy")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "NETWORK MANAGEMENT:")
+	fmt.Fprintln(w, "NETWORK:")
 	fmt.Fprintln(w, "  service add      Expose local port. Use --hidden to scrub your IP.")
-	fmt.Fprintln(w, "  peer add         Manually save a trusted peer.")
-	fmt.Fprintln(w, "  bootstrap add    Add a globally reachable node to join the network.")
+	fmt.Fprintln(w, "  peer add         Add a trusted node.")
+	fmt.Fprintln(w, "  bootstrap add    Add a meeting point node.")
 }
 
 func prompt(label string) string {
@@ -87,8 +87,8 @@ func runInit(args []string) error {
 	name := fs.String("name", "", "node name")
 	_ = fs.Parse(args)
 	finalName := *name
-	if finalName == "" { finalName = prompt("Enter node name") }
-	if finalName == "" { return errors.New("name required") }
+	if finalName == "" { finalName = prompt("Enter a unique name for this node") }
+	if finalName == "" { return errors.New("name is required") }
 
 	store, _ := config.NewStore("")
 	cfg, _ := store.Load()
@@ -110,13 +110,18 @@ func runList(ctx context.Context, args []string) error {
 	reg, _ := loadLocalRegistry(cfg.Node.DataDir)
 	recs, svcs := reg.Snapshot()
 	for _, r := range recs { fmt.Printf("  %-15s %s\n", r.NodeName, r.Address) }
-	for _, s := range svcs { fmt.Printf("  %-25s %s (Hidden: %v)\n", s.NodeName+"."+s.ServiceName, s.Address, s.IsHidden) }
+	for _, s := range svcs { 
+		mode := "DIRECT"
+		if s.IsHidden { mode = "GHOST" }
+		fmt.Printf("  %-25s %-15s %s\n", s.NodeName+"."+s.ServiceName, s.Address, mode) 
+	}
 	return nil
 }
 
 func runNode(ctx context.Context, args []string) error {
 	store, _ := config.NewStore("")
-	cfgFile, _ := store.Load()
+	cfgFile, err := store.Load()
+	if err != nil || cfgFile.Node.Name == "" { return errors.New("not initialized. run 'vx6 init'") }
 	idStore, _ := identity.NewStoreForConfig(store.Path())
 	id, _ := idStore.Load()
 	cfg := node.Config{
@@ -136,23 +141,22 @@ func runNode(ctx context.Context, args []string) error {
 
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-	svc := fs.String("service", "", "service")
-	proxy := fs.Bool("proxy", false, "force 5-hop onion circuit")
+	svc := fs.String("service", "", "service (node.name)")
+	listen := fs.String("listen", "127.0.0.1:2222", "local port")
+	proxy := fs.Bool("proxy", false, "onion routing")
 	_ = fs.Parse(args)
 	
 	finalSvc := *svc; if finalSvc == "" && len(args) > 0 && args[0][0] != '-' { finalSvc = args[0] }
-	if finalSvc == "" { finalSvc = prompt("Enter service name") }
+	if finalSvc == "" { finalSvc = prompt("Target service (node.web)") }
 
-	store, _ := config.NewStore("")
-	cfg, _ := store.Load()
-	idStore, _ := identity.NewStoreForConfig(store.Path())
-	id, _ := idStore.Load()
+	store, _ := config.NewStore(""); cfg, _ := store.Load()
+	idStore, _ := identity.NewStoreForConfig(store.Path()); id, _ := idStore.Load()
 	serviceRec, err := resolveServiceDistributed(ctx, cfg, finalSvc)
 	if err != nil { return err }
 
 	dialer := func(rctx context.Context) (net.Conn, error) {
 		if *proxy || serviceRec.IsHidden {
-			fmt.Printf("[GHOST] Building 5-Hop Secure Circuit to %s (Hidden: %v)...\n", finalSvc, serviceRec.IsHidden)
+			fmt.Printf("[GHOST] Tunneling through 5-hop circuit...\n")
 			reg, _ := loadLocalRegistry(cfg.Node.DataDir)
 			peers, _ := reg.Snapshot()
 			return onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
@@ -160,9 +164,7 @@ func runConnect(ctx context.Context, args []string) error {
 		var d net.Dialer
 		return d.DialContext(rctx, "tcp6", serviceRec.Address)
 	}
-	
-	fmt.Printf("✔ Tunnel Established: localhost:2222 -> %s\n", finalSvc)
-	return serviceproxy.ServeLocalForward(ctx, "127.0.0.1:2222", serviceRec, id, dialer)
+	return serviceproxy.ServeLocalForward(ctx, *listen, serviceRec, id, dialer)
 }
 
 func runPeer(args []string) error {
@@ -179,7 +181,7 @@ func runPeer(args []string) error {
 func runBootstrap(args []string) error {
 	store, _ := config.NewStore("")
 	if len(args) >= 1 && args[0] == "add" {
-		a := prompt("Bootstrap Address")
+		a := prompt("Bootstrap IP")
 		return store.AddBootstrap(a)
 	}
 	list, _ := store.ListBootstraps()
@@ -193,50 +195,41 @@ func runService(args []string) error {
 		fs := flag.NewFlagSet("service add", flag.ContinueOnError)
 		h := fs.Bool("hidden", false, "hidden")
 		_ = fs.Parse(args[1:])
-		n := prompt("Service Name"); t := prompt("Local Target (e.g. :8000)")
+		n := prompt("Service Name"); t := prompt("Target (e.g. :8000)")
 		return store.AddService(n, t, *h)
 	}
-	_, svcs, _ := store.ListServices()
-	for n, s := range svcs { fmt.Printf("%s\t%s\tHidden: %v\n", n, s.Target, s.IsHidden) }
+	// Fixing the return assignment here:
+	cfgFile, _ := store.Load()
+	svcs := cfgFile.Services
+	for n, s := range svcs { fmt.Printf("%s\t%s\thidden:%v\n", n, s.Target, s.IsHidden) }
 	return nil
 }
 
 func runSend(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
-	proxy := fs.Bool("proxy", false, "force anonymous circuit for transfer")
+	proxy := fs.Bool("proxy", false, "ghost mode")
 	_ = fs.Parse(args)
-
-	file := prompt("Path to file")
-	to := prompt("Recipient name")
-
+	file := prompt("File Path"); to := prompt("Receiver Name")
 	store, _ := config.NewStore(""); cfg, _ := store.Load()
 	idStore, _ := identity.NewStoreForConfig(store.Path()); id, _ := idStore.Load()
-	
 	addr, err := resolvePeerForSend(ctx, store, cfg, to)
 	if err != nil { return err }
 
-	// If proxy is requested, we wrap the entire file transfer session in a 5-hop circuit
 	dialer := func(rctx context.Context) (net.Conn, error) {
 		if *proxy {
-			fmt.Printf("[GHOST] Wrapping File Transfer in 5-Hop Circuit to %s...\n", to)
+			fmt.Println("[GHOST] Sending file through anonymous circuit...")
 			reg, _ := loadLocalRegistry(cfg.Node.DataDir)
 			peers, _ := reg.Snapshot()
-			// Create a temporary ServiceRecord for the peer endpoint
-			targetRec := record.ServiceRecord{Address: addr}
-			return onion.BuildAutomatedCircuit(rctx, targetRec, peers)
+			return onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers)
 		}
 		var d net.Dialer
 		return d.DialContext(rctx, "tcp6", addr)
 	}
-
-	conn, err := dialer(ctx)
-	if err != nil { return err }
+	conn, _ := dialer(ctx)
 	defer conn.Close()
-
 	res, err := transfer.SendFileWithConn(ctx, conn, transfer.SendRequest{NodeName: cfg.Node.Name, FilePath: file, Address: addr, Identity: id})
 	if err != nil { return err }
-	
-	fmt.Printf("✔ File sent anonymously: %q\n", res.FileName)
+	fmt.Printf("✔ Sent %q\n", res.FileName)
 	return nil
 }
 
@@ -244,12 +237,13 @@ func runStatus(ctx context.Context, args []string) error {
 	store, _ := config.NewStore(""); cfg, _ := store.Load()
 	conn, err := net.DialTimeout("tcp6", cfg.Node.ListenAddr, 500*time.Millisecond)
 	if err != nil { fmt.Println("OFFLINE"); return nil }
-	conn.Close(); fmt.Println("ONLINE"); return nil
+	conn.Close(); fmt.Printf("Status: ONLINE (Node: %s)\n", cfg.Node.Name)
+	return nil
 }
 
 func runIdentity(args []string) error {
 	idStore, _ := identity.NewStoreForConfig(""); id, _ := idStore.Load()
-	fmt.Printf("NodeID: %s\n", id.NodeID); return nil
+	fmt.Printf("NodeID: %s\nPublicKey: %x\n", id.NodeID, id.PublicKey); return nil
 }
 
 func runDebug(ctx context.Context, args []string) error {
@@ -279,19 +273,6 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 }
 
 func resolveServiceDistributed(ctx context.Context, cfg config.File, service string) (record.ServiceRecord, error) {
-	// 1. Check local registry cache first
-	reg, _ := loadLocalRegistry(cfg.Node.DataDir)
-	if reg != nil {
-		_, svcs := reg.Snapshot()
-		for _, s := range svcs {
-			if s.NodeName+"."+s.ServiceName == service {
-				return s, nil
-			}
-		}
-	}
-
-	// 2. Fallback to DHT if not in cache
-	fmt.Printf("[DHT] Service %s not in cache. Searching network...\n", service)
 	d := dht.NewServer(cfg.Node.Name)
 	for _, b := range cfg.Node.BootstrapAddrs { d.RT.AddNode(proto.NodeInfo{ID: "seed", Addr: b}) }
 	val, err := d.RecursiveFindValue(ctx, service)
@@ -300,6 +281,5 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 		_ = json.Unmarshal([]byte(val), &r)
 		return r, nil
 	}
-	return record.ServiceRecord{}, errors.New("service not found")
+	return record.ServiceRecord{}, errors.New("not found")
 }
-
