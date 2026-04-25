@@ -11,6 +11,10 @@ It lets you:
 - publish hidden services by alias without exposing the service endpoint
 - run as a background service under systemd
 
+Included app:
+
+- [apps/chat](./apps/chat/README.md): decentralized web chat with direct and group messaging over VX6
+
 ## Endpoint Format
 
 VX6 uses IPv6 endpoints in this form:

@@ -135,6 +135,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			reader := bufio.NewReader(conn)
 			kind, err := proto.ReadHeader(reader)
 			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return
+				}
 				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
 				return
 			}
