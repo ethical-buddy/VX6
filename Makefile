@@ -8,7 +8,7 @@ GO ?= go
 EBPF_SRC := internal/ebpf/onion_relay.c
 EBPF_OBJ := internal/onion/onion_relay.o
 
-build:
+build: $(EBPF_OBJ)
 	@GO_BIN=""; \
 	for candidate in "$(GO)" go /usr/local/go/bin/go /usr/bin/go; do \
 		[ -z "$$candidate" ] && continue; \
@@ -34,9 +34,11 @@ build:
 	echo "building vx6 with $$GO_BIN"; \
 	"$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o vx6 ./cmd/vx6
 
-build-ebpf: ebpf build
+build-ebpf: build
 
-ebpf:
+ebpf: $(EBPF_OBJ)
+
+$(EBPF_OBJ): $(EBPF_SRC)
 	@CLANG_BIN=""; \
 	for candidate in "$(CLANG)" clang /usr/bin/clang /usr/local/swift/usr/bin/clang; do \
 		[ -z "$$candidate" ] && continue; \
@@ -50,12 +52,7 @@ ebpf:
 		fi; \
 	done; \
 	if [ -z "$$CLANG_BIN" ]; then \
-		if [ -f "$(EBPF_OBJ)" ]; then \
-			echo "clang not found; using bundled $(EBPF_OBJ)"; \
-			echo "to rebuild the eBPF object, install clang/llvm first"; \
-			exit 0; \
-		fi; \
-		echo "clang not found and $(EBPF_OBJ) is missing"; \
+		echo "clang not found"; \
 		echo "install one of these packages, then rerun 'make build-ebpf':"; \
 		echo "  Debian/Ubuntu: sudo apt install clang llvm"; \
 		echo "  Fedora:        sudo dnf install clang llvm"; \
@@ -63,11 +60,6 @@ ebpf:
 		exit 1; \
 	fi; \
 	if [ ! -f /usr/include/linux/bpf.h ]; then \
-		if [ -f "$(EBPF_OBJ)" ]; then \
-			echo "linux eBPF headers not found; using bundled $(EBPF_OBJ)"; \
-			echo "to rebuild locally, install Linux userspace headers"; \
-			exit 0; \
-		fi; \
 		echo "linux eBPF headers not found"; \
 		echo "install one of these packages, then rerun 'make build-ebpf':"; \
 		echo "  Debian/Ubuntu: sudo apt install linux-libc-dev"; \
@@ -76,16 +68,19 @@ ebpf:
 		exit 1; \
 	fi; \
 	if [ ! -f /usr/include/asm/types.h ] && [ ! -f /usr/include/x86_64-linux-gnu/asm/types.h ] && [ ! -f /usr/include/aarch64-linux-gnu/asm/types.h ] && [ ! -f /usr/include/arm-linux-gnueabihf/asm/types.h ]; then \
-		if [ -f "$(EBPF_OBJ)" ]; then \
-			echo "asm/types.h not found; using bundled $(EBPF_OBJ)"; \
-			echo "to rebuild locally, install Linux userspace headers"; \
-			exit 0; \
-		fi; \
 		echo "asm/types.h not found"; \
 		echo "install one of these packages, then rerun 'make build-ebpf':"; \
 		echo "  Debian/Ubuntu: sudo apt install linux-libc-dev"; \
 		echo "  Fedora:        sudo dnf install kernel-headers"; \
 		echo "  Arch:          sudo pacman -S linux-headers"; \
+		exit 1; \
+	fi; \
+	if [ ! -f /usr/include/bpf/bpf_helpers.h ] || [ ! -f /usr/include/bpf/bpf_endian.h ]; then \
+		echo "libbpf userspace headers not found"; \
+		echo "install one of these packages, then rerun 'make build-ebpf':"; \
+		echo "  Debian/Ubuntu: sudo apt install libbpf-dev"; \
+		echo "  Fedora:        sudo dnf install libbpf-devel"; \
+		echo "  Arch:          sudo pacman -S libbpf"; \
 		exit 1; \
 	fi; \
 	echo "building eBPF object with $$CLANG_BIN"; \
@@ -95,21 +90,14 @@ ebpf:
 		mv "$$TMP_OBJ" "$(EBPF_OBJ)"; \
 	else \
 		rm -f "$$TMP_OBJ"; \
-		if [ -f "$(EBPF_OBJ)" ]; then \
-			echo "eBPF rebuild failed; keeping bundled $(EBPF_OBJ)"; \
-			echo "common fixes:"; \
-			echo "  Debian/Ubuntu: sudo apt install clang llvm linux-libc-dev"; \
-			echo "  Fedora:        sudo dnf install clang llvm kernel-headers"; \
-			echo "  Arch:          sudo pacman -S clang llvm linux-headers"; \
-			exit 0; \
-		fi; \
 		echo "eBPF rebuild failed"; \
 		echo "common fixes:"; \
-		echo "  Debian/Ubuntu: sudo apt install clang llvm linux-libc-dev"; \
-		echo "  Fedora:        sudo dnf install clang llvm kernel-headers"; \
-		echo "  Arch:          sudo pacman -S clang llvm linux-headers"; \
+		echo "  Debian/Ubuntu: sudo apt install clang llvm linux-libc-dev libbpf-dev"; \
+		echo "  Fedora:        sudo dnf install clang llvm kernel-headers libbpf-devel"; \
+		echo "  Arch:          sudo pacman -S clang llvm linux-headers libbpf"; \
 		exit 1; \
 	fi
+
 
 clean:
 	rm -f vx6 $(EBPF_OBJ)
