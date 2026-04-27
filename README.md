@@ -1,4 +1,11 @@
 # VX6
+<p align="right">
+<b>SPONSORED BY</b><br>
+HackitiseLabs Pvt. Ltd.<br>
+<a href="https://hackitiselabs.in">hackitiselabs.in</a> | 
+Dalker
+<a href="https://github.com/dailker">GitHub: https://github.com/dailker </a>
+</p>
 
 [![IPv6 First](https://img.shields.io/badge/IPv6-first-0F766E?style=for-the-badge)](./docs/architecture.md)
 [![Peer to Peer](https://img.shields.io/badge/peer--to--peer-service_network-1D4ED8?style=for-the-badge)](./docs/discovery.md)
