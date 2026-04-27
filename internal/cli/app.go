@@ -102,14 +102,14 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 receive deny --node NAME")
 	fmt.Fprintln(w, "  vx6 receive disable")
 	fmt.Fprintln(w, "  vx6 service")
-	fmt.Fprintln(w, "  vx6 peer [--show-addresses]")
+	fmt.Fprintln(w, "  vx6 peer")
 	fmt.Fprintln(w, "  vx6 bootstrap")
 	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
 	fmt.Fprintln(w, "  vx6 peer add --name NAME --addr [ipv6]:port")
 	fmt.Fprintln(w, "  vx6 bootstrap add --addr [ipv6]:port")
 	fmt.Fprintln(w, "  vx6 identity")
 	fmt.Fprintln(w, "  vx6 status")
-	fmt.Fprintln(w, "  vx6 debug registry [--show-addresses]")
+	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug ebpf-status")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
@@ -754,7 +754,6 @@ func runPeer(args []string) error {
 	}
 	fs := flag.NewFlagSet("peer", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	showAddresses := fs.Bool("show-addresses", false, "show stored peer addresses")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -768,7 +767,7 @@ func runPeer(args []string) error {
 	}
 	printSectionHeader("PEER DIRECTORY", len(names))
 	for _, n := range names {
-		fmt.Printf("  %-15s %s\n", n, formatAddressSummary(*showAddresses, peers[n].Address))
+		fmt.Printf("  %-15s %s\n", n, peerDirectoryState(peers[n].Address))
 	}
 	if len(names) == 0 {
 		fmt.Println("  (none)")
@@ -1076,14 +1075,12 @@ func runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		printRuntimeStatus("OFFLINE", runtimectl.Status{
 			NodeName:        cfg.Node.Name,
-			ListenAddr:      cfg.Node.ListenAddr,
-			AdvertiseAddr:   cfg.Node.AdvertiseAddr,
+			EndpointPublish: endpointPublishMode(cfg.Node.HideEndpoint),
 			TransportConfig: cfg.Node.TransportMode,
 			TransportActive: vxtransport.EffectiveMode(cfg.Node.TransportMode),
 			RelayMode:       cfg.Node.RelayMode,
 			RelayPercent:    cfg.Node.RelayResourcePercent,
 		})
-		fmt.Printf("probe_addr\t%s\n", probeAddr)
 		return nil
 	}
 	_ = conn.Close()
@@ -1098,8 +1095,7 @@ func runStatus(ctx context.Context, args []string) error {
 	}
 	printRuntimeStatus("ONLINE", runtimectl.Status{
 		NodeName:         cfg.Node.Name,
-		ListenAddr:       cfg.Node.ListenAddr,
-		AdvertiseAddr:    cfg.Node.AdvertiseAddr,
+		EndpointPublish:  endpointPublishMode(cfg.Node.HideEndpoint),
 		TransportConfig:  cfg.Node.TransportMode,
 		TransportActive:  vxtransport.EffectiveMode(cfg.Node.TransportMode),
 		RelayMode:        cfg.Node.RelayMode,
@@ -1107,7 +1103,6 @@ func runStatus(ctx context.Context, args []string) error {
 		RegistryNodes:    nodeCount,
 		RegistryServices: serviceCount,
 	})
-	fmt.Printf("probe_addr\t%s\n", probeAddr)
 	return nil
 }
 
@@ -1116,9 +1111,8 @@ func printRuntimeStatus(label string, status runtimectl.Status) {
 	if status.NodeName != "" {
 		fmt.Printf("node_name\t%s\n", status.NodeName)
 	}
-	fmt.Printf("listen_addr\t%s\n", status.ListenAddr)
-	if status.AdvertiseAddr != "" {
-		fmt.Printf("advertise_addr\t%s\n", status.AdvertiseAddr)
+	if status.EndpointPublish != "" {
+		fmt.Printf("endpoint_publish\t%s\n", status.EndpointPublish)
 	}
 	fmt.Printf("transport_config\t%s\n", status.TransportConfig)
 	fmt.Printf("transport_active\t%s\n", status.TransportActive)
@@ -1175,8 +1169,7 @@ func runIdentity(args []string) error {
 	}
 	fmt.Printf("node_name\t%s\n", cfg.Node.Name)
 	fmt.Printf("node_id\t%s\n", id.NodeID)
-	fmt.Printf("listen_addr\t%s\n", cfg.Node.ListenAddr)
-	fmt.Printf("advertise_addr\t%s\n", cfg.Node.AdvertiseAddr)
+	fmt.Printf("endpoint_publish\t%s\n", endpointPublishMode(cfg.Node.HideEndpoint))
 	fmt.Printf("transport_config\t%s\n", cfg.Node.TransportMode)
 	fmt.Printf("transport_active\t%s\n", vxtransport.EffectiveMode(cfg.Node.TransportMode))
 	fmt.Printf("relay_mode\t%s\n", cfg.Node.RelayMode)
@@ -1210,7 +1203,7 @@ func runDebug(ctx context.Context, args []string) error {
 
 func printDebugUsage(w io.Writer) {
 	fmt.Fprintln(w, "Debug commands:")
-	fmt.Fprintln(w, "  vx6 debug registry [--show-addresses]")
+	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug ebpf-status")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
@@ -1220,7 +1213,6 @@ func printDebugUsage(w io.Writer) {
 func runDebugRegistry(args []string) error {
 	fs := flag.NewFlagSet("debug registry", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	showAddresses := fs.Bool("show-addresses", false, "show discovered addresses")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1243,22 +1235,37 @@ func runDebugRegistry(args []string) error {
 	fmt.Printf("node_records\t%d\n", len(nodes))
 	fmt.Printf("service_records\t%d\n", len(services))
 	for _, rec := range nodes {
-		fmt.Printf("node\t%s\t%s\t%s\n", rec.NodeName, rec.NodeID, formatAddressSummary(*showAddresses, rec.Address))
+		fmt.Printf("node\t%s\t%s\tendpoint=%s\n", rec.NodeName, rec.NodeID, endpointVisibilitySummary(rec.Address, false))
 	}
 	for _, svc := range services {
-		fmt.Printf("service\tkey=%s\tnode=%s\tservice=%s\taddr=%s\thidden=%v\n", record.ServiceLookupKey(svc), svc.NodeName, svc.ServiceName, formatAddressSummary(*showAddresses, svc.Address), svc.IsHidden)
+		fmt.Printf("service\tkey=%s\tnode=%s\tservice=%s\tendpoint=%s\thidden=%v\n", record.ServiceLookupKey(svc), svc.NodeName, svc.ServiceName, endpointVisibilitySummary(svc.Address, svc.IsHidden), svc.IsHidden)
 	}
 	return nil
 }
 
-func formatAddressSummary(show bool, address string) string {
+func endpointPublishMode(hidden bool) string {
+	if hidden {
+		return "hidden"
+	}
+	return "published"
+}
+
+func peerDirectoryState(address string) string {
 	if address == "" {
-		return "-"
+		return "missing"
 	}
-	if show {
-		return address
+	return "configured"
+}
+
+func endpointVisibilitySummary(address string, isHidden bool) string {
+	switch {
+	case isHidden:
+		return "hidden"
+	case address != "":
+		return "sealed"
+	default:
+		return "missing"
 	}
-	return "<hidden>"
 }
 
 func runDebugDHTGet(ctx context.Context, args []string) error {

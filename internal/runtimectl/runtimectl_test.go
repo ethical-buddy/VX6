@@ -19,7 +19,7 @@ func TestServerStatusAndReload(t *testing.T) {
 	}, func() Status {
 		return Status{
 			NodeName:         "alpha",
-			ListenAddr:       "[::1]:4242",
+			EndpointPublish:  "published",
 			TransportConfig:  "auto",
 			TransportActive:  "tcp",
 			RelayMode:        "on",
@@ -39,6 +39,9 @@ func TestServerStatusAndReload(t *testing.T) {
 	}
 	if status.NodeName != "alpha" {
 		t.Fatalf("unexpected node name %q", status.NodeName)
+	}
+	if status.EndpointPublish != "published" {
+		t.Fatalf("unexpected endpoint publish mode %q", status.EndpointPublish)
 	}
 	if status.RegistryNodes != 7 || status.RegistryServices != 3 {
 		t.Fatalf("unexpected registry counters %+v", status)

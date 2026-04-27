@@ -124,8 +124,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 			return runtimectl.Status{
 				NodeName:         liveCfg.Name,
-				ListenAddr:       liveCfg.ListenAddr,
-				AdvertiseAddr:    liveCfg.AdvertiseAddr,
+				EndpointPublish:  endpointPublishMode(liveCfg.HideEndpoint),
 				TransportConfig:  liveCfg.TransportMode,
 				TransportActive:  vxtransport.EffectiveMode(liveCfg.TransportMode),
 				RelayMode:        liveCfg.RelayMode,
@@ -274,6 +273,13 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 		}()
 	}
+}
+
+func endpointPublishMode(hidden bool) string {
+	if hidden {
+		return "hidden"
+	}
+	return "published"
 }
 
 func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
