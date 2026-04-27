@@ -31,7 +31,9 @@ import (
 )
 
 const (
-	syncCycleInterval   = 30 * time.Second
+	syncCycleInterval   = 10 * time.Second
+	syncWarmupInterval  = 2 * time.Second
+	syncWarmupRounds    = 4
 	syncTargetTimeout   = 2 * time.Second
 	syncProbeTimeout    = 1 * time.Second
 	syncMaxRounds       = 3
@@ -345,6 +347,7 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
 		serviceRecords, hiddenTopologies := buildServiceRecords(ctx, liveCfg, nodes)
 		publishServicesToTargets(ctx, liveCfg, log, targets, serviceRecords)
+		hiddenTargets := make([]hidden.OwnerRegistrationTarget, 0)
 
 		for _, srec := range serviceRecords {
 			if !srec.IsHidden {
@@ -363,7 +366,9 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 				RelayHopCount: hidden.ControlHopCountForProfile(srec.HiddenProfile),
 				RequireRelay:  true,
 			}
-			hidden.TrackAddresses(ctx, append(append([]string(nil), topology.ActiveIntros...), append(topology.StandbyIntros, topology.Guards...)...), 20*time.Second)
+			allIntros := append([]string(nil), srec.IntroPoints...)
+			allIntros = append(allIntros, srec.StandbyIntroPoints...)
+			hidden.TrackAddresses(ctx, append(append([]string(nil), allIntros...), topology.Guards...), 20*time.Second)
 			for _, guardAddr := range topology.Guards {
 				hidden.EnsureGuardRegistration(ctx, controlOpts, guardAddr, record.ServiceLookupKey(srec), func() hidden.HandlerConfig {
 					current := runtimeConfig(cfg)
@@ -377,13 +382,16 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 					}
 				})
 			}
-			for _, introAddr := range append([]string(nil), srec.IntroPoints...) {
-				_ = hidden.RegisterIntro(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
+			for _, introAddr := range allIntros {
+				hidden.EnsureIntroRegistration(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
 			}
-			for _, introAddr := range srec.StandbyIntroPoints {
-				_ = hidden.RegisterIntro(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
-			}
+			hiddenTargets = append(hiddenTargets, hidden.OwnerRegistrationTarget{
+				LookupKey:  record.ServiceLookupKey(srec),
+				GuardAddrs: append([]string(nil), topology.Guards...),
+				IntroAddrs: append([]string(nil), allIntros...),
+			})
 		}
+		hidden.PruneOwnerRegistrations(liveCfg.Identity.NodeID, hiddenTargets)
 
 		publishRecordsToTargets(ctx, liveCfg, log, targets, rec, serviceRecords)
 
@@ -391,7 +399,9 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 	}
 
 	publishAndSync()
-	ticker := time.NewTicker(syncCycleInterval)
+	ticker := time.NewTicker(syncWarmupInterval)
+	defer ticker.Stop()
+	warmupRounds := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -401,6 +411,12 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			publishAndSync()
 		case <-ticker.C:
 			publishAndSync()
+			if warmupRounds < syncWarmupRounds {
+				warmupRounds++
+				if warmupRounds == syncWarmupRounds {
+					ticker.Reset(syncCycleInterval)
+				}
+			}
 		}
 	}
 }

@@ -83,12 +83,24 @@ type rendezvousWait struct {
 
 type introRegistration struct {
 	NotifyAddrs []string
+	Conn        net.Conn
 }
 
 type guardRegistration struct {
 	CallbackID string
 	Conn       net.Conn
 	writeMu    sync.Mutex
+}
+
+type registrationLease struct {
+	Fingerprint string
+	Cancel      context.CancelFunc
+}
+
+type OwnerRegistrationTarget struct {
+	LookupKey  string
+	GuardAddrs []string
+	IntroAddrs []string
 }
 
 type peerScore struct {
@@ -124,8 +136,11 @@ var (
 	trackerMu    sync.Mutex
 	trackersByIP = map[string]struct{}{}
 
+	introClientMu sync.Mutex
+	introClients  = map[string]registrationLease{}
+
 	guardClientMu sync.Mutex
-	guardClients  = map[string]context.CancelFunc{}
+	guardClients  = map[string]registrationLease{}
 )
 
 func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
@@ -137,6 +152,56 @@ func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKe
 	return sendControl(ctx, introAddr, msg, opts)
 }
 
+func EnsureIntroRegistration(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) {
+	key := introClientKey(opts.Identity.NodeID, introAddr, lookupKey)
+	fingerprint := addressFingerprint(notifyAddrs)
+
+	introClientMu.Lock()
+	if existing, ok := introClients[key]; ok {
+		if existing.Fingerprint == fingerprint {
+			introClientMu.Unlock()
+			return
+		}
+		existing.Cancel()
+		delete(introClients, key)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	introClients[key] = registrationLease{
+		Fingerprint: fingerprint,
+		Cancel:      cancel,
+	}
+	introClientMu.Unlock()
+
+	go func() {
+		defer func() {
+			introClientMu.Lock()
+			current, ok := introClients[key]
+			if ok && current.Fingerprint == fingerprint {
+				delete(introClients, key)
+			}
+			introClientMu.Unlock()
+		}()
+
+		backoff := 150 * time.Millisecond
+		for {
+			err := maintainIntroRegistration(runCtx, opts, introAddr, lookupKey, notifyAddrs)
+			if runCtx.Err() != nil {
+				return
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if err == nil && backoff < time.Second {
+				backoff *= 2
+			}
+		}
+	}()
+}
+
 func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr, lookupKey string, cfgFn func() HandlerConfig) {
 	key := guardClientKey(opts.Identity.NodeID, guardAddr, lookupKey)
 
@@ -146,7 +211,7 @@ func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr
 		return
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	guardClients[key] = cancel
+	guardClients[key] = registrationLease{Cancel: cancel}
 	guardClientMu.Unlock()
 
 	go func() {
@@ -289,10 +354,7 @@ func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
 
 	switch msg.Action {
 	case "intro_register":
-		introMu.Lock()
-		introServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)] = introRegistration{NotifyAddrs: sanitizeAddressList(msg.NotifyAddrs)}
-		introMu.Unlock()
-		return nil
+		return holdIntroRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), sanitizeAddressList(msg.NotifyAddrs))
 	case "guard_register":
 		return holdGuardRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), msg.CallbackID)
 	case "intro_request":
@@ -565,8 +627,18 @@ func nodeScopedService(nodeID, service string) string {
 	return nodeID + "\n" + service
 }
 
+func introClientKey(nodeID, introAddr, lookupKey string) string {
+	return "intro\n" + nodeID + "\n" + lookupKey + "\n" + introAddr
+}
+
 func guardClientKey(nodeID, guardAddr, lookupKey string) string {
-	return nodeID + "\n" + guardAddr + "\n" + lookupKey
+	return "guard\n" + nodeID + "\n" + lookupKey + "\n" + guardAddr
+}
+
+func addressFingerprint(addrs []string) string {
+	normalized := append([]string(nil), sanitizeAddressList(addrs)...)
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\n")
 }
 
 func resolveHostedService(lookup string, cfg HandlerConfig) string {
@@ -926,6 +998,57 @@ func maintainGuardRegistration(ctx context.Context, opts ControlOptions, guardAd
 	}
 }
 
+func maintainIntroRegistration(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
+	conn, err := openControlConn(ctx, introAddr, opts)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if err := writeControl(conn, Message{
+		Action:      "intro_register",
+		Service:     lookupKey,
+		NotifyAddrs: append([]string(nil), notifyAddrs...),
+	}); err != nil {
+		return err
+	}
+
+	for {
+		if _, err := readControl(conn); err != nil {
+			return err
+		}
+	}
+}
+
+func holdIntroRegistration(conn net.Conn, scopedService string, notifyAddrs []string) error {
+	reg := introRegistration{
+		NotifyAddrs: append([]string(nil), notifyAddrs...),
+		Conn:        conn,
+	}
+
+	introMu.Lock()
+	if existing, ok := introServices[scopedService]; ok && existing.Conn != nil {
+		_ = existing.Conn.Close()
+	}
+	introServices[scopedService] = reg
+	introMu.Unlock()
+
+	defer func() {
+		introMu.Lock()
+		current, ok := introServices[scopedService]
+		if ok && current.Conn == conn {
+			delete(introServices, scopedService)
+		}
+		introMu.Unlock()
+	}()
+
+	for {
+		if _, err := readControl(conn); err != nil {
+			return nil
+		}
+	}
+}
+
 func holdGuardRegistration(conn net.Conn, scopedService, callbackID string) error {
 	reg := &guardRegistration{
 		CallbackID: callbackID,
@@ -976,6 +1099,47 @@ func sendGuardCallback(scopedService string, msg Message) error {
 		return err
 	}
 	return nil
+}
+
+func PruneOwnerRegistrations(nodeID string, targets []OwnerRegistrationTarget) {
+	desiredIntro := map[string]struct{}{}
+	desiredGuard := map[string]struct{}{}
+	for _, target := range targets {
+		for _, introAddr := range sanitizeAddressList(target.IntroAddrs) {
+			desiredIntro[introClientKey(nodeID, introAddr, target.LookupKey)] = struct{}{}
+		}
+		for _, guardAddr := range sanitizeAddressList(target.GuardAddrs) {
+			desiredGuard[guardClientKey(nodeID, guardAddr, target.LookupKey)] = struct{}{}
+		}
+	}
+
+	introPrefix := "intro\n" + nodeID + "\n"
+	introClientMu.Lock()
+	for key, lease := range introClients {
+		if !strings.HasPrefix(key, introPrefix) {
+			continue
+		}
+		if _, ok := desiredIntro[key]; ok {
+			continue
+		}
+		lease.Cancel()
+		delete(introClients, key)
+	}
+	introClientMu.Unlock()
+
+	guardPrefix := "guard\n" + nodeID + "\n"
+	guardClientMu.Lock()
+	for key, lease := range guardClients {
+		if !strings.HasPrefix(key, guardPrefix) {
+			continue
+		}
+		if _, ok := desiredGuard[key]; ok {
+			continue
+		}
+		lease.Cancel()
+		delete(guardClients, key)
+	}
+	guardClientMu.Unlock()
 }
 
 func sendControl(ctx context.Context, addr string, msg Message, opts ControlOptions) error {

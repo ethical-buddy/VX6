@@ -215,6 +215,143 @@ func TestGuardCallbackScopesAreIsolatedPerNode(t *testing.T) {
 	}
 }
 
+func TestIntroRegistrationReplacesNotifyTargets(t *testing.T) {
+	introMu.Lock()
+	original := introServices
+	introServices = map[string]introRegistration{}
+	introMu.Unlock()
+	defer func() {
+		introMu.Lock()
+		introServices = original
+		introMu.Unlock()
+	}()
+
+	scope := nodeScopedService("intro-a", "ghost")
+	serverA, clientA := net.Pipe()
+	defer clientA.Close()
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- holdIntroRegistration(serverA, scope, []string{"guard-a"})
+	}()
+
+	waitForIntroRegistration(t, scope)
+	introMu.RLock()
+	first := introServices[scope]
+	introMu.RUnlock()
+	if len(first.NotifyAddrs) != 1 || first.NotifyAddrs[0] != "guard-a" {
+		t.Fatalf("unexpected first intro registration: %+v", first)
+	}
+
+	serverB, clientB := net.Pipe()
+	defer clientB.Close()
+	doneB := make(chan error, 1)
+	go func() {
+		doneB <- holdIntroRegistration(serverB, scope, []string{"guard-b", "guard-c"})
+	}()
+
+	waitForIntroNotifyAddrs(t, scope, []string{"guard-b", "guard-c"})
+
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("old intro registration did not shut down after replacement")
+	}
+
+	introMu.RLock()
+	second := introServices[scope]
+	introMu.RUnlock()
+	if len(second.NotifyAddrs) != 2 || second.NotifyAddrs[0] != "guard-b" || second.NotifyAddrs[1] != "guard-c" {
+		t.Fatalf("unexpected replacement intro registration: %+v", second)
+	}
+
+	_ = clientB.Close()
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("replacement intro registration did not shut down after connection close")
+	}
+}
+
+func TestPruneOwnerRegistrationsCancelsStaleLeases(t *testing.T) {
+	introClientMu.Lock()
+	origIntro := introClients
+	introClients = map[string]registrationLease{}
+	introClientMu.Unlock()
+	defer func() {
+		introClientMu.Lock()
+		introClients = origIntro
+		introClientMu.Unlock()
+	}()
+
+	guardClientMu.Lock()
+	origGuard := guardClients
+	guardClients = map[string]registrationLease{}
+	guardClientMu.Unlock()
+	defer func() {
+		guardClientMu.Lock()
+		guardClients = origGuard
+		guardClientMu.Unlock()
+	}()
+
+	introCanceled := make(chan string, 2)
+	guardCanceled := make(chan string, 2)
+	introKeep := introClientKey("owner-a", "[::1]:4001", "ghost")
+	introDrop := introClientKey("owner-a", "[::1]:4002", "ghost")
+	guardKeep := guardClientKey("owner-a", "[::1]:5001", "ghost")
+	guardDrop := guardClientKey("owner-a", "[::1]:5002", "ghost")
+
+	introClientMu.Lock()
+	introClients[introKeep] = registrationLease{Cancel: func() { introCanceled <- introKeep }}
+	introClients[introDrop] = registrationLease{Cancel: func() { introCanceled <- introDrop }}
+	introClientMu.Unlock()
+
+	guardClientMu.Lock()
+	guardClients[guardKeep] = registrationLease{Cancel: func() { guardCanceled <- guardKeep }}
+	guardClients[guardDrop] = registrationLease{Cancel: func() { guardCanceled <- guardDrop }}
+	guardClientMu.Unlock()
+
+	PruneOwnerRegistrations("owner-a", []OwnerRegistrationTarget{{
+		LookupKey:  "ghost",
+		IntroAddrs: []string{"[::1]:4001"},
+		GuardAddrs: []string{"[::1]:5001"},
+	}})
+
+	select {
+	case got := <-introCanceled:
+		if got != introDrop {
+			t.Fatalf("unexpected intro lease canceled: %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected stale intro lease to be canceled")
+	}
+	select {
+	case got := <-guardCanceled:
+		if got != guardDrop {
+			t.Fatalf("unexpected guard lease canceled: %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected stale guard lease to be canceled")
+	}
+
+	introClientMu.Lock()
+	if _, ok := introClients[introKeep]; !ok {
+		t.Fatal("expected desired intro lease to remain")
+	}
+	if _, ok := introClients[introDrop]; ok {
+		t.Fatal("expected stale intro lease to be pruned")
+	}
+	introClientMu.Unlock()
+
+	guardClientMu.Lock()
+	if _, ok := guardClients[guardKeep]; !ok {
+		t.Fatal("expected desired guard lease to remain")
+	}
+	if _, ok := guardClients[guardDrop]; ok {
+		t.Fatal("expected stale guard lease to be pruned")
+	}
+	guardClientMu.Unlock()
+}
+
 func waitForGuardRegistration(t *testing.T, scope string) {
 	t.Helper()
 
@@ -229,4 +366,45 @@ func waitForGuardRegistration(t *testing.T, scope string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for guard registration %q", scope)
+}
+
+func waitForIntroRegistration(t *testing.T, scope string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		introMu.RLock()
+		_, ok := introServices[scope]
+		introMu.RUnlock()
+		if ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for intro registration %q", scope)
+}
+
+func waitForIntroNotifyAddrs(t *testing.T, scope string, want []string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		introMu.RLock()
+		reg, ok := introServices[scope]
+		introMu.RUnlock()
+		if ok && len(reg.NotifyAddrs) == len(want) {
+			match := true
+			for i := range want {
+				if reg.NotifyAddrs[i] != want[i] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for intro notify addrs %q", scope)
 }
