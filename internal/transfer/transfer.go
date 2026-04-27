@@ -12,6 +12,7 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/secure"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const maxHeaderSize = 4 * 1024
@@ -49,8 +50,7 @@ const (
 )
 
 func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp6", req.Address)
+	conn, err := vxtransport.DialContext(ctx, vxtransport.ModeAuto, req.Address)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("dial: %w", err)
 	}

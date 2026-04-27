@@ -11,6 +11,7 @@ import (
 
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const defaultListenAddress = "[::]:4242"
@@ -19,6 +20,9 @@ const (
 	FileReceiveOff     = "off"
 	FileReceiveTrusted = "trusted"
 	FileReceiveOpen    = "open"
+
+	RelayModeOn  = "on"
+	RelayModeOff = "off"
 )
 
 type File struct {
@@ -28,15 +32,18 @@ type File struct {
 }
 
 type NodeConfig struct {
-	Name               string   `json:"name"`
-	ListenAddr         string   `json:"listen_addr"`
-	AdvertiseAddr      string   `json:"advertise_addr"`
-	HideEndpoint       bool     `json:"hide_endpoint"`
-	DataDir            string   `json:"data_dir"`
-	DownloadDir        string   `json:"download_dir"`
-	BootstrapAddrs     []string `json:"bootstrap_addrs"`
-	FileReceiveMode    string   `json:"file_receive_mode,omitempty"`
-	AllowedFileSenders []string `json:"allowed_file_senders,omitempty"`
+	Name                 string   `json:"name"`
+	ListenAddr           string   `json:"listen_addr"`
+	AdvertiseAddr        string   `json:"advertise_addr"`
+	TransportMode        string   `json:"transport_mode,omitempty"`
+	HideEndpoint         bool     `json:"hide_endpoint"`
+	RelayMode            string   `json:"relay_mode,omitempty"`
+	RelayResourcePercent int      `json:"relay_resource_percent,omitempty"`
+	DataDir              string   `json:"data_dir"`
+	DownloadDir          string   `json:"download_dir"`
+	BootstrapAddrs       []string `json:"bootstrap_addrs"`
+	FileReceiveMode      string   `json:"file_receive_mode,omitempty"`
+	AllowedFileSenders   []string `json:"allowed_file_senders,omitempty"`
 }
 
 type PeerEntry struct {
@@ -287,9 +294,12 @@ func (s *Store) ListServices() ([]string, map[string]ServiceEntry, error) {
 func defaultFile() File {
 	return File{
 		Node: NodeConfig{
-			ListenAddr:  defaultListenAddress,
-			DataDir:     defaultDataDirValue(),
-			DownloadDir: defaultDownloadDirValue(),
+			ListenAddr:           defaultListenAddress,
+			TransportMode:        vxtransport.ModeAuto,
+			RelayMode:            RelayModeOn,
+			RelayResourcePercent: 33,
+			DataDir:              defaultDataDirValue(),
+			DownloadDir:          defaultDownloadDirValue(),
 		},
 		Peers:    map[string]PeerEntry{},
 		Services: map[string]ServiceEntry{},
@@ -300,6 +310,17 @@ func normalize(cfg *File) {
 	if cfg.Node.ListenAddr == "" {
 		cfg.Node.ListenAddr = defaultListenAddress
 	}
+	if normalized := vxtransport.NormalizeMode(cfg.Node.TransportMode); normalized != "" {
+		cfg.Node.TransportMode = normalized
+	} else {
+		cfg.Node.TransportMode = vxtransport.ModeAuto
+	}
+	if normalized := NormalizeRelayMode(cfg.Node.RelayMode); normalized != "" {
+		cfg.Node.RelayMode = normalized
+	} else {
+		cfg.Node.RelayMode = RelayModeOn
+	}
+	cfg.Node.RelayResourcePercent = NormalizeRelayResourcePercent(cfg.Node.RelayResourcePercent)
 	if cfg.Node.DataDir == "" || cfg.Node.DataDir == "./data/inbox" {
 		cfg.Node.DataDir = defaultDataDirValue()
 	}
@@ -350,6 +371,30 @@ func NormalizeFileReceiveMode(mode string) string {
 		return FileReceiveOpen
 	default:
 		return FileReceiveOff
+	}
+}
+
+func NormalizeRelayMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", RelayModeOn:
+		return RelayModeOn
+	case RelayModeOff:
+		return RelayModeOff
+	default:
+		return ""
+	}
+}
+
+func NormalizeRelayResourcePercent(percent int) int {
+	switch {
+	case percent <= 0:
+		return 33
+	case percent < 5:
+		return 5
+	case percent > 90:
+		return 90
+	default:
+		return percent
 	}
 }
 

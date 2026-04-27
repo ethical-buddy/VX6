@@ -29,6 +29,7 @@ import (
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 type stringListFlag []string
@@ -89,7 +90,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
+	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp|quic] [--relay on|off] [--relay-percent N] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
@@ -160,7 +161,10 @@ func runInit(args []string) error {
 	name := fs.String("name", "", "local human-readable node name")
 	listenAddr := fs.String("listen", "[::]:4242", "default IPv6 listen address in [addr]:port form")
 	advertiseAddr := fs.String("advertise", "", "public IPv6 address in [addr]:port form for discovery records")
+	transportMode := fs.String("transport", vxtransport.ModeAuto, "neighbor transport mode: auto, tcp, or quic")
 	hiddenNode := fs.Bool("hidden-node", false, "do not publish the node endpoint record; publish services only")
+	relayMode := fs.String("relay", config.RelayModeOn, "relay participation: on or off")
+	relayPercent := fs.Int("relay-percent", 33, "maximum share of local relay capacity reserved for transit work")
 	dataDir := fs.String("data-dir", defaultDataDirValue(), "directory for VX6 runtime state")
 	downloadDir := fs.String("downloads-dir", defaultDownloadDirValue(), "directory for received files")
 	var bootstraps stringListFlag
@@ -189,6 +193,14 @@ func runInit(args []string) error {
 			return fmt.Errorf("invalid advertise address: %w", err)
 		}
 	}
+	normalizedTransport := vxtransport.NormalizeMode(*transportMode)
+	if normalizedTransport == "" {
+		return fmt.Errorf("invalid transport mode %q", *transportMode)
+	}
+	normalizedRelayMode := config.NormalizeRelayMode(*relayMode)
+	if normalizedRelayMode == "" {
+		return fmt.Errorf("invalid relay mode %q", *relayMode)
+	}
 	for _, addr := range bootstraps {
 		if err := transfer.ValidateIPv6Address(addr); err != nil {
 			return fmt.Errorf("invalid bootstrap address %q: %w", addr, err)
@@ -206,7 +218,10 @@ func runInit(args []string) error {
 	cfg.Node.Name = *name
 	cfg.Node.ListenAddr = *listenAddr
 	cfg.Node.AdvertiseAddr = *advertiseAddr
+	cfg.Node.TransportMode = normalizedTransport
 	cfg.Node.HideEndpoint = *hiddenNode
+	cfg.Node.RelayMode = normalizedRelayMode
+	cfg.Node.RelayResourcePercent = config.NormalizeRelayResourcePercent(*relayPercent)
 	cfg.Node.DataDir = *dataDir
 	cfg.Node.DownloadDir = *downloadDir
 	cfg.Node.FileReceiveMode = config.NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
@@ -445,16 +460,25 @@ func runNode(ctx context.Context, args []string) error {
 	}
 
 	cfg := node.Config{
-		Name: *nodeName, NodeID: id.NodeID, ListenAddr: *listenAddr,
-		AdvertiseAddr: cfgFile.Node.AdvertiseAddr,
-		HideEndpoint:  cfgFile.Node.HideEndpoint,
-		DataDir:       *dataDir, ReceiveDir: *downloadDir, ConfigPath: store.Path(), Identity: id,
-		FileReceiveMode:    cfgFile.Node.FileReceiveMode,
-		AllowedFileSenders: append([]string(nil), cfgFile.Node.AllowedFileSenders...),
-		DHT:                dht.NewServer(id.NodeID), BootstrapAddrs: cfgFile.Node.BootstrapAddrs,
-		Services: services,
-		Registry: registry,
-		Reload:   reloadCh,
+		Name:                 *nodeName,
+		NodeID:               id.NodeID,
+		ListenAddr:           *listenAddr,
+		AdvertiseAddr:        cfgFile.Node.AdvertiseAddr,
+		TransportMode:        cfgFile.Node.TransportMode,
+		HideEndpoint:         cfgFile.Node.HideEndpoint,
+		RelayMode:            cfgFile.Node.RelayMode,
+		RelayResourcePercent: cfgFile.Node.RelayResourcePercent,
+		DataDir:              *dataDir,
+		ReceiveDir:           *downloadDir,
+		ConfigPath:           store.Path(),
+		Identity:             id,
+		FileReceiveMode:      cfgFile.Node.FileReceiveMode,
+		AllowedFileSenders:   append([]string(nil), cfgFile.Node.AllowedFileSenders...),
+		DHT:                  dht.NewServer(id.NodeID),
+		BootstrapAddrs:       cfgFile.Node.BootstrapAddrs,
+		Services:             services,
+		Registry:             registry,
+		Reload:               reloadCh,
 		RefreshServices: func() map[string]string {
 			c, err := store.Load()
 			if err != nil {
@@ -562,7 +586,11 @@ func runConnect(ctx context.Context, args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{SelfAddr: cfg.Node.AdvertiseAddr})
+			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{
+				SelfAddr:      cfg.Node.AdvertiseAddr,
+				Identity:      id,
+				TransportMode: cfg.Node.TransportMode,
+			})
 			if err != nil {
 				return nil, friendlyRelayPathError(err, "hidden-service mode")
 			}
@@ -581,8 +609,7 @@ func runConnect(ctx context.Context, args []string) error {
 			}
 			return conn, nil
 		}
-		var d net.Dialer
-		return d.DialContext(rctx, "tcp6", serviceRec.Address)
+		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, serviceRec.Address)
 	}
 	fmt.Printf("tunnel_active\t%s\t%s\n", *localListen, finalSvc)
 	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, dialer)
@@ -1024,7 +1051,7 @@ func runStatus(ctx context.Context, args []string) error {
 	probeAddr := statusProbeAddr(cfg)
 	conn, err := net.DialTimeout("tcp6", probeAddr, 500*time.Millisecond)
 	if err != nil {
-		fmt.Printf("status\tOFFLINE\nlisten_addr\t%s\nprobe_addr\t%s\n", cfg.Node.ListenAddr, probeAddr)
+		fmt.Printf("status\tOFFLINE\nlisten_addr\t%s\nprobe_addr\t%s\ntransport_config\t%s\ntransport_active\t%s\nrelay_mode\t%s\nrelay_percent\t%d\n", cfg.Node.ListenAddr, probeAddr, cfg.Node.TransportMode, vxtransport.EffectiveMode(cfg.Node.TransportMode), cfg.Node.RelayMode, cfg.Node.RelayResourcePercent)
 		return nil
 	}
 	_ = conn.Close()
@@ -1037,7 +1064,7 @@ func runStatus(ctx context.Context, args []string) error {
 		nodeCount = len(nodes)
 		serviceCount = len(services)
 	}
-	fmt.Printf("status\tONLINE\nlisten_addr\t%s\nprobe_addr\t%s\nregistry_nodes\t%d\nregistry_services\t%d\n", cfg.Node.ListenAddr, probeAddr, nodeCount, serviceCount)
+	fmt.Printf("status\tONLINE\nlisten_addr\t%s\nprobe_addr\t%s\ntransport_config\t%s\ntransport_active\t%s\nrelay_mode\t%s\nrelay_percent\t%d\nregistry_nodes\t%d\nregistry_services\t%d\n", cfg.Node.ListenAddr, probeAddr, cfg.Node.TransportMode, vxtransport.EffectiveMode(cfg.Node.TransportMode), cfg.Node.RelayMode, cfg.Node.RelayResourcePercent, nodeCount, serviceCount)
 	return nil
 }
 
@@ -1084,6 +1111,10 @@ func runIdentity(args []string) error {
 	fmt.Printf("node_id\t%s\n", id.NodeID)
 	fmt.Printf("listen_addr\t%s\n", cfg.Node.ListenAddr)
 	fmt.Printf("advertise_addr\t%s\n", cfg.Node.AdvertiseAddr)
+	fmt.Printf("transport_config\t%s\n", cfg.Node.TransportMode)
+	fmt.Printf("transport_active\t%s\n", vxtransport.EffectiveMode(cfg.Node.TransportMode))
+	fmt.Printf("relay_mode\t%s\n", cfg.Node.RelayMode)
+	fmt.Printf("relay_percent\t%d\n", cfg.Node.RelayResourcePercent)
 	fmt.Printf("config_path\t%s\n", store.Path())
 	return nil
 }

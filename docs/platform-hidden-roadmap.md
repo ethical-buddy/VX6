@@ -3,10 +3,10 @@
 ## Goals
 
 1. Keep `direct` mode fast enough for daily use on Linux, Windows, and macOS.
-2. Keep Linux as the high-performance relay tier with eBPF acceleration.
+2. Keep Linux as the high-performance relay tier with eBPF acceleration, without excluding Windows or macOS from relay participation.
 3. Redesign `--hidden` so relay operators learn far less than they do today.
 4. Move sensitive runtime state out of casual CLI/config views.
-5. Make desktop users consumers by default, not silent relays by default.
+5. Let every platform participate as relay and guard capacity while keeping local-user impact capped.
 
 This plan is intentionally split between immediate hardening and protocol redesign. The immediate work is small and safe. The protocol redesign is larger and must stay compatible with staged releases.
 
@@ -44,7 +44,7 @@ Rule: protocol changes land in `main` first, then platform branches rebase or me
 
 1. Finish current CLI and config hardening.
 2. Introduce a local control API so reload/status do not depend on Unix signals.
-3. Add transport abstraction so direct mode can support TCP and QUIC.
+3. Add transport abstraction so direct mode can support TCP immediately and QUIC once the VX6 transport is implemented.
 4. Redesign hidden descriptors and relay circuits.
 5. Add encrypted local state storage.
 6. Add Windows service packaging.
@@ -230,6 +230,8 @@ That is the correct trust split.
 
 QUIC is useful because VX6 is carrying application streams, not raw IP packets.
 
+The current standard-library VX6 build does not yet include a complete QUIC transport. The transport abstraction should land first so the real QUIC implementation can be added without changing hidden-mode and service-proxy behavior again.
+
 For a TCP service:
 
 - the local app still speaks normal TCP to the local VX6 process
@@ -263,9 +265,9 @@ Expose transport choice explicitly:
 
 Recommendation:
 
-- `direct`: `auto`, prefer QUIC if both ends support it
-- `private-relay`: QUIC between relay neighbors
-- `hidden`: QUIC between relay neighbors with fixed-size cells on top
+- `direct`: `auto`, use TCP now and switch to QUIC when the neighbor-session transport lands
+- `private-relay`: QUIC between relay neighbors when available
+- `hidden`: QUIC between relay neighbors with fixed-size cells on top when available
 
 TCP stays available as a compatibility fallback.
 
@@ -285,9 +287,10 @@ Windows should be treated as:
 
 - client endpoint
 - service owner endpoint
-- optional light relay
+- relay node
+- guard node
 
-Not ideal as the highest-capacity public relay tier.
+Windows nodes should participate in the same relay and guard pool. The main difference is that they do not get the Linux kernel acceleration path.
 
 Structural work:
 
@@ -301,7 +304,7 @@ Expected performance:
 
 - direct mode should be close to Linux for typical desktop usage
 - hidden mode will be slower mainly because of extra hops, not because Windows lacks eBPF
-- heavy relay throughput will still trail Linux
+- relay throughput can still be good for normal desktop loads, but Linux should remain the lowest-latency and highest-throughput class
 
 ### macOS
 
@@ -309,7 +312,8 @@ macOS should be treated similarly to Windows:
 
 - client endpoint
 - service owner endpoint
-- optional light relay
+- relay node
+- guard node
 
 Structural work:
 
@@ -322,7 +326,7 @@ Expected performance:
 
 - direct mode should be near-normal for interactive use
 - hidden mode slowdown is dominated by circuit design, not the OS itself
-- large public relay loads should stay on Linux
+- Linux still remains the best place for the biggest public relays, but macOS nodes stay eligible for relay and guard work
 
 ### Cross-Platform Performance Work
 
@@ -348,8 +352,8 @@ For user machines, add a runtime governor:
 
 Suggested policy:
 
-- default desktop relay mode is off
-- if desktop relay mode is enabled, cap relay resource use at a configured ceiling such as 25% to 33%
+- default relay mode is on across all platforms
+- cap relay resource use at a configured ceiling of 33%
 - stop admitting new relay work before the machine becomes unstable
 
 Implementation ideas:
@@ -446,7 +450,7 @@ Implementation plan:
 - do not claim "completely invisible"
 - do not rely on random relays alone for anonymity
 - do not make security depend on Linux eBPF
-- do not use packet striping as the main anonymity story
+- do not use packet striping as the anonymity story
 - do not make Windows and macOS public relay defaults
 
 ## About Multipath

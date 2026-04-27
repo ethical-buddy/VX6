@@ -26,6 +26,7 @@ import (
 	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const (
@@ -39,23 +40,26 @@ const (
 type ServiceRefresher func() map[string]string
 
 type Config struct {
-	Name               string
-	NodeID             string
-	ListenAddr         string
-	AdvertiseAddr      string
-	HideEndpoint       bool
-	DataDir            string
-	ReceiveDir         string
-	FileReceiveMode    string
-	AllowedFileSenders []string
-	ConfigPath         string
-	RefreshServices    ServiceRefresher
-	BootstrapAddrs     []string
-	Services           map[string]string
-	Identity           identity.Identity
-	Registry           *discovery.Registry
-	DHT                *dht.Server
-	Reload             <-chan struct{}
+	Name                 string
+	NodeID               string
+	ListenAddr           string
+	AdvertiseAddr        string
+	TransportMode        string
+	HideEndpoint         bool
+	RelayMode            string
+	RelayResourcePercent int
+	DataDir              string
+	ReceiveDir           string
+	FileReceiveMode      string
+	AllowedFileSenders   []string
+	ConfigPath           string
+	RefreshServices      ServiceRefresher
+	BootstrapAddrs       []string
+	Services             map[string]string
+	Identity             identity.Identity
+	Registry             *discovery.Registry
+	DHT                  *dht.Server
+	Reload               <-chan struct{}
 }
 
 const SeedBootstrapDomain = "bootstrap.vx6.dev"
@@ -90,11 +94,12 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		cfg.Services = map[string]string{}
 	}
 
-	listener, err := net.Listen("tcp6", cfg.ListenAddr)
+	listener, err := vxtransport.Listen(cfg.TransportMode, cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
@@ -140,10 +145,11 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
 				return
 			}
+			liveCfg := runtimeConfig(cfg)
+			relayGovernor.Update(liveCfg.RelayMode, liveCfg.RelayResourcePercent)
 
 			switch kind {
 			case proto.KindFileTransfer:
-				liveCfg := runtimeConfig(cfg)
 				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindFileTransfer, cfg.Identity)
 				if err != nil {
 					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
@@ -182,6 +188,12 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					}
 				}
 			case proto.KindExtend:
+				release, err := relayGovernor.Acquire(kind)
+				if err != nil {
+					fmt.Fprintf(log, "relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+				defer release()
 				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
 				if err != nil {
 					fmt.Fprintf(log, "extend read error from %s: %v\n", conn.RemoteAddr().String(), err)
@@ -196,9 +208,17 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			case proto.KindRendezvous:
-				liveServices := runtimeServices(cfg)
+				release, err := relayGovernor.Acquire(kind)
+				if err != nil {
+					fmt.Fprintf(log, "relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+				defer release()
+				liveServices := liveCfg.Services
 				if err := hidden.HandleConn(ctx, &bufferedConn{Conn: conn, reader: reader}, hidden.HandlerConfig{
 					Identity:      cfg.Identity,
+					AdvertiseAddr: liveCfg.AdvertiseAddr,
+					TransportMode: liveCfg.TransportMode,
 					Services:      liveServices,
 					HiddenAliases: hiddenAliasMap(cfg.ConfigPath),
 					Registry:      cfg.Registry,
@@ -289,15 +309,25 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			if len(notifyAddrs) == 0 {
 				notifyAddrs = []string{liveCfg.AdvertiseAddr}
 			}
+			controlOpts := hidden.ControlOptions{
+				Identity:      liveCfg.Identity,
+				Registry:      liveCfg.Registry,
+				SelfAddr:      liveCfg.AdvertiseAddr,
+				TransportMode: liveCfg.TransportMode,
+				RelayHopCount: hidden.ControlHopCountForProfile(srec.HiddenProfile),
+				RequireRelay:  true,
+			}
 			hidden.TrackAddresses(ctx, append(append([]string(nil), topology.ActiveIntros...), append(topology.StandbyIntros, topology.Guards...)...), 20*time.Second)
 			for _, guardAddr := range topology.Guards {
-				_ = hidden.RegisterGuard(ctx, guardAddr, record.ServiceLookupKey(srec), liveCfg.AdvertiseAddr)
+				guardOpts := controlOpts
+				guardOpts.RequireRelay = false
+				_ = hidden.RegisterGuard(ctx, guardOpts, guardAddr, record.ServiceLookupKey(srec), liveCfg.AdvertiseAddr)
 			}
 			for _, introAddr := range append([]string(nil), srec.IntroPoints...) {
-				_ = hidden.RegisterIntro(ctx, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
+				_ = hidden.RegisterIntro(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
 			}
 			for _, introAddr := range srec.StandbyIntroPoints {
-				_ = hidden.RegisterIntro(ctx, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
+				_ = hidden.RegisterIntro(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
 			}
 		}
 
@@ -685,7 +715,10 @@ func runtimeConfig(base Config) Config {
 	if cfgFile.Node.AdvertiseAddr != "" {
 		live.AdvertiseAddr = cfgFile.Node.AdvertiseAddr
 	}
+	live.TransportMode = cfgFile.Node.TransportMode
 	live.HideEndpoint = cfgFile.Node.HideEndpoint
+	live.RelayMode = cfgFile.Node.RelayMode
+	live.RelayResourcePercent = cfgFile.Node.RelayResourcePercent
 	live.BootstrapAddrs = append([]string(nil), cfgFile.Node.BootstrapAddrs...)
 	live.FileReceiveMode = cfgFile.Node.FileReceiveMode
 	live.AllowedFileSenders = append([]string(nil), cfgFile.Node.AllowedFileSenders...)

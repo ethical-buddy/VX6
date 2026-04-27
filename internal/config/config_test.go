@@ -149,6 +149,40 @@ func TestStoreClearsAllowListOutsideTrustedMode(t *testing.T) {
 	}
 }
 
+func TestStoreNormalizesTransportAndRelayDefaults(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load default config: %v", err)
+	}
+	cfg.Node.TransportMode = "AUTO"
+	cfg.Node.RelayMode = ""
+	cfg.Node.RelayResourcePercent = 0
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Node.TransportMode != "auto" {
+		t.Fatalf("unexpected transport mode %q", loaded.Node.TransportMode)
+	}
+	if loaded.Node.RelayMode != RelayModeOn {
+		t.Fatalf("unexpected relay mode %q", loaded.Node.RelayMode)
+	}
+	if loaded.Node.RelayResourcePercent != 33 {
+		t.Fatalf("unexpected relay resource percent %d", loaded.Node.RelayResourcePercent)
+	}
+}
+
 func TestAddPeerValidatesNameAndAddress(t *testing.T) {
 	t.Parallel()
 
