@@ -27,6 +27,7 @@ import (
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/runtimectl"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
 	vxtransport "github.com/vx6/vx6/internal/transport"
@@ -458,6 +459,10 @@ func runNode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	controlInfoPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
 
 	cfg := node.Config{
 		Name:                 *nodeName,
@@ -471,6 +476,7 @@ func runNode(ctx context.Context, args []string) error {
 		DataDir:              *dataDir,
 		ReceiveDir:           *downloadDir,
 		ConfigPath:           store.Path(),
+		ControlInfoPath:      controlInfoPath,
 		Identity:             id,
 		FileReceiveMode:      cfgFile.Node.FileReceiveMode,
 		AllowedFileSenders:   append([]string(nil), cfgFile.Node.AllowedFileSenders...),
@@ -505,6 +511,15 @@ func runReload(args []string) error {
 	if err != nil {
 		return err
 	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	if err := runtimectl.RequestReload(context.Background(), controlPath); err == nil {
+		fmt.Println("reload_sent\tmode=control")
+		return nil
+	}
+
 	pidPath, err := config.RuntimePIDPath(store.Path())
 	if err != nil {
 		return err
@@ -519,7 +534,7 @@ func runReload(args []string) error {
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 		return fmt.Errorf("signal node reload: %w", err)
 	}
-	fmt.Printf("reload_sent\tpid=%d\n", pid)
+	fmt.Printf("reload_sent\tmode=signal\tpid=%d\n", pid)
 	return nil
 }
 
@@ -1047,11 +1062,28 @@ func runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	if status, err := runtimectl.RequestStatus(ctx, controlPath); err == nil {
+		printRuntimeStatus("ONLINE", status)
+		return nil
+	}
 
 	probeAddr := statusProbeAddr(cfg)
 	conn, err := net.DialTimeout("tcp6", probeAddr, 500*time.Millisecond)
 	if err != nil {
-		fmt.Printf("status\tOFFLINE\nlisten_addr\t%s\nprobe_addr\t%s\ntransport_config\t%s\ntransport_active\t%s\nrelay_mode\t%s\nrelay_percent\t%d\n", cfg.Node.ListenAddr, probeAddr, cfg.Node.TransportMode, vxtransport.EffectiveMode(cfg.Node.TransportMode), cfg.Node.RelayMode, cfg.Node.RelayResourcePercent)
+		printRuntimeStatus("OFFLINE", runtimectl.Status{
+			NodeName:        cfg.Node.Name,
+			ListenAddr:      cfg.Node.ListenAddr,
+			AdvertiseAddr:   cfg.Node.AdvertiseAddr,
+			TransportConfig: cfg.Node.TransportMode,
+			TransportActive: vxtransport.EffectiveMode(cfg.Node.TransportMode),
+			RelayMode:       cfg.Node.RelayMode,
+			RelayPercent:    cfg.Node.RelayResourcePercent,
+		})
+		fmt.Printf("probe_addr\t%s\n", probeAddr)
 		return nil
 	}
 	_ = conn.Close()
@@ -1064,8 +1096,42 @@ func runStatus(ctx context.Context, args []string) error {
 		nodeCount = len(nodes)
 		serviceCount = len(services)
 	}
-	fmt.Printf("status\tONLINE\nlisten_addr\t%s\nprobe_addr\t%s\ntransport_config\t%s\ntransport_active\t%s\nrelay_mode\t%s\nrelay_percent\t%d\nregistry_nodes\t%d\nregistry_services\t%d\n", cfg.Node.ListenAddr, probeAddr, cfg.Node.TransportMode, vxtransport.EffectiveMode(cfg.Node.TransportMode), cfg.Node.RelayMode, cfg.Node.RelayResourcePercent, nodeCount, serviceCount)
+	printRuntimeStatus("ONLINE", runtimectl.Status{
+		NodeName:         cfg.Node.Name,
+		ListenAddr:       cfg.Node.ListenAddr,
+		AdvertiseAddr:    cfg.Node.AdvertiseAddr,
+		TransportConfig:  cfg.Node.TransportMode,
+		TransportActive:  vxtransport.EffectiveMode(cfg.Node.TransportMode),
+		RelayMode:        cfg.Node.RelayMode,
+		RelayPercent:     cfg.Node.RelayResourcePercent,
+		RegistryNodes:    nodeCount,
+		RegistryServices: serviceCount,
+	})
+	fmt.Printf("probe_addr\t%s\n", probeAddr)
 	return nil
+}
+
+func printRuntimeStatus(label string, status runtimectl.Status) {
+	fmt.Printf("status\t%s\n", label)
+	if status.NodeName != "" {
+		fmt.Printf("node_name\t%s\n", status.NodeName)
+	}
+	fmt.Printf("listen_addr\t%s\n", status.ListenAddr)
+	if status.AdvertiseAddr != "" {
+		fmt.Printf("advertise_addr\t%s\n", status.AdvertiseAddr)
+	}
+	fmt.Printf("transport_config\t%s\n", status.TransportConfig)
+	fmt.Printf("transport_active\t%s\n", status.TransportActive)
+	fmt.Printf("relay_mode\t%s\n", status.RelayMode)
+	fmt.Printf("relay_percent\t%d\n", status.RelayPercent)
+	if status.PID > 0 {
+		fmt.Printf("pid\t%d\n", status.PID)
+	}
+	if status.UptimeSeconds > 0 {
+		fmt.Printf("uptime_seconds\t%d\n", status.UptimeSeconds)
+	}
+	fmt.Printf("registry_nodes\t%d\n", status.RegistryNodes)
+	fmt.Printf("registry_services\t%d\n", status.RegistryServices)
 }
 
 func statusProbeAddr(cfg config.File) string {
@@ -1524,9 +1590,10 @@ func writePIDFile(path string, pid int) error {
 }
 
 type nodeRuntimeLock struct {
-	file     *os.File
-	lockPath string
-	pidPath  string
+	file        *os.File
+	lockPath    string
+	pidPath     string
+	controlPath string
 }
 
 func acquireNodeLock(configPath string) (*nodeRuntimeLock, error) {
@@ -1535,6 +1602,10 @@ func acquireNodeLock(configPath string) (*nodeRuntimeLock, error) {
 		return nil, err
 	}
 	pidPath, err := config.RuntimePIDPath(configPath)
+	if err != nil {
+		return nil, err
+	}
+	controlPath, err := config.RuntimeControlPath(configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1579,7 +1650,7 @@ func acquireNodeLock(configPath string) (*nodeRuntimeLock, error) {
 		return nil, err
 	}
 
-	return &nodeRuntimeLock{file: lockFile, lockPath: lockPath, pidPath: pidPath}, nil
+	return &nodeRuntimeLock{file: lockFile, lockPath: lockPath, pidPath: pidPath, controlPath: controlPath}, nil
 }
 
 func (l *nodeRuntimeLock) Close() error {
@@ -1587,6 +1658,7 @@ func (l *nodeRuntimeLock) Close() error {
 		return nil
 	}
 	_ = os.Remove(l.pidPath)
+	_ = os.Remove(l.controlPath)
 	_ = l.file.Truncate(0)
 	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
 	err := l.file.Close()

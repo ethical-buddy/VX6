@@ -23,6 +23,7 @@ import (
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/runtimectl"
 	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
@@ -53,13 +54,14 @@ type Config struct {
 	FileReceiveMode      string
 	AllowedFileSenders   []string
 	ConfigPath           string
+	ControlInfoPath      string
 	RefreshServices      ServiceRefresher
 	BootstrapAddrs       []string
 	Services             map[string]string
 	Identity             identity.Identity
 	Registry             *discovery.Registry
 	DHT                  *dht.Server
-	Reload               <-chan struct{}
+	Reload               chan struct{}
 }
 
 const SeedBootstrapDomain = "bootstrap.vx6.dev"
@@ -93,6 +95,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Services == nil {
 		cfg.Services = map[string]string{}
 	}
+	startedAt := time.Now()
 
 	listener, err := vxtransport.Listen(cfg.TransportMode, cfg.ListenAddr)
 	if err != nil {
@@ -100,6 +103,43 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	defer listener.Close()
 	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
+	if cfg.ControlInfoPath != "" {
+		controlServer, err := runtimectl.Start(cfg.ControlInfoPath, os.Getpid(), func() error {
+			if cfg.Reload == nil {
+				return fmt.Errorf("reload channel is not configured")
+			}
+			select {
+			case cfg.Reload <- struct{}{}:
+			default:
+			}
+			return nil
+		}, func() runtimectl.Status {
+			liveCfg := runtimeConfig(cfg)
+			nodeCount := 0
+			serviceCount := 0
+			if cfg.Registry != nil {
+				nodes, services := cfg.Registry.Snapshot()
+				nodeCount = len(nodes)
+				serviceCount = len(services)
+			}
+			return runtimectl.Status{
+				NodeName:         liveCfg.Name,
+				ListenAddr:       liveCfg.ListenAddr,
+				AdvertiseAddr:    liveCfg.AdvertiseAddr,
+				TransportConfig:  liveCfg.TransportMode,
+				TransportActive:  vxtransport.EffectiveMode(liveCfg.TransportMode),
+				RelayMode:        liveCfg.RelayMode,
+				RelayPercent:     liveCfg.RelayResourcePercent,
+				RegistryNodes:    nodeCount,
+				RegistryServices: serviceCount,
+				UptimeSeconds:    int64(time.Since(startedAt).Seconds()),
+			}
+		})
+		if err != nil {
+			return err
+		}
+		defer controlServer.Close()
+	}
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 

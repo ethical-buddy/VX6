@@ -125,6 +125,17 @@ func RuntimeLockPath(configPath string) (string, error) {
 	return filepath.Join(filepath.Dir(configPath), "node.lock"), nil
 }
 
+func RuntimeControlPath(configPath string) (string, error) {
+	if configPath == "" {
+		var err error
+		configPath, err = DefaultPath()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(filepath.Dir(configPath), "node.control.json"), nil
+}
+
 func (s *Store) Path() string {
 	return s.path
 }

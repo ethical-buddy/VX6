@@ -61,6 +61,18 @@ func TestRuntimeLockPathUsesConfigDirectory(t *testing.T) {
 	}
 }
 
+func TestRuntimeControlPathUsesConfigDirectory(t *testing.T) {
+	t.Parallel()
+
+	path, err := RuntimeControlPath("/tmp/vx6/config.json")
+	if err != nil {
+		t.Fatalf("runtime control path: %v", err)
+	}
+	if path != "/tmp/vx6/node.control.json" {
+		t.Fatalf("unexpected control path %q", path)
+	}
+}
+
 func TestDefaultPathsUseHomeDirectory(t *testing.T) {
 	t.Setenv("HOME", "/tmp/vx6-home")
 
