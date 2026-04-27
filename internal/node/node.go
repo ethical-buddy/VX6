@@ -365,9 +365,17 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			}
 			hidden.TrackAddresses(ctx, append(append([]string(nil), topology.ActiveIntros...), append(topology.StandbyIntros, topology.Guards...)...), 20*time.Second)
 			for _, guardAddr := range topology.Guards {
-				guardOpts := controlOpts
-				guardOpts.RequireRelay = false
-				_ = hidden.RegisterGuard(ctx, guardOpts, guardAddr, record.ServiceLookupKey(srec), liveCfg.AdvertiseAddr)
+				hidden.EnsureGuardRegistration(ctx, controlOpts, guardAddr, record.ServiceLookupKey(srec), func() hidden.HandlerConfig {
+					current := runtimeConfig(cfg)
+					return hidden.HandlerConfig{
+						Identity:      cfg.Identity,
+						AdvertiseAddr: current.AdvertiseAddr,
+						TransportMode: current.TransportMode,
+						Services:      current.Services,
+						HiddenAliases: hiddenAliasMap(cfg.ConfigPath),
+						Registry:      cfg.Registry,
+					}
+				})
 			}
 			for _, introAddr := range append([]string(nil), srec.IntroPoints...) {
 				_ = hidden.RegisterIntro(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)

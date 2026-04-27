@@ -37,12 +37,12 @@ const (
 type Message struct {
 	Action               string   `json:"action"`
 	Service              string   `json:"service,omitempty"`
-	OwnerAddr            string   `json:"owner_addr,omitempty"`
 	NotifyAddrs          []string `json:"notify_addrs,omitempty"`
 	RendezvousID         string   `json:"rendezvous_id,omitempty"`
 	RendezvousCandidates []string `json:"rendezvous_candidates,omitempty"`
 	HopCount             int      `json:"hop_count,omitempty"`
 	RelayExcludes        []string `json:"relay_excludes,omitempty"`
+	CallbackID           string   `json:"callback_id,omitempty"`
 }
 
 type HandlerConfig struct {
@@ -86,7 +86,9 @@ type introRegistration struct {
 }
 
 type guardRegistration struct {
-	OwnerAddr string
+	CallbackID string
+	Conn       net.Conn
+	writeMu    sync.Mutex
 }
 
 type peerScore struct {
@@ -111,7 +113,7 @@ var (
 	introServices = map[string]introRegistration{}
 
 	guardMu       sync.RWMutex
-	guardServices = map[string]guardRegistration{}
+	guardServices = map[string]*guardRegistration{}
 
 	rendezvousMu sync.Mutex
 	rendezvouses = map[string]*rendezvousWait{}
@@ -121,6 +123,9 @@ var (
 
 	trackerMu    sync.Mutex
 	trackersByIP = map[string]struct{}{}
+
+	guardClientMu sync.Mutex
+	guardClients  = map[string]context.CancelFunc{}
 )
 
 func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
@@ -132,13 +137,43 @@ func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKe
 	return sendControl(ctx, introAddr, msg, opts)
 }
 
-func RegisterGuard(ctx context.Context, opts ControlOptions, guardAddr, lookupKey, ownerAddr string) error {
-	msg := Message{
-		Action:    "guard_register",
-		Service:   lookupKey,
-		OwnerAddr: ownerAddr,
+func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr, lookupKey string, cfgFn func() HandlerConfig) {
+	key := guardClientKey(opts.Identity.NodeID, guardAddr, lookupKey)
+
+	guardClientMu.Lock()
+	if _, ok := guardClients[key]; ok {
+		guardClientMu.Unlock()
+		return
 	}
-	return sendControl(ctx, guardAddr, msg, opts)
+	runCtx, cancel := context.WithCancel(ctx)
+	guardClients[key] = cancel
+	guardClientMu.Unlock()
+
+	go func() {
+		defer func() {
+			guardClientMu.Lock()
+			delete(guardClients, key)
+			guardClientMu.Unlock()
+		}()
+
+		backoff := 150 * time.Millisecond
+		for {
+			err := maintainGuardRegistration(runCtx, opts, guardAddr, lookupKey, cfgFn)
+			if runCtx.Err() != nil {
+				return
+			}
+			timer := time.NewTimer(backoff)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if err == nil && backoff < time.Second {
+				backoff *= 2
+			}
+		}
+	}()
 }
 
 func DialHiddenService(ctx context.Context, service record.ServiceRecord, registry *discovery.Registry) (net.Conn, error) {
@@ -255,17 +290,14 @@ func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
 	switch msg.Action {
 	case "intro_register":
 		introMu.Lock()
-		introServices[msg.Service] = introRegistration{NotifyAddrs: sanitizeAddressList(msg.NotifyAddrs)}
+		introServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)] = introRegistration{NotifyAddrs: sanitizeAddressList(msg.NotifyAddrs)}
 		introMu.Unlock()
 		return nil
 	case "guard_register":
-		guardMu.Lock()
-		guardServices[msg.Service] = guardRegistration{OwnerAddr: msg.OwnerAddr}
-		guardMu.Unlock()
-		return nil
+		return holdGuardRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), msg.CallbackID)
 	case "intro_request":
 		introMu.RLock()
-		reg := introServices[msg.Service]
+		reg := introServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)]
 		introMu.RUnlock()
 		if len(reg.NotifyAddrs) == 0 {
 			return fmt.Errorf("hidden service %q is not registered on this intro point", msg.Service)
@@ -294,26 +326,22 @@ func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
 		return fmt.Errorf("no reachable guard or owner for hidden service %q", msg.Service)
 	case "guard_notify":
 		guardMu.RLock()
-		reg := guardServices[msg.Service]
+		_, ok := guardServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)]
 		guardMu.RUnlock()
-		if reg.OwnerAddr == "" {
+		if !ok {
 			return handleIntroNotify(ctx, msg, cfg)
 		}
-		return sendControl(ctx, reg.OwnerAddr, Message{
+		if err := sendGuardCallback(nodeScopedService(cfg.Identity.NodeID, msg.Service), Message{
 			Action:               "intro_notify",
 			Service:              msg.Service,
 			RendezvousID:         msg.RendezvousID,
 			RendezvousCandidates: append([]string(nil), msg.RendezvousCandidates...),
 			HopCount:             msg.HopCount,
 			RelayExcludes:        append([]string(nil), msg.RelayExcludes...),
-		}, ControlOptions{
-			Identity:      cfg.Identity,
-			Registry:      cfg.Registry,
-			SelfAddr:      cfg.AdvertiseAddr,
-			TransportMode: cfg.TransportMode,
-			RelayHopCount: controlHopCountFromData(msg.HopCount),
-			RelayExcludes: msg.RelayExcludes,
-		})
+		}); err != nil {
+			return err
+		}
+		return nil
 	case "intro_notify":
 		return handleIntroNotify(ctx, msg, cfg)
 	case "rv_join", "rv_register":
@@ -531,6 +559,14 @@ func controlHopCountFromData(hopCount int) int {
 	default:
 		return 1
 	}
+}
+
+func nodeScopedService(nodeID, service string) string {
+	return nodeID + "\n" + service
+}
+
+func guardClientKey(nodeID, guardAddr, lookupKey string) string {
+	return nodeID + "\n" + guardAddr + "\n" + lookupKey
 }
 
 func resolveHostedService(lookup string, cfg HandlerConfig) string {
@@ -858,6 +894,88 @@ func measureHealth(ctx context.Context, addr string) (bool, time.Duration, int) 
 	}
 	healthMu.Unlock()
 	return healthy, rtt, failures
+}
+
+func maintainGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr, lookupKey string, cfgFn func() HandlerConfig) error {
+	conn, err := openControlConn(ctx, guardAddr, opts)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	callbackID := fmt.Sprintf("cb_%d", time.Now().UnixNano())
+	if err := writeControl(conn, Message{
+		Action:     "guard_register",
+		Service:    lookupKey,
+		CallbackID: callbackID,
+	}); err != nil {
+		return err
+	}
+
+	for {
+		msg, err := readControl(conn)
+		if err != nil {
+			return err
+		}
+		if msg.Action != "intro_notify" {
+			continue
+		}
+		go func(msg Message) {
+			_ = handleIntroNotify(ctx, msg, cfgFn())
+		}(msg)
+	}
+}
+
+func holdGuardRegistration(conn net.Conn, scopedService, callbackID string) error {
+	reg := &guardRegistration{
+		CallbackID: callbackID,
+		Conn:       conn,
+	}
+
+	guardMu.Lock()
+	if existing, ok := guardServices[scopedService]; ok && existing.Conn != nil {
+		_ = existing.Conn.Close()
+	}
+	guardServices[scopedService] = reg
+	guardMu.Unlock()
+
+	defer func() {
+		guardMu.Lock()
+		current, ok := guardServices[scopedService]
+		if ok && current != nil && current.CallbackID == callbackID {
+			delete(guardServices, scopedService)
+		}
+		guardMu.Unlock()
+	}()
+
+	for {
+		if _, err := readControl(conn); err != nil {
+			return nil
+		}
+	}
+}
+
+func sendGuardCallback(scopedService string, msg Message) error {
+	guardMu.RLock()
+	reg, ok := guardServices[scopedService]
+	guardMu.RUnlock()
+	if !ok || reg.Conn == nil {
+		return fmt.Errorf("no active guard callback registered for %s", scopedService)
+	}
+
+	reg.writeMu.Lock()
+	defer reg.writeMu.Unlock()
+	if err := writeControl(reg.Conn, msg); err != nil {
+		_ = reg.Conn.Close()
+		guardMu.Lock()
+		current, ok := guardServices[scopedService]
+		if ok && current.CallbackID == reg.CallbackID {
+			delete(guardServices, scopedService)
+		}
+		guardMu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func sendControl(ctx context.Context, addr string, msg Message, opts ControlOptions) error {

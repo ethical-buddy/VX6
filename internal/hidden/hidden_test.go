@@ -2,6 +2,7 @@ package hidden
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -105,4 +106,127 @@ func TestSelectTopologyKeepsGuardSetStable(t *testing.T) {
 			t.Fatalf("expected stable guard selection, got %#v and %#v", first.Guards, second.Guards)
 		}
 	}
+}
+
+func TestGuardCallbackRegistrationAndForwarding(t *testing.T) {
+	guardMu.Lock()
+	original := guardServices
+	guardServices = map[string]*guardRegistration{}
+	guardMu.Unlock()
+	defer func() {
+		guardMu.Lock()
+		guardServices = original
+		guardMu.Unlock()
+	}()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	scope := nodeScopedService("guard-a", "ghost")
+	done := make(chan error, 1)
+	go func() {
+		done <- holdGuardRegistration(serverConn, scope, "cb-1")
+	}()
+
+	waitForGuardRegistration(t, scope)
+
+	msgCh := make(chan Message, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		msg, err := readControl(clientConn)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		msgCh <- msg
+	}()
+
+	if err := sendGuardCallback(scope, Message{
+		Action:       "intro_notify",
+		Service:      "ghost",
+		RendezvousID: "rv-1",
+	}); err != nil {
+		t.Fatalf("send guard callback: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("read callback message: %v", err)
+	case msg := <-msgCh:
+		if msg.Action != "intro_notify" || msg.RendezvousID != "rv-1" || msg.Service != "ghost" {
+			t.Fatalf("unexpected callback message: %+v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for callback message")
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("guard registration did not shut down after connection close")
+	}
+}
+
+func TestGuardCallbackScopesAreIsolatedPerNode(t *testing.T) {
+	guardMu.Lock()
+	original := guardServices
+	guardServices = map[string]*guardRegistration{}
+	guardMu.Unlock()
+	defer func() {
+		guardMu.Lock()
+		guardServices = original
+		guardMu.Unlock()
+	}()
+
+	scopeA := nodeScopedService("guard-a", "ghost")
+	scopeB := nodeScopedService("guard-b", "ghost")
+	leftA, rightA := net.Pipe()
+	defer leftA.Close()
+	defer rightA.Close()
+
+	guardMu.Lock()
+	guardServices[scopeA] = &guardRegistration{CallbackID: "cb-a", Conn: leftA}
+	guardMu.Unlock()
+
+	msgCh := make(chan Message, 1)
+	go func() {
+		msg, err := readControl(rightA)
+		if err == nil {
+			msgCh <- msg
+		}
+	}()
+
+	if err := sendGuardCallback(scopeA, Message{Action: "intro_notify", Service: "ghost", RendezvousID: "rv-a"}); err != nil {
+		t.Fatalf("send scoped callback: %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.RendezvousID != "rv-a" {
+			t.Fatalf("unexpected scoped callback message: %+v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for scoped callback message")
+	}
+
+	if err := sendGuardCallback(scopeB, Message{Action: "intro_notify", Service: "ghost"}); err == nil {
+		t.Fatal("expected callback on missing guard scope to fail")
+	}
+}
+
+func waitForGuardRegistration(t *testing.T, scope string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		guardMu.RLock()
+		_, ok := guardServices[scope]
+		guardMu.RUnlock()
+		if ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for guard registration %q", scope)
 }
