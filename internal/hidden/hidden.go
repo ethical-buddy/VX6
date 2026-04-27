@@ -837,8 +837,7 @@ func measureHealth(ctx context.Context, addr string) (bool, time.Duration, int) 
 	defer cancel()
 
 	start := time.Now()
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
+	conn, err := vxtransport.DialContext(dialCtx, vxtransport.ModeTCP, addr)
 	healthy := err == nil
 	rtt := timeout
 	failures := entry.Failures

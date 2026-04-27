@@ -877,8 +877,7 @@ func runSend(ctx context.Context, args []string) error {
 			}
 			return conn, nil
 		}
-		var d net.Dialer
-		return d.DialContext(rctx, "tcp6", addr)
+		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, addr)
 	}
 	conn, err := dialer(ctx)
 	if err != nil {
@@ -1071,7 +1070,7 @@ func runStatus(ctx context.Context, args []string) error {
 	}
 
 	probeAddr := statusProbeAddr(cfg)
-	conn, err := net.DialTimeout("tcp6", probeAddr, 500*time.Millisecond)
+	conn, err := vxtransport.DialTimeout(cfg.Node.TransportMode, probeAddr, 500*time.Millisecond)
 	if err != nil {
 		printRuntimeStatus("OFFLINE", runtimectl.Status{
 			NodeName:        cfg.Node.Name,

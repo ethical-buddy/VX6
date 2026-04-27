@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"time"
 )
 
 const (
@@ -46,4 +47,19 @@ func Listen(mode, addr string) (net.Listener, error) {
 func DialContext(ctx context.Context, mode, addr string) (net.Conn, error) {
 	var dialer net.Dialer
 	return dialer.DialContext(ctx, "tcp6", addr)
+}
+
+func DialTimeout(mode, addr string, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return DialContext(ctx, mode, addr)
+}
+
+func ProbeContext(ctx context.Context, mode, addr string) bool {
+	conn, err := DialContext(ctx, mode, addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }

@@ -720,14 +720,7 @@ func addSyncTarget(targets map[string]struct{}, selfAddr, addr string) {
 func probeSyncTarget(ctx context.Context, addr string) bool {
 	dialCtx, cancel := context.WithTimeout(ctx, syncProbeTimeout)
 	defer cancel()
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
+	return vxtransport.ProbeContext(dialCtx, vxtransport.ModeTCP, addr)
 }
 
 func withSyncTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
