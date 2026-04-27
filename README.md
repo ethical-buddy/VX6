@@ -1,65 +1,306 @@
 # VX6
 
-VX6 is an IPv6-first node, service, and relay runtime.
+[![IPv6 First](https://img.shields.io/badge/IPv6-first-0F766E?style=for-the-badge)](./docs/architecture.md)
+[![Peer to Peer](https://img.shields.io/badge/peer--to--peer-service_network-1D4ED8?style=for-the-badge)](./docs/discovery.md)
+[![Localhost to Localhost](https://img.shields.io/badge/localhost-to_localhost-F59E0B?style=for-the-badge)](./docs/services.md)
+[![Linux Ready](https://img.shields.io/badge/Linux-systemd_ready-7C3AED?style=for-the-badge)](./docs/systemd.md)
 
-It lets you:
+VX6 is an IPv6-first peer-to-peer network for real services.  
+It turns local apps into network-reachable services without forcing them to stop being local.  
+Share SSH, APIs, web apps, databases, dashboards, internal tools, files, and hidden aliases across peers.  
+Build on localhost. Share by peer. Stay direct.
 
-- share files between VX6 nodes
-- publish local TCP services such as SSH, HTTP, and databases
-- connect to remote services by name instead of raw IP
-- route traffic through a 5-hop relay path when you want a proxy path
-- publish hidden services by alias without exposing the service endpoint
-- run as a background service under systemd
+> VX6 brings localhost to the network.
 
-Included app:
+## Why VX6
 
-- [apps/chat](./apps/chat/README.md): decentralized web chat with direct and group messaging over VX6
+Most apps already work on `127.0.0.1`. VX6 keeps that model intact.
 
-## Endpoint Format
+Instead of redesigning your stack, opening raw ports everywhere, or depending on one fixed center, VX6 lets peers reach services through direct IPv6, named discovery, relay paths, and hidden aliases.
 
-VX6 uses IPv6 endpoints in this form:
+That makes it a strong fit for:
+
+- SSH and admin access
+- internal APIs and dashboards
+- databases and tooling
+- CTF infrastructure
+- distributed systems
+- collaboration apps
+- peer-to-peer products built on top of VX6
+
+## The Core Idea
 
 ```text
-'[2001:db8::10]:4242'
+  local app -> VX6 -> peer network -> VX6 -> local app
+
+  build on localhost
+  share by peer
+  stay direct
 ```
 
-Rules:
+## Localhost to Localhost
 
-- always include square brackets around the IPv6 address
-- always include the port
-- in shell commands, quote the full endpoint
+This is the main VX6 story.
 
-## Current Features
+Your service can stay on localhost:
 
-- IPv6-only transport
-- persistent Ed25519 node identity
-- signed node and service records
-- bootstrap-based discovery with local cache
-- DHT-backed node and service lookup
-- encrypted file transfer
-- encrypted direct service forwarding
-- 5-hop proxy forwarding
-- hidden services with:
-  - alias-only lookup
-  - 3 active intro nodes
-  - 2 standby intro nodes
-  - 2 guard nodes
-  - 3 rendezvous candidates
-  - `fast` profile: `3 + X + 3`
-  - `balanced` profile: `5 + X + 5`
-- direct IPv6 service sharing without joining a VX6 network
-- Linux systemd service support
-- reload of a running background node with `vx6 reload`
+- `127.0.0.1:22`
+- `127.0.0.1:8080`
+- `127.0.0.1:5432`
+
+Another peer can reach that service from its own localhost.
+
+```text
+  Bob's Machine                             Alice's Machine
+  ------------------                        ------------------
+  sshd -> 127.0.0.1:22                      ssh -p 2222 user@127.0.0.1
+        |                                           ^
+        v                                           |
+      [ VX6 ] <========== peer network =========> [ VX6 ]
+```
+
+This is why VX6 feels simple:
+
+- the app stays local
+- the user connects to a local port
+- the service does not need to be redesigned
+
+## Highlights
+
+- IPv6-first peer-to-peer service network
+- localhost-to-localhost service sharing
+- signed node identity, signed service records, and encrypted service/file sessions
+- direct IPv6 access when you already know the target address
+- named services like `alice.ssh` and `team.api`
+- hidden services by alias
+- multi-hop relay paths
+- file transfer between VX6 nodes
+- Linux systemd support
+- eBPF-assisted Linux fast-path design
+- builder-friendly model for apps and distributed systems
+
+## Discovery Without a Permanent Center
+
+In VX6, a bootstrap is not a forever-central server.
+
+It is simply the first live node you know.
+
+That can be:
+
+- your own VPS
+- a team node
+- a friend's node
+- any trusted live node already in the network
+
+Once connected, VX6 learns peers, services, and aliases from the network and keeps moving through signed records, peer sync, and DHT-backed lookups.
+
+```text
+               first contact
+
+            [ any known node ]
+                 /   |   \
+                /    |    \
+               v     v     v
+           [NodeA][NodeB][NodeC]
+              \      |      /
+               \     |     /
+                \    |    /
+                 \   |   /
+                  [ peer mesh ]
+```
+
+## Hidden Services
+
+VX6 hidden services are reached by alias instead of by public service endpoint.
+
+They use:
+
+- 3 active intro nodes
+- 2 standby intro nodes
+- 2 guard nodes
+- 3 rendezvous candidates
+
+Profiles:
+
+- `fast`: `3 + X + 3`
+- `balanced`: `5 + X + 5`
+
+Hidden-service flow:
+
+1. the service publishes an alias
+2. the client resolves the alias
+3. intro nodes and guards carry routing signals
+4. client and owner build paths toward a rendezvous point
+5. the service stream is carried through the relay topology
+
+```text
+                  active intros
+              [I1] [I2] [I3]
+                  \   |   /
+                   \  |  /
+                    \ | /
+                [ hidden alias ]
+
+             standby intros: [S1] [S2]
+
+  client side path                     owner side path
+
+  Client -> A -> B -> C -> X <- D <- E <- F <- Hidden Owner
+
+  X = rendezvous node
+```
+
+## Fast Paths, Relays, and eBPF
+
+VX6 supports direct service access, relay paths, and Linux kernel-assisted networking.
+
+Why it feels fast:
+
+- direct IPv6 is available when possible
+- services stay close to localhost
+- peers can talk directly
+- relay paths avoid forcing every workload through one center
+- Linux eBPF is used as a fast-path layer for VX6 traffic handling
+
+```text
+  NIC
+   |
+   v
+ [eBPF / XDP]
+   |
+   +--> classify VX6 traffic
+   +--> fast relay decisions
+   +--> keep hot path lightweight
+   |
+   v
+ [ VX6 runtime ]
+```
+
+## What You Can Build
+
+VX6 is not only something to use. It is something to build on.
+
+Examples:
+
+- peer-to-peer video sharing
+- private meeting rooms
+- team chat
+- collaborative editors
+- remote control panels
+- distributed compute control planes
+- edge coordination systems
+- internal service meshes
+
+For the right topology, a VX6-based video app can move media more directly between participants and feel lighter than stacks built around more centralized traffic flow.
+
+```text
+  [User A Camera/Mic] -> [VX6 media app] -> [VX6] ==== peer path ==== [VX6] -> [VX6 media app] -> [User B Screen/Speakers]
+
+  direct media path
+  lighter middle layer
+  good fit for small-group real-time apps
+```
+
+Think of VX6 as the network layer under your app:
+
+```text
+      your app
+        |
+        +--> UI
+        +--> state
+        +--> media
+        +--> collaboration
+        |
+        v
+       VX6
+        |
+        +--> naming
+        +--> localhost sharing
+        +--> relay paths
+        +--> hidden aliases
+        +--> peer discovery
+```
+
+## Use Cases
+
+### Team Infrastructure
+
+A frontend can live on one node, an API on another, and a database on a third.  
+Each service can stay local while VX6 connects the whole stack.
+
+```text
+   Users
+    |
+    v
+ [Frontend Node]
+       |
+       v
+   [API Node]
+       |
+       v
+   [DB Node]
+
+  Each service can stay local on its own machine.
+  VX6 connects the whole stack.
+```
+
+### CTF Teams
+
+VX6 works well for:
+
+- challenge hosting
+- scoreboards
+- admin panels
+- internal tools
+- controlled team access
+
+```text
+       [Scoreboard]
+        /   |   \
+       /    |    \
+ [Challenge1][Challenge2][Challenge3]
+       \      |       /
+        \     |      /
+         [Admin Tools]
+              |
+         [10 Team Members]
+```
+
+### Distributed Computing
+
+VX6 fits worker meshes, schedulers, controllers, and internal metrics systems.
+
+```text
+           [ Controller ]
+            /   |   \
+           /    |    \
+          v     v     v
+      [Worker][Worker][Worker]
+          \      |      /
+           \     |     /
+            \    |    /
+             [ Metrics ]
+```
+
+### Collaboration Tools
+
+VX6 is a good base for:
+
+- team chat
+- private dashboards
+- shared notes
+- internal meeting tools
+- collaborative workspaces
 
 ## Quick Start
 
-Build:
+### 1. Build
 
 ```bash
 go build -o ./vx6 ./cmd/vx6
 ```
 
-Initialize a node:
+### 2. Initialize a Node
 
 ```bash
 ./vx6 init \
@@ -69,42 +310,35 @@ Initialize a node:
   --bootstrap '[2001:db8::1]:4242'
 ```
 
-Start the node:
+`--bootstrap` means a known live VX6 node. It does not need to be a permanent central server.
+
+### 3. Start the Node
 
 ```bash
 ./vx6 node
 ```
 
-Expose a local service:
+### 4. Share a Local Service
 
 ```bash
 ./vx6 service add --name ssh --target 127.0.0.1:22
 ./vx6 reload
 ```
 
-Connect from another node:
+### 5. Connect From Another Node
 
 ```bash
 ./vx6 connect --service alice.ssh --listen 127.0.0.1:2222
 ssh -p 2222 user@127.0.0.1
 ```
 
-`--listen` is the local port on your own machine. If you choose `127.0.0.1:3333`, VX6 listens on `3333`.
+`--listen` is your own local port. VX6 uses exactly the port you give.
 
-Default paths:
+## Direct IPv6 Mode
 
-- config: `~/.config/vx6/config.json`
-- identity: `~/.config/vx6/identity.json`
-- runtime state and registry cache: `~/.local/share/vx6`
-- received files: `~/Downloads`
+If two people already know the host IPv6 address, they can connect directly.
 
-## Common Use Cases
-
-### 1. Direct IPv6 Service Share
-
-No bootstrap. No VX6 naming. Just one friend and one IPv6 address.
-
-On the host:
+Host:
 
 ```bash
 ./vx6 init --name host --listen '[::]:4242' --advertise '[2001:db8::10]:4242'
@@ -112,43 +346,15 @@ On the host:
 ./vx6 node
 ```
 
-On the client:
+Client:
 
 ```bash
 ./vx6 connect --service ssh --addr '[2001:db8::10]:4242' --listen 127.0.0.1:2222
 ```
 
-### 2. Named Service Over a VX6 Network
+## Hidden Service Example
 
-On the bootstrap:
-
-```bash
-./vx6 init --name bootstrap --listen '[::]:4242' --advertise '[2001:db8::1]:4242'
-./vx6 node
-```
-
-On a normal node:
-
-```bash
-./vx6 init \
-  --name bob \
-  --listen '[::]:4242' \
-  --advertise '[2001:db8::20]:4242' \
-  --bootstrap '[2001:db8::1]:4242'
-./vx6 service add --name web --target 127.0.0.1:8080
-./vx6 node
-```
-
-On a client:
-
-```bash
-./vx6 connect --service bob.web --listen 127.0.0.1:9000
-curl http://127.0.0.1:9000
-```
-
-### 3. Hidden Service
-
-On the host:
+Host:
 
 ```bash
 ./vx6 init \
@@ -168,40 +374,89 @@ On the host:
 ./vx6 node
 ```
 
-On the client:
+Client:
 
 ```bash
 ./vx6 connect --service hs-admin --listen 127.0.0.1:2222
 ```
 
-### 4. File Transfer
+## File Transfer
+
+Send a file:
 
 ```bash
 ./vx6 send --file ./backup.tar --to bob
 ```
 
-By default, received files are written to `~/Downloads`.
+Received files go to:
+
+```text
+~/Downloads
+```
 
 ## Background Operation
 
-VX6 is designed to stay running in the background.
+VX6 is designed to stay running.
 
-- foreground run: `./vx6 node`
-- reload changed config or services: `./vx6 reload`
-- status: `./vx6 status`
+Foreground:
 
-For systemd setup, see [docs/systemd.md](./docs/systemd.md).
+```bash
+./vx6 node
+```
+
+Systemd user service:
+
+```bash
+systemctl --user enable --now vx6
+systemctl --user status vx6
+systemctl --user reload vx6
+```
+
+## Default Paths
+
+```text
+~/.config/vx6/config.json
+~/.config/vx6/identity.json
+~/.config/vx6/node.pid
+~/.local/share/vx6
+~/Downloads
+```
+
+## Endpoint Format
+
+VX6 IPv6 endpoints always look like this:
+
+```text
+'[ipv6]:port'
+```
+
+Example:
+
+```text
+'[2401:db8::10]:4242'
+```
+
+Rules:
+
+- always include square brackets
+- always include the port
+- quote the full endpoint in shell commands
+
+## Included App
+
+- [apps/chat](./apps/chat/README.md): decentralized web chat with direct and group messaging over VX6
 
 ## Documentation
 
-- [docs/USAGE.md](./docs/USAGE.md): plain-language usage guide
-- [docs/SETUP.md](./docs/SETUP.md): operator setup guide
-- [docs/COMMANDS.md](./docs/COMMANDS.md): full command reference
-- [docs/systemd.md](./docs/systemd.md): background service setup
-- [docs/services.md](./docs/services.md): service and hidden-service model
-- [docs/discovery.md](./docs/discovery.md): discovery and DHT model
-- [docs/architecture.md](./docs/architecture.md): runtime architecture
-- [README_PROXY.md](./README_PROXY.md): relay and hidden-service path notes
+- [docs/USAGE.md](./docs/USAGE.md)
+- [docs/SETUP.md](./docs/SETUP.md)
+- [docs/COMMANDS.md](./docs/COMMANDS.md)
+- [docs/systemd.md](./docs/systemd.md)
+- [docs/services.md](./docs/services.md)
+- [docs/discovery.md](./docs/discovery.md)
+- [docs/architecture.md](./docs/architecture.md)
+- [README_PROXY.md](./README_PROXY.md)
+- [website-content](./website-content/README.md)
 
 ## Build and Test
 
@@ -210,17 +465,11 @@ make build
 make test
 ```
 
-Or:
+or:
 
 ```bash
 go test ./...
 ```
-
-## Status
-
-VX6 is usable now for IPv6 file transfer, named service access, hidden services, direct-by-address sharing, and background node operation.
-
-eBPF support is currently limited to the embedded XDP object and attach/detach tooling. The working relay and service transport still run in user space.
 
 ## License
 
