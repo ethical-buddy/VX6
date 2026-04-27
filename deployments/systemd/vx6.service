@@ -1,0 +1,15 @@
+[Unit]
+Description=VX6 Node Background Listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/vx6 node
+ExecReload=/usr/bin/vx6 reload
+Restart=on-failure
+RestartSec=3
+Environment=VX6_CONFIG_PATH=%h/.config/vx6/config.json
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,21 @@
+/vx6
+/chat
+internal/ebpf/onion_relay.o
+
+.codex
+.codex/
+data/
+*.pid
+*.log
+.DS_Store
+
+# Nested or duplicate worktrees kept outside the top-level VX6 history.
+VX6WEB/
+main/
+
+# Content/editor scratch that should not block core VX6 development.
+website-content/
+plan.md
+
+# Generated or exported artifacts.
+docs/main-protocol-hidden-implementation-plan.pdf
