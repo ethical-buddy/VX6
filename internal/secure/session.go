@@ -36,6 +36,8 @@ type Conn struct {
 	readBuf     []byte
 	writeDir    byte
 	readDir     byte
+	localNodeID string
+	peerNodeID  string
 }
 
 func Client(conn net.Conn, kind byte, id identity.Identity) (*Conn, error) {
@@ -99,8 +101,10 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 	}
 
 	c := &Conn{
-		Conn: conn,
-		aead: aead,
+		Conn:        conn,
+		aead:        aead,
+		localNodeID: id.NodeID,
+		peerNodeID:  remoteHello.NodeID,
 	}
 	if initiator {
 		c.writeDir = 0
@@ -110,6 +114,14 @@ func handshake(conn net.Conn, kind byte, id identity.Identity, initiator bool) (
 		c.readDir = 0
 	}
 	return c, nil
+}
+
+func (c *Conn) LocalNodeID() string {
+	return c.localNodeID
+}
+
+func (c *Conn) PeerNodeID() string {
+	return c.peerNodeID
 }
 
 func (c *Conn) Read(p []byte) (int, error) {

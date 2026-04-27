@@ -3,11 +3,26 @@ package hidden
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
 )
+
+type testControlConn struct {
+	net.Conn
+	local string
+	peer  string
+}
+
+func (c testControlConn) LocalNodeID() string {
+	return c.local
+}
+
+func (c testControlConn) PeerNodeID() string {
+	return c.peer
+}
 
 func TestSelectTopologyManualPrefersChosenIntros(t *testing.T) {
 	t.Parallel()
@@ -215,6 +230,54 @@ func TestGuardCallbackScopesAreIsolatedPerNode(t *testing.T) {
 	}
 }
 
+func TestControlEnvelopeValidationRejectsReplayAndWrongPeer(t *testing.T) {
+	controlReplayMu.Lock()
+	originalReplays := controlReplays
+	controlReplays = map[string]time.Time{}
+	controlReplayMu.Unlock()
+	t.Cleanup(func() {
+		controlReplayMu.Lock()
+		controlReplays = originalReplays
+		controlReplayMu.Unlock()
+	})
+
+	sender := testControlConn{local: "node-a"}
+	receiver := testControlConn{peer: "node-a"}
+
+	msg, err := stampControlMessage(sender, Message{Action: "intro_request", Service: "ghost"})
+	if err != nil {
+		t.Fatalf("stamp control message: %v", err)
+	}
+	if msg.SenderNodeID != "node-a" || msg.Nonce == "" || msg.Epoch == 0 {
+		t.Fatalf("unexpected stamped control envelope: %+v", msg)
+	}
+	if err := validateControlMessage(receiver, msg); err != nil {
+		t.Fatalf("validate control message: %v", err)
+	}
+	if err := validateControlMessage(receiver, msg); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("expected replay detection, got %v", err)
+	}
+
+	msg, err = stampControlMessage(sender, Message{Action: "intro_request", Service: "ghost"})
+	if err != nil {
+		t.Fatalf("restamp control message: %v", err)
+	}
+	if err := validateControlMessage(testControlConn{peer: "node-b"}, msg); err == nil || !strings.Contains(err.Error(), "sender mismatch") {
+		t.Fatalf("expected sender mismatch, got %v", err)
+	}
+
+	expired := Message{
+		Action:       "intro_request",
+		Service:      "ghost",
+		SenderNodeID: "node-a",
+		Epoch:        controlEpoch(time.Now().Add(-2 * hiddenControlEpochDuration)),
+		Nonce:        "expired-nonce",
+	}
+	if err := validateControlMessage(receiver, expired); err == nil || !strings.Contains(err.Error(), "epoch") {
+		t.Fatalf("expected expired epoch rejection, got %v", err)
+	}
+}
+
 func TestIntroRegistrationReplacesNotifyTargets(t *testing.T) {
 	introMu.Lock()
 	original := introServices
@@ -269,6 +332,88 @@ func TestIntroRegistrationReplacesNotifyTargets(t *testing.T) {
 	case <-doneB:
 	case <-time.After(time.Second):
 		t.Fatal("replacement intro registration did not shut down after connection close")
+	}
+}
+
+func TestHoldGuardRegistrationRespondsToControlPing(t *testing.T) {
+	guardMu.Lock()
+	original := guardServices
+	guardServices = map[string]*guardRegistration{}
+	guardMu.Unlock()
+	defer func() {
+		guardMu.Lock()
+		guardServices = original
+		guardMu.Unlock()
+	}()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	scope := nodeScopedService("guard-a", "ghost")
+	done := make(chan error, 1)
+	go func() {
+		done <- holdGuardRegistration(serverConn, scope, "cb-1")
+	}()
+
+	waitForGuardRegistration(t, scope)
+
+	if err := writeControl(clientConn, Message{Action: "control_ping"}); err != nil {
+		t.Fatalf("write guard ping: %v", err)
+	}
+	msg, err := readControl(clientConn)
+	if err != nil {
+		t.Fatalf("read guard pong: %v", err)
+	}
+	if msg.Action != "control_pong" {
+		t.Fatalf("expected control_pong, got %+v", msg)
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("guard registration did not shut down after ping test")
+	}
+}
+
+func TestHoldIntroRegistrationRespondsToControlPing(t *testing.T) {
+	introMu.Lock()
+	original := introServices
+	introServices = map[string]introRegistration{}
+	introMu.Unlock()
+	defer func() {
+		introMu.Lock()
+		introServices = original
+		introMu.Unlock()
+	}()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	scope := nodeScopedService("intro-a", "ghost")
+	done := make(chan error, 1)
+	go func() {
+		done <- holdIntroRegistration(serverConn, scope, []string{"guard-a"})
+	}()
+
+	waitForIntroRegistration(t, scope)
+
+	if err := writeControl(clientConn, Message{Action: "control_ping"}); err != nil {
+		t.Fatalf("write intro ping: %v", err)
+	}
+	msg, err := readControl(clientConn)
+	if err != nil {
+		t.Fatalf("read intro pong: %v", err)
+	}
+	if msg.Action != "control_pong" {
+		t.Fatalf("expected control_pong, got %+v", msg)
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("intro registration did not shut down after ping test")
 	}
 }
 
