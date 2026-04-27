@@ -3,8 +3,11 @@ package hidden
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -34,6 +37,15 @@ const (
 	IntroModeHybrid = "hybrid"
 )
 
+var (
+	hiddenControlEpochDuration = 30 * time.Second
+	hiddenControlPingInterval  = 10 * time.Second
+	hiddenControlReadTimeout   = 25 * time.Second
+	hiddenControlLeaseDuration = 30 * time.Second
+
+	errHiddenControlLeaseExpired = errors.New("hidden control lease expired")
+)
+
 type Message struct {
 	Action               string   `json:"action"`
 	Service              string   `json:"service,omitempty"`
@@ -43,6 +55,9 @@ type Message struct {
 	HopCount             int      `json:"hop_count,omitempty"`
 	RelayExcludes        []string `json:"relay_excludes,omitempty"`
 	CallbackID           string   `json:"callback_id,omitempty"`
+	SenderNodeID         string   `json:"sender_node_id,omitempty"`
+	Epoch                int64    `json:"epoch,omitempty"`
+	Nonce                string   `json:"nonce,omitempty"`
 }
 
 type HandlerConfig struct {
@@ -83,12 +98,24 @@ type rendezvousWait struct {
 
 type introRegistration struct {
 	NotifyAddrs []string
+	Conn        net.Conn
 }
 
 type guardRegistration struct {
 	CallbackID string
 	Conn       net.Conn
 	writeMu    sync.Mutex
+}
+
+type registrationLease struct {
+	Fingerprint string
+	Cancel      context.CancelFunc
+}
+
+type OwnerRegistrationTarget struct {
+	LookupKey  string
+	GuardAddrs []string
+	IntroAddrs []string
 }
 
 type peerScore struct {
@@ -124,8 +151,14 @@ var (
 	trackerMu    sync.Mutex
 	trackersByIP = map[string]struct{}{}
 
+	introClientMu sync.Mutex
+	introClients  = map[string]registrationLease{}
+
 	guardClientMu sync.Mutex
-	guardClients  = map[string]context.CancelFunc{}
+	guardClients  = map[string]registrationLease{}
+
+	controlReplayMu sync.Mutex
+	controlReplays  = map[string]time.Time{}
 )
 
 func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
@@ -137,6 +170,54 @@ func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKe
 	return sendControl(ctx, introAddr, msg, opts)
 }
 
+func EnsureIntroRegistration(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) {
+	key := introClientKey(opts.Identity.NodeID, introAddr, lookupKey)
+	fingerprint := addressFingerprint(notifyAddrs)
+
+	introClientMu.Lock()
+	if existing, ok := introClients[key]; ok {
+		if existing.Fingerprint == fingerprint {
+			introClientMu.Unlock()
+			return
+		}
+		existing.Cancel()
+		delete(introClients, key)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	introClients[key] = registrationLease{
+		Fingerprint: fingerprint,
+		Cancel:      cancel,
+	}
+	introClientMu.Unlock()
+
+	go func() {
+		defer func() {
+			introClientMu.Lock()
+			current, ok := introClients[key]
+			if ok && current.Fingerprint == fingerprint {
+				delete(introClients, key)
+			}
+			introClientMu.Unlock()
+		}()
+
+		backoff := 150 * time.Millisecond
+		for {
+			err := maintainIntroRegistration(runCtx, opts, introAddr, lookupKey, notifyAddrs)
+			if runCtx.Err() != nil {
+				return
+			}
+			backoff = nextRegistrationBackoff(err, backoff)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
+
 func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr, lookupKey string, cfgFn func() HandlerConfig) {
 	key := guardClientKey(opts.Identity.NodeID, guardAddr, lookupKey)
 
@@ -146,7 +227,7 @@ func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr
 		return
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	guardClients[key] = cancel
+	guardClients[key] = registrationLease{Cancel: cancel}
 	guardClientMu.Unlock()
 
 	go func() {
@@ -162,15 +243,13 @@ func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr
 			if runCtx.Err() != nil {
 				return
 			}
+			backoff = nextRegistrationBackoff(err, backoff)
 			timer := time.NewTimer(backoff)
 			select {
 			case <-runCtx.Done():
 				timer.Stop()
 				return
 			case <-timer.C:
-			}
-			if err == nil && backoff < time.Second {
-				backoff *= 2
 			}
 		}
 	}()
@@ -282,17 +361,14 @@ func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
 	if err != nil {
 		return err
 	}
-	msg, err := readControl(controlConn)
+	msg, err := readValidatedControl(controlConn)
 	if err != nil {
 		return err
 	}
 
 	switch msg.Action {
 	case "intro_register":
-		introMu.Lock()
-		introServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)] = introRegistration{NotifyAddrs: sanitizeAddressList(msg.NotifyAddrs)}
-		introMu.Unlock()
-		return nil
+		return holdIntroRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), sanitizeAddressList(msg.NotifyAddrs))
 	case "guard_register":
 		return holdGuardRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), msg.CallbackID)
 	case "intro_request":
@@ -565,8 +641,18 @@ func nodeScopedService(nodeID, service string) string {
 	return nodeID + "\n" + service
 }
 
+func introClientKey(nodeID, introAddr, lookupKey string) string {
+	return "intro\n" + nodeID + "\n" + lookupKey + "\n" + introAddr
+}
+
 func guardClientKey(nodeID, guardAddr, lookupKey string) string {
-	return nodeID + "\n" + guardAddr + "\n" + lookupKey
+	return "guard\n" + nodeID + "\n" + lookupKey + "\n" + guardAddr
+}
+
+func addressFingerprint(addrs []string) string {
+	normalized := append([]string(nil), sanitizeAddressList(addrs)...)
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\n")
 }
 
 func resolveHostedService(lookup string, cfg HandlerConfig) string {
@@ -911,18 +997,72 @@ func maintainGuardRegistration(ctx context.Context, opts ControlOptions, guardAd
 	}); err != nil {
 		return err
 	}
-
-	for {
-		msg, err := readControl(conn)
-		if err != nil {
-			return err
-		}
+	return sustainControlRegistration(ctx, conn, func(msg Message) error {
 		if msg.Action != "intro_notify" {
-			continue
+			return nil
 		}
 		go func(msg Message) {
 			_ = handleIntroNotify(ctx, msg, cfgFn())
 		}(msg)
+		return nil
+	})
+}
+
+func maintainIntroRegistration(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
+	conn, err := openControlConn(ctx, introAddr, opts)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if err := writeControl(conn, Message{
+		Action:      "intro_register",
+		Service:     lookupKey,
+		NotifyAddrs: append([]string(nil), notifyAddrs...),
+	}); err != nil {
+		return err
+	}
+	return sustainControlRegistration(ctx, conn, func(Message) error { return nil })
+}
+
+func holdIntroRegistration(conn net.Conn, scopedService string, notifyAddrs []string) error {
+	reg := introRegistration{
+		NotifyAddrs: append([]string(nil), notifyAddrs...),
+		Conn:        conn,
+	}
+
+	introMu.Lock()
+	if existing, ok := introServices[scopedService]; ok && existing.Conn != nil {
+		_ = existing.Conn.Close()
+	}
+	introServices[scopedService] = reg
+	introMu.Unlock()
+
+	defer func() {
+		introMu.Lock()
+		current, ok := introServices[scopedService]
+		if ok && current.Conn == conn {
+			delete(introServices, scopedService)
+		}
+		introMu.Unlock()
+	}()
+
+	for {
+		msg, err := readValidatedControl(conn)
+		if err != nil {
+			if isControlCloseError(err) {
+				return nil
+			}
+			return err
+		}
+		if msg.Action == "control_ping" {
+			if err := writeControl(conn, Message{Action: "control_pong"}); err != nil {
+				if isControlCloseError(err) {
+					return nil
+				}
+				return err
+			}
+		}
 	}
 }
 
@@ -949,8 +1089,23 @@ func holdGuardRegistration(conn net.Conn, scopedService, callbackID string) erro
 	}()
 
 	for {
-		if _, err := readControl(conn); err != nil {
-			return nil
+		msg, err := readValidatedControl(conn)
+		if err != nil {
+			if isControlCloseError(err) {
+				return nil
+			}
+			return err
+		}
+		if msg.Action == "control_ping" {
+			reg.writeMu.Lock()
+			err := writeControl(conn, Message{Action: "control_pong"})
+			reg.writeMu.Unlock()
+			if err != nil {
+				if isControlCloseError(err) {
+					return nil
+				}
+				return err
+			}
 		}
 	}
 }
@@ -976,6 +1131,47 @@ func sendGuardCallback(scopedService string, msg Message) error {
 		return err
 	}
 	return nil
+}
+
+func PruneOwnerRegistrations(nodeID string, targets []OwnerRegistrationTarget) {
+	desiredIntro := map[string]struct{}{}
+	desiredGuard := map[string]struct{}{}
+	for _, target := range targets {
+		for _, introAddr := range sanitizeAddressList(target.IntroAddrs) {
+			desiredIntro[introClientKey(nodeID, introAddr, target.LookupKey)] = struct{}{}
+		}
+		for _, guardAddr := range sanitizeAddressList(target.GuardAddrs) {
+			desiredGuard[guardClientKey(nodeID, guardAddr, target.LookupKey)] = struct{}{}
+		}
+	}
+
+	introPrefix := "intro\n" + nodeID + "\n"
+	introClientMu.Lock()
+	for key, lease := range introClients {
+		if !strings.HasPrefix(key, introPrefix) {
+			continue
+		}
+		if _, ok := desiredIntro[key]; ok {
+			continue
+		}
+		lease.Cancel()
+		delete(introClients, key)
+	}
+	introClientMu.Unlock()
+
+	guardPrefix := "guard\n" + nodeID + "\n"
+	guardClientMu.Lock()
+	for key, lease := range guardClients {
+		if !strings.HasPrefix(key, guardPrefix) {
+			continue
+		}
+		if _, ok := desiredGuard[key]; ok {
+			continue
+		}
+		lease.Cancel()
+		delete(guardClients, key)
+	}
+	guardClientMu.Unlock()
 }
 
 func sendControl(ctx context.Context, addr string, msg Message, opts ControlOptions) error {
@@ -1035,7 +1231,11 @@ func openControlClient(conn net.Conn, id identity.Identity) (net.Conn, error) {
 }
 
 func writeControl(conn net.Conn, msg Message) error {
-	payload, err := json.Marshal(msg)
+	stamped, err := stampControlMessage(conn, msg)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(stamped)
 	if err != nil {
 		return err
 	}
@@ -1052,6 +1252,209 @@ func readControl(conn net.Conn) (Message, error) {
 		return Message{}, err
 	}
 	return msg, nil
+}
+
+func readValidatedControl(conn net.Conn) (Message, error) {
+	msg, err := readControl(conn)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := validateControlMessage(conn, msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+func sustainControlRegistration(ctx context.Context, conn net.Conn, handle func(Message) error) error {
+	var writeMu sync.Mutex
+	errCh := make(chan error, 1)
+
+	go func() {
+		for {
+			if hiddenControlReadTimeout > 0 {
+				if err := conn.SetReadDeadline(time.Now().Add(hiddenControlReadTimeout)); err != nil {
+					errCh <- err
+					return
+				}
+			}
+
+			msg, err := readValidatedControl(conn)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			switch msg.Action {
+			case "control_ping":
+				writeMu.Lock()
+				err = writeControl(conn, Message{Action: "control_pong"})
+				writeMu.Unlock()
+				if err != nil {
+					errCh <- err
+					return
+				}
+			case "control_pong":
+				continue
+			default:
+				if err := handle(msg); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}
+	}()
+
+	pingTicker := time.NewTicker(hiddenControlPingInterval)
+	defer pingTicker.Stop()
+
+	leaseTimer := time.NewTimer(hiddenControlLeaseDuration)
+	defer leaseTimer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-errCh:
+			return err
+		case <-leaseTimer.C:
+			return errHiddenControlLeaseExpired
+		case <-pingTicker.C:
+			writeMu.Lock()
+			err := writeControl(conn, Message{Action: "control_ping"})
+			writeMu.Unlock()
+			if err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func stampControlMessage(conn net.Conn, msg Message) (Message, error) {
+	if msg.SenderNodeID != "" && msg.Epoch != 0 && msg.Nonce != "" {
+		return msg, nil
+	}
+
+	localID, ok := controlLocalNodeID(conn)
+	if !ok || localID == "" {
+		return msg, nil
+	}
+
+	nonce, err := newControlNonce()
+	if err != nil {
+		return Message{}, err
+	}
+
+	msg.SenderNodeID = localID
+	msg.Epoch = controlEpoch(time.Now())
+	msg.Nonce = nonce
+	return msg, nil
+}
+
+func validateControlMessage(conn net.Conn, msg Message) error {
+	peerID, ok := controlPeerNodeID(conn)
+	if !ok || peerID == "" {
+		return nil
+	}
+	if msg.Action == "" {
+		return fmt.Errorf("hidden control message missing action")
+	}
+	if msg.SenderNodeID == "" || msg.Epoch == 0 || msg.Nonce == "" {
+		return fmt.Errorf("hidden control message missing envelope")
+	}
+	if msg.SenderNodeID != peerID {
+		return fmt.Errorf("hidden control sender mismatch: got %s want %s", msg.SenderNodeID, peerID)
+	}
+
+	currentEpoch := controlEpoch(time.Now())
+	if delta := currentEpoch - msg.Epoch; delta < -1 || delta > 1 {
+		return fmt.Errorf("hidden control epoch outside replay window")
+	}
+
+	if err := rememberControlReplay(msg.SenderNodeID, msg.Epoch, msg.Nonce, time.Now()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func newControlNonce() (string, error) {
+	var raw [16]byte
+	if _, err := io.ReadFull(crand.Reader, raw[:]); err != nil {
+		return "", fmt.Errorf("generate hidden control nonce: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func controlEpoch(now time.Time) int64 {
+	duration := hiddenControlEpochDuration
+	if duration <= 0 {
+		duration = 30 * time.Second
+	}
+	return now.UnixNano() / duration.Nanoseconds()
+}
+
+func rememberControlReplay(senderNodeID string, epoch int64, nonce string, now time.Time) error {
+	expiry := now.Add(hiddenControlEpochDuration * 2)
+	key := fmt.Sprintf("%s\n%d\n%s", senderNodeID, epoch, nonce)
+
+	controlReplayMu.Lock()
+	defer controlReplayMu.Unlock()
+
+	for key, expiresAt := range controlReplays {
+		if !expiresAt.After(now) {
+			delete(controlReplays, key)
+		}
+	}
+	if expiresAt, ok := controlReplays[key]; ok && expiresAt.After(now) {
+		return fmt.Errorf("hidden control replay detected")
+	}
+	controlReplays[key] = expiry
+	return nil
+}
+
+func controlLocalNodeID(conn net.Conn) (string, bool) {
+	type localNoder interface {
+		LocalNodeID() string
+	}
+	withID, ok := conn.(localNoder)
+	if !ok {
+		return "", false
+	}
+	return withID.LocalNodeID(), true
+}
+
+func controlPeerNodeID(conn net.Conn) (string, bool) {
+	type peerNoder interface {
+		PeerNodeID() string
+	}
+	withID, ok := conn.(peerNoder)
+	if !ok {
+		return "", false
+	}
+	return withID.PeerNodeID(), true
+}
+
+func isControlCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func nextRegistrationBackoff(err error, current time.Duration) time.Duration {
+	if errors.Is(err, errHiddenControlLeaseExpired) {
+		return 25 * time.Millisecond
+	}
+	if current <= 0 {
+		current = 150 * time.Millisecond
+	}
+	next := current * 2
+	if next > time.Second {
+		next = time.Second
+	}
+	return next
 }
 
 func proxyDuplex(a, b net.Conn) error {
