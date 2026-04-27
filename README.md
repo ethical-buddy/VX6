@@ -2,8 +2,8 @@
 <p align="right">
 <b>SPONSORED BY</b><br>
 HackitiseLabs Pvt. Ltd.<br>
-<a href="https://hackitiselabs.in">hackitiselabs.in</a> | 
-Dalker
+<a href="https://hackitiselabs.in">hackitiselabs.in</a>|
+<br>Dalker<br>
 <a href="https://github.com/dailker">GitHub: https://github.com/dailker </a>
 </p>
 
