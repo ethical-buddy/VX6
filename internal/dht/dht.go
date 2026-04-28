@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -16,6 +17,11 @@ type Server struct {
 	Values map[string]string // The decentralized database
 	mu     sync.RWMutex
 }
+
+const (
+	lookupAlpha       = 3
+	lookupQueryBudget = 8
+)
 
 func NodeNameKey(name string) string {
 	return "node/name/" + name
@@ -57,9 +63,10 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 			resp.Nodes = s.RT.ClosestNodes(req.Target, K)
 		}
 	case "store":
-		s.mu.Lock()
-		s.Values[req.Target] = req.Data
-		s.mu.Unlock()
+		if _, _, err := s.storeValidated(req.Target, req.Data, time.Now()); err != nil {
+			// Invalid or conflicting writes are ignored to keep the DHT conservative
+			// under poisoning attempts.
+		}
 	}
 
 	payload, _ := json.Marshal(resp)
@@ -113,12 +120,29 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 
 // Store saves a value on the K closest nodes to the targetID
 func (s *Server) Store(ctx context.Context, targetID, value string) error {
-	s.StoreLocal(targetID, value)
+	if _, _, err := s.storeValidated(targetID, value, time.Now()); err != nil {
+		return err
+	}
 	nodes := s.RT.ClosestNodes(targetID, K)
 	for _, n := range nodes {
 		_ = s.sendStore(ctx, n.Addr, targetID, value)
 	}
 	return nil
+}
+
+func (s *Server) storeValidated(key, value string, now time.Time) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := s.Values[key]
+	chosen, changed, err := chooseStoredValue(key, current, value, now)
+	if err != nil {
+		return current, false, err
+	}
+	if changed {
+		s.Values[key] = chosen
+	}
+	return chosen, changed, nil
 }
 
 func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
@@ -155,31 +179,66 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 
 // RecursiveFindValue searches for a value in the network
 func (s *Server) RecursiveFindValue(ctx context.Context, key string) (string, error) {
+	result, err := s.RecursiveFindValueDetailed(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	return result.Value, nil
+}
+
+func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (LookupResult, error) {
 	visited := make(map[string]bool)
 	candidates := s.RT.ClosestNodes(key, K)
+	collector := newLookupCollector(key, time.Now())
+	queried := 0
 
-	for len(candidates) > 0 {
-		node := candidates[0]
-		candidates = candidates[1:]
-
-		if visited[node.ID] {
-			continue
-		}
-		visited[node.ID] = true
-
-		val, nextNodes, err := s.QueryValue(ctx, node.Addr, key)
-		if err == nil {
-			if val != "" {
-				return val, nil
-			}
-			for _, n := range nextNodes {
-				if !visited[n.ID] {
-					candidates = append(candidates, n)
-				}
-			}
-		}
+	s.mu.RLock()
+	if local, ok := s.Values[key]; ok && local != "" {
+		collector.Observe("local:"+s.RT.SelfID, local)
 	}
-	return "", fmt.Errorf("value not found in DHT")
+	s.mu.RUnlock()
+
+	for len(candidates) > 0 && queried < lookupQueryBudget {
+		batch := nextCandidateBatch(candidates, visited, lookupAlpha)
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, node := range batch {
+			visited[node.ID] = true
+		}
+
+		type queryResult struct {
+			node  proto.NodeInfo
+			value string
+			next  []proto.NodeInfo
+			err   error
+		}
+
+		resultsCh := make(chan queryResult, len(batch))
+		for _, node := range batch {
+			node := node
+			go func() {
+				val, nextNodes, err := s.QueryValue(ctx, node.Addr, key)
+				resultsCh <- queryResult{node: node, value: val, next: nextNodes, err: err}
+			}()
+		}
+
+		for i := 0; i < len(batch); i++ {
+			result := <-resultsCh
+			queried++
+			if result.err != nil {
+				continue
+			}
+			if result.value != "" {
+				collector.Observe(result.node.ID, result.value)
+			}
+			candidates = mergeCandidateNodes(candidates, result.next, visited, key, s.RT)
+		}
+
+	}
+
+	return collector.Resolve(queried)
 }
 
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {
@@ -236,4 +295,46 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 	_ = json.Unmarshal(resPayload, &resp)
 
 	return resp.Value, resp.Nodes, nil
+}
+
+func nextCandidateBatch(candidates []proto.NodeInfo, visited map[string]bool, max int) []proto.NodeInfo {
+	out := make([]proto.NodeInfo, 0, max)
+	for _, node := range candidates {
+		if visited[node.ID] {
+			continue
+		}
+		out = append(out, node)
+		if len(out) == max {
+			break
+		}
+	}
+	return out
+}
+
+func mergeCandidateNodes(existing, incoming []proto.NodeInfo, visited map[string]bool, target string, rt *RoutingTable) []proto.NodeInfo {
+	all := append([]proto.NodeInfo(nil), existing...)
+	all = append(all, incoming...)
+
+	seen := make(map[string]struct{}, len(all))
+	dedup := make([]proto.NodeInfo, 0, len(all))
+	for _, node := range all {
+		if node.ID == "" || node.Addr == "" {
+			continue
+		}
+		if visited[node.ID] {
+			continue
+		}
+		if _, ok := seen[node.ID]; ok {
+			continue
+		}
+		seen[node.ID] = struct{}{}
+		dedup = append(dedup, node)
+	}
+
+	sort.Slice(dedup, func(i, j int) bool {
+		distI := rt.distance(dedup[i].ID, target)
+		distJ := rt.distance(dedup[j].ID, target)
+		return distI.Cmp(distJ) < 0
+	})
+	return dedup
 }
