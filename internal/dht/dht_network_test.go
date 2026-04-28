@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -19,64 +20,89 @@ func TestRecursiveFindValueAcrossPeers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	alice := NewServer("alice-node")
+	client := NewServer("client-node")
 	bob := NewServer("bob-node")
 	charlie := NewServer("charlie-node")
 
 	bobAddr := startDHTListener(t, ctx, bob)
 	charlieAddr := startDHTListener(t, ctx, charlie)
 
-	alice.RT.AddNode(proto.NodeInfo{ID: "bob-node", Addr: bobAddr})
-	bob.RT.AddNode(proto.NodeInfo{ID: "charlie-node", Addr: charlieAddr})
+	client.RT.AddNode(proto.NodeInfo{ID: "bob-node", Addr: bobAddr})
+	client.RT.AddNode(proto.NodeInfo{ID: "charlie-node", Addr: charlieAddr})
 
-	rec := mustServiceRecord(t, "surya", "echo", "[2001:db8::10]:4242", false, "", time.Now())
-	charlie.StoreLocal(ServiceKey("surya.echo"), mustJSON(t, rec))
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
+	}
+	rec := mustServiceRecordForIdentity(t, ownerID, "surya", "echo", "[2001:db8::10]:4242", false, "", time.Now())
+	payload := mustJSON(t, rec)
+	signed := mustSignedValue(t, ownerID, ServiceKey("surya.echo"), payload, time.Now())
 
-	got, err := alice.RecursiveFindValue(ctx, ServiceKey("surya.echo"))
+	bob.StoreLocal(ServiceKey("surya.echo"), signed)
+	charlie.StoreLocal(ServiceKey("surya.echo"), signed)
+
+	got, err := client.RecursiveFindValueDetailed(ctx, ServiceKey("surya.echo"))
 	if err != nil {
 		t.Fatalf("recursive find value: %v", err)
 	}
 
 	var decoded record.ServiceRecord
-	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(got.Value), &decoded); err != nil {
 		t.Fatalf("decode returned record: %v", err)
 	}
 	if decoded.ServiceName != "echo" || decoded.NodeName != "surya" {
 		t.Fatalf("unexpected resolved record: %+v", decoded)
 	}
+	if !got.Verified || got.ExactMatchCount < 2 || got.TrustWeight < minTrustedConfirmationScore {
+		t.Fatalf("unexpected lookup result: %+v", got)
+	}
 }
 
-func TestStoreReplicatesAcrossPeer(t *testing.T) {
+func TestStoreReplicatesAcrossBoundedPeers(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	alice := NewServer("alice-node")
-	bob := NewServer("bob-node")
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
+	}
+	owner := NewServerWithIdentity(ownerID)
 
-	bobAddr := startDHTListener(t, ctx, bob)
-	alice.RT.AddNode(proto.NodeInfo{ID: "bob-node", Addr: bobAddr})
+	type target struct {
+		server *Server
+		addr   string
+	}
+	targets := make([]target, 0, 8)
+	for i := 0; i < 8; i++ {
+		srv := NewServer(fmt.Sprintf("replica-%02d", i))
+		addr := startDHTListener(t, ctx, srv)
+		targets = append(targets, target{server: srv, addr: addr})
+		owner.RT.AddNode(proto.NodeInfo{ID: fmt.Sprintf("replica-node-%02d", i), Addr: addr})
+	}
 
-	rec := mustServiceRecord(t, "bob", "chat", "[2001:db8::20]:4242", false, "", time.Now())
+	rec := mustServiceRecordForIdentity(t, ownerID, "bob", "chat", "[2001:db8::20]:4242", false, "", time.Now())
 	payload := mustJSON(t, rec)
 
-	if err := alice.Store(ctx, ServiceKey("bob.chat"), payload); err != nil {
+	if err := owner.Store(ctx, ServiceKey("bob.chat"), payload); err != nil {
 		t.Fatalf("store: %v", err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		bob.mu.RLock()
-		got := bob.Values[ServiceKey("bob.chat")]
-		bob.mu.RUnlock()
-		if got == payload {
-			return
+	replicated := 0
+	for _, target := range targets {
+		target.server.mu.RLock()
+		got := target.server.Values[ServiceKey("bob.chat")]
+		target.server.mu.RUnlock()
+		if got != "" {
+			replicated++
+			if _, ok, err := maybeDecodeEnvelope(got); err != nil || !ok {
+				t.Fatalf("expected signed envelope at replica, got ok=%v err=%v", ok, err)
+			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("replicated value not found, got %q", got)
-		}
-		time.Sleep(20 * time.Millisecond)
+	}
+	if replicated != replicationFactor {
+		t.Fatalf("expected replication to %d peers, got %d", replicationFactor, replicated)
 	}
 }
 
@@ -99,12 +125,17 @@ func TestRecursiveFindValueFiltersPoisonedValueAndUsesConfirmedRecord(t *testing
 	client.RT.AddNode(proto.NodeInfo{ID: "good-a", Addr: goodAAddr})
 	client.RT.AddNode(proto.NodeInfo{ID: "good-b", Addr: goodBAddr})
 
-	rec := mustEndpointRecord(t, "owner", "[2001:db8::42]:4242", time.Now())
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
+	}
+	rec := mustEndpointRecordForIdentity(t, ownerID, "owner", "[2001:db8::42]:4242", time.Now())
 	payload := mustJSON(t, rec)
+	signed := mustSignedValue(t, ownerID, NodeNameKey("owner"), payload, time.Now())
 
 	poison.StoreLocal(NodeNameKey("owner"), `{"node_name":"owner","address":"[2001:db8::666]:4242"}`)
-	goodA.StoreLocal(NodeNameKey("owner"), payload)
-	goodB.StoreLocal(NodeNameKey("owner"), payload)
+	goodA.StoreLocal(NodeNameKey("owner"), signed)
+	goodB.StoreLocal(NodeNameKey("owner"), signed)
 
 	result, err := client.RecursiveFindValueDetailed(ctx, NodeNameKey("owner"))
 	if err != nil {
@@ -113,14 +144,34 @@ func TestRecursiveFindValueFiltersPoisonedValueAndUsesConfirmedRecord(t *testing
 	if result.Value != payload {
 		t.Fatalf("unexpected resolved payload: %q", result.Value)
 	}
-	if !result.Verified {
-		t.Fatal("expected verified DHT result")
+	if !result.Verified || result.ExactMatchCount < 2 || result.RejectedValues == 0 {
+		t.Fatalf("unexpected lookup result: %+v", result)
 	}
-	if result.SourceCount < 2 {
-		t.Fatalf("expected multi-source confirmation, got %d", result.SourceCount)
+}
+
+func TestRecursiveFindValueRequiresMultiSourceConfirmation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := NewServer("client-node")
+	good := NewServer("good-node")
+
+	goodAddr := startDHTListener(t, ctx, good)
+	client.RT.AddNode(proto.NodeInfo{ID: "good-node", Addr: goodAddr})
+
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
 	}
-	if result.RejectedValues == 0 {
-		t.Fatal("expected poisoned value rejection to be recorded")
+	rec := mustEndpointRecordForIdentity(t, ownerID, "solo", "[2001:db8::91]:4242", time.Now())
+	payload := mustJSON(t, rec)
+	good.StoreLocal(NodeNameKey("solo"), mustSignedValue(t, ownerID, NodeNameKey("solo"), payload, time.Now()))
+
+	_, err = client.RecursiveFindValueDetailed(ctx, NodeNameKey("solo"))
+	if err == nil || !errors.Is(err, ErrInsufficientConfirmation) {
+		t.Fatalf("expected insufficient confirmation error, got %v", err)
 	}
 }
 
@@ -140,57 +191,114 @@ func TestRecursiveFindValueRejectsConflictingVerifiedValues(t *testing.T) {
 	client.RT.AddNode(proto.NodeInfo{ID: "left-node", Addr: leftAddr})
 	client.RT.AddNode(proto.NodeInfo{ID: "right-node", Addr: rightAddr})
 
-	left.StoreLocal(NodeNameKey("shared"), mustJSON(t, mustEndpointRecord(t, "shared", "[2001:db8::51]:4242", time.Now())))
-	right.StoreLocal(NodeNameKey("shared"), mustJSON(t, mustEndpointRecord(t, "shared", "[2001:db8::52]:4242", time.Now().Add(time.Second))))
+	leftID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate left identity: %v", err)
+	}
+	rightID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate right identity: %v", err)
+	}
 
-	_, err := client.RecursiveFindValueDetailed(ctx, NodeNameKey("shared"))
+	leftRec := mustEndpointRecordForIdentity(t, leftID, "shared", "[2001:db8::51]:4242", time.Now())
+	rightRec := mustEndpointRecordForIdentity(t, rightID, "shared", "[2001:db8::52]:4242", time.Now().Add(time.Second))
+	left.StoreLocal(NodeNameKey("shared"), mustSignedValue(t, leftID, NodeNameKey("shared"), mustJSON(t, leftRec), time.Now()))
+	right.StoreLocal(NodeNameKey("shared"), mustSignedValue(t, rightID, NodeNameKey("shared"), mustJSON(t, rightRec), time.Now().Add(time.Second)))
+
+	_, err = client.RecursiveFindValueDetailed(ctx, NodeNameKey("shared"))
 	if err == nil || !errors.Is(err, ErrConflictingValues) {
 		t.Fatalf("expected conflicting value error, got %v", err)
 	}
 }
 
-func TestStoreKeepsNewestVerifiedRecord(t *testing.T) {
+func TestStoreTracksNewestVersionAndPreviousHistory(t *testing.T) {
 	t.Parallel()
 
-	server := NewServer("server-node")
 	now := time.Now()
 	id, err := identity.Generate()
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
+	server := NewServerWithIdentity(id)
 
 	older := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::61]:4242", false, "", now)
 	newer := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::62]:4242", false, "", now.Add(time.Minute))
 
-	if err := server.Store(context.Background(), ServiceKey("owner.api"), mustJSON(t, newer)); err != nil {
-		t.Fatalf("store newer record: %v", err)
-	}
 	if err := server.Store(context.Background(), ServiceKey("owner.api"), mustJSON(t, older)); err != nil {
 		t.Fatalf("store older record: %v", err)
 	}
+	if err := server.Store(context.Background(), ServiceKey("owner.api"), mustJSON(t, newer)); err != nil {
+		t.Fatalf("store newer record: %v", err)
+	}
 
-	server.mu.RLock()
-	got := server.Values[ServiceKey("owner.api")]
-	server.mu.RUnlock()
-	if got != mustJSON(t, newer) {
-		t.Fatalf("expected latest record to win, got %q", got)
+	state, ok := server.LookupState(ServiceKey("owner.api"))
+	if !ok {
+		t.Fatal("expected state to be tracked")
+	}
+	if state.Current.Version != uint64(now.Add(time.Minute).UTC().Unix()) {
+		t.Fatalf("unexpected current version: %+v", state.Current)
+	}
+	if len(state.Previous) == 0 {
+		t.Fatalf("expected previous history to be tracked: %+v", state)
 	}
 }
 
-func TestStoreRejectsConflictingVerifiedFamily(t *testing.T) {
+func TestStoreRejectsConflictingVerifiedFamilyAndTracksConflict(t *testing.T) {
 	t.Parallel()
 
-	server := NewServer("server-node")
 	now := time.Now()
+	firstID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate first identity: %v", err)
+	}
+	secondID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate second identity: %v", err)
+	}
 
-	first := mustEndpointRecord(t, "owner", "[2001:db8::71]:4242", now)
-	second := mustEndpointRecord(t, "owner", "[2001:db8::72]:4242", now.Add(time.Second))
+	server := NewServerWithIdentity(firstID)
+	first := mustSignedValue(t, firstID, NodeNameKey("owner"), mustJSON(t, mustEndpointRecordForIdentity(t, firstID, "owner", "[2001:db8::71]:4242", now)), now)
+	second := mustSignedValue(t, secondID, NodeNameKey("owner"), mustJSON(t, mustEndpointRecordForIdentity(t, secondID, "owner", "[2001:db8::72]:4242", now.Add(time.Second))), now.Add(time.Second))
 
-	if _, _, err := server.storeValidated(NodeNameKey("owner"), mustJSON(t, first), now); err != nil {
+	if _, _, err := server.storeValidated(NodeNameKey("owner"), first, now); err != nil {
 		t.Fatalf("seed first record: %v", err)
 	}
-	if _, _, err := server.storeValidated(NodeNameKey("owner"), mustJSON(t, second), now.Add(time.Second)); err == nil || !errors.Is(err, ErrConflictingValues) {
+	if _, _, err := server.storeValidated(NodeNameKey("owner"), second, now.Add(time.Second)); err == nil || !errors.Is(err, ErrConflictingValues) {
 		t.Fatalf("expected conflicting family rejection, got %v", err)
+	}
+
+	state, ok := server.LookupState(NodeNameKey("owner"))
+	if !ok || len(state.Conflicts) == 0 {
+		t.Fatalf("expected conflict history to be tracked: %+v", state)
+	}
+}
+
+func TestSelectReplicationNodesPrefersDistinctNetworks(t *testing.T) {
+	t.Parallel()
+
+	nodes := []proto.NodeInfo{
+		{ID: "n1", Addr: "[2001:db8:1::1]:4242"},
+		{ID: "n2", Addr: "[2001:db8:1::2]:4242"},
+		{ID: "n3", Addr: "[2001:db8:2::1]:4242"},
+		{ID: "n4", Addr: "[2001:db8:3::1]:4242"},
+		{ID: "n5", Addr: "[2001:db8:4::1]:4242"},
+		{ID: "n6", Addr: "[2001:db8:5::1]:4242"},
+	}
+
+	selected := selectReplicationNodes(nodes, 4)
+	if len(selected) != 4 {
+		t.Fatalf("expected 4 selected nodes, got %d", len(selected))
+	}
+
+	seenNetworks := map[string]struct{}{}
+	for _, node := range selected {
+		network := sourceObservation{addr: node.Addr}.networkKey()
+		if network != "" {
+			seenNetworks[network] = struct{}{}
+		}
+	}
+	if len(seenNetworks) < 4 {
+		t.Fatalf("expected diverse replicas, got %d networks from %+v", len(seenNetworks), selected)
 	}
 }
 
@@ -245,6 +353,12 @@ func mustEndpointRecord(t *testing.T, nodeName, address string, now time.Time) r
 	if err != nil {
 		t.Fatalf("generate endpoint identity: %v", err)
 	}
+	return mustEndpointRecordForIdentity(t, id, nodeName, address, now)
+}
+
+func mustEndpointRecordForIdentity(t *testing.T, id identity.Identity, nodeName, address string, now time.Time) record.EndpointRecord {
+	t.Helper()
+
 	rec, err := record.NewEndpointRecord(id, nodeName, address, 10*time.Minute, now)
 	if err != nil {
 		t.Fatalf("new endpoint record: %v", err)
@@ -259,11 +373,7 @@ func mustServiceRecord(t *testing.T, nodeName, serviceName, address string, hidd
 	if err != nil {
 		t.Fatalf("generate service identity: %v", err)
 	}
-	rec, err := record.NewServiceRecord(id, nodeName, serviceName, address, 10*time.Minute, now)
-	if err != nil {
-		t.Fatalf("new service record: %v", err)
-	}
-	return finalizeServiceRecord(t, id, rec, hidden, alias)
+	return mustServiceRecordForIdentity(t, id, nodeName, serviceName, address, hidden, alias, now)
 }
 
 func mustServiceRecordForIdentity(t *testing.T, id identity.Identity, nodeName, serviceName, address string, hidden bool, alias string, now time.Time) record.ServiceRecord {
@@ -289,6 +399,20 @@ func finalizeServiceRecord(t *testing.T, id identity.Identity, rec record.Servic
 		}
 	}
 	return rec
+}
+
+func mustSignedValue(t *testing.T, publisher identity.Identity, key, payload string, now time.Time) string {
+	t.Helper()
+
+	info, err := validateInnerLookupValue(key, payload, now)
+	if err != nil {
+		t.Fatalf("validate inner lookup value: %v", err)
+	}
+	signed, err := wrapSignedEnvelope(publisher, key, payload, info, now)
+	if err != nil {
+		t.Fatalf("wrap signed envelope: %v", err)
+	}
+	return signed
 }
 
 func mustJSON(t *testing.T, v any) string {

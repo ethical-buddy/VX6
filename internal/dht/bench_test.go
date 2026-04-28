@@ -12,7 +12,7 @@ import (
 	"github.com/vx6/vx6/internal/record"
 )
 
-func BenchmarkValidateLookupValueServiceRecord(b *testing.B) {
+func BenchmarkValidateLookupValueSignedEnvelopeServiceRecord(b *testing.B) {
 	id, err := identity.Generate()
 	if err != nil {
 		b.Fatal(err)
@@ -24,18 +24,19 @@ func BenchmarkValidateLookupValueServiceRecord(b *testing.B) {
 	}
 	payload := string(mustJSONBytes(b, rec))
 	key := ServiceKey("bench.api")
+	signed := mustSignedBenchmarkValue(b, id, key, payload, now)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, err := validateLookupValue(key, payload, now); err != nil {
+		if _, err := validateLookupValue(key, signed, now); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
-func BenchmarkStoreValidatedServiceRecord(b *testing.B) {
+func BenchmarkStoreValidatedSignedEnvelopeServiceRecord(b *testing.B) {
 	id, err := identity.Generate()
 	if err != nil {
 		b.Fatal(err)
@@ -48,12 +49,13 @@ func BenchmarkStoreValidatedServiceRecord(b *testing.B) {
 	payload := string(mustJSONBytes(b, rec))
 	key := ServiceKey("bench.api")
 	server := NewServer("bench-node")
+	signed := mustSignedBenchmarkValue(b, id, key, payload, now)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		if _, _, err := server.storeValidated(key, payload, now); err != nil {
+		if _, _, err := server.storeValidated(key, signed, now); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -76,12 +78,20 @@ func BenchmarkRecursiveFindValueDetailedConfirmed3Sources(b *testing.B) {
 	client.RT.AddNode(nodeInfo("relay-b", addrB))
 	client.RT.AddNode(nodeInfo("relay-c", addrC))
 
-	rec := mustBenchmarkServiceRecord(b, "bench", "api", "[2001:db8::82]:4242", time.Now())
+	ownerID, err := identity.Generate()
+	if err != nil {
+		b.Fatal(err)
+	}
+	rec, err := record.NewServiceRecord(ownerID, "bench", "api", "[2001:db8::82]:4242", 10*time.Minute, time.Now())
+	if err != nil {
+		b.Fatal(err)
+	}
 	payload := string(mustJSONBytes(b, rec))
 	key := ServiceKey("bench.api")
-	relayA.StoreLocal(key, payload)
-	relayB.StoreLocal(key, payload)
-	relayC.StoreLocal(key, payload)
+	signed := mustSignedBenchmarkValue(b, ownerID, key, payload, time.Now())
+	relayA.StoreLocal(key, signed)
+	relayB.StoreLocal(key, signed)
+	relayC.StoreLocal(key, signed)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -91,7 +101,7 @@ func BenchmarkRecursiveFindValueDetailedConfirmed3Sources(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if result.SourceCount < 2 {
+		if result.ExactMatchCount < 2 || result.TrustWeight < minTrustedConfirmationScore {
 			b.Fatalf("expected confirmed result, got %+v", result)
 		}
 	}
@@ -122,6 +132,19 @@ func mustBenchmarkServiceRecord(b *testing.B, nodeName, serviceName, address str
 		b.Fatal(err)
 	}
 	return rec
+}
+
+func mustSignedBenchmarkValue(b *testing.B, publisher identity.Identity, key, payload string, now time.Time) string {
+	b.Helper()
+	info, err := validateInnerLookupValue(key, payload, now)
+	if err != nil {
+		b.Fatal(err)
+	}
+	signed, err := wrapSignedEnvelope(publisher, key, payload, info, now)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return signed
 }
 
 func startDHTBenchmarkListener(b *testing.B, ctx context.Context, srv *Server) string {

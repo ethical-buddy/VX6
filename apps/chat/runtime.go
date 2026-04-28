@@ -164,6 +164,7 @@ func publishChatService(ctx context.Context, rt runtimeContext) error {
 
 	client := newDHTClient(rt.cfg, rt.registry)
 	if client != nil {
+		_ = client.SetPublisherIdentity(rt.id)
 		data, err := json.Marshal(rec)
 		if err == nil {
 			storeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)

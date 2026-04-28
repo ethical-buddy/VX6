@@ -479,7 +479,7 @@ func runNode(ctx context.Context, args []string) error {
 		Identity:             id,
 		FileReceiveMode:      cfgFile.Node.FileReceiveMode,
 		AllowedFileSenders:   append([]string(nil), cfgFile.Node.AllowedFileSenders...),
-		DHT:                  dht.NewServer(id.NodeID),
+		DHT:                  dht.NewServerWithIdentity(id),
 		BootstrapAddrs:       cfgFile.Node.BootstrapAddrs,
 		Services:             services,
 		Registry:             registry,

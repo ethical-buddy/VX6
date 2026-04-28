@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -13,30 +14,60 @@ import (
 	"github.com/vx6/vx6/internal/record"
 )
 
-var ErrConflictingValues = errors.New("dht lookup returned conflicting values")
+var (
+	ErrConflictingValues        = errors.New("dht lookup returned conflicting values")
+	ErrInsufficientConfirmation = errors.New("dht lookup returned insufficient confirmation")
+)
+
+const (
+	minTrustedSupportingSources = 2
+	minTrustedNetworkGroups     = 2
+	minTrustedConfirmationScore = 4
+)
 
 type LookupResult struct {
-	Value           string
-	Verified        bool
-	SourceCount     int
-	ExactMatchCount int
-	QueriedNodes    int
-	RejectedValues  int
-	ConflictCount   int
+	Value            string
+	Verified         bool
+	SourceCount      int
+	ExactMatchCount  int
+	QueriedNodes     int
+	RejectedValues   int
+	ConflictCount    int
+	PublisherCount   int
+	NetworkDiversity int
+	TrustWeight      int
+	Version          uint64
 }
 
 type validatedValue struct {
-	raw         string
-	verified    bool
-	family      string
-	fingerprint string
-	issuedAt    time.Time
+	storedRaw              string
+	raw                    string
+	verified               bool
+	family                 string
+	fingerprint            string
+	issuedAt               time.Time
+	expiresAt              time.Time
+	version                uint64
+	originNodeID           string
+	publisherNodeID        string
+	enveloped              bool
+	authoritativePublisher bool
+}
+
+type sourceObservation struct {
+	nodeID string
+	addr   string
+	trust  int
 }
 
 type candidateObservation struct {
-	value     validatedValue
-	sources   map[string]struct{}
-	exactHits map[string]struct{}
+	value         validatedValue
+	sources       map[string]sourceObservation
+	exactSources  map[string]sourceObservation
+	networks      map[string]struct{}
+	exactNetworks map[string]struct{}
+	publishers    map[string]struct{}
+	exactWeight   int
 }
 
 type lookupCollector struct {
@@ -57,12 +88,15 @@ func newLookupCollector(key string, now time.Time) *lookupCollector {
 	}
 }
 
-func (c *lookupCollector) Observe(sourceID, raw string) {
+func (c *lookupCollector) Observe(source sourceObservation, raw string) {
 	if strings.TrimSpace(raw) == "" {
 		return
 	}
-	if sourceID == "" {
-		sourceID = "unknown"
+	if source.nodeID == "" {
+		source.nodeID = "unknown"
+	}
+	if source.trust <= 0 {
+		source.trust = 1
 	}
 
 	value, err := validateLookupValue(c.key, raw, c.now)
@@ -74,35 +108,40 @@ func (c *lookupCollector) Observe(sourceID, raw string) {
 	if value.verified {
 		obs, ok := c.verified[value.family]
 		if !ok {
-			obs = &candidateObservation{
-				value:     value,
-				sources:   map[string]struct{}{},
-				exactHits: map[string]struct{}{},
-			}
+			obs = newCandidateObservation(value)
 			c.verified[value.family] = obs
 		}
-		obs.sources[sourceID] = struct{}{}
+		obs.addSource(source)
 		if isNewerValue(value, obs.value) {
 			obs.value = value
-			obs.exactHits = map[string]struct{}{}
+			obs.exactSources = map[string]sourceObservation{}
+			obs.exactNetworks = map[string]struct{}{}
+			obs.publishers = map[string]struct{}{}
+			obs.exactWeight = 0
 		}
 		if value.fingerprint == obs.value.fingerprint {
-			obs.exactHits[sourceID] = struct{}{}
+			obs.addExactSource(source, value)
 		}
 		return
 	}
 
 	obs, ok := c.raw[value.fingerprint]
 	if !ok {
-		obs = &candidateObservation{
-			value:     value,
-			sources:   map[string]struct{}{},
-			exactHits: map[string]struct{}{},
-		}
+		obs = newCandidateObservation(value)
 		c.raw[value.fingerprint] = obs
 	}
-	obs.sources[sourceID] = struct{}{}
-	obs.exactHits[sourceID] = struct{}{}
+	obs.addSource(source)
+	obs.addExactSource(source, value)
+}
+
+func (c *lookupCollector) IsConfirmed() bool {
+	if len(c.verified) != 1 {
+		return false
+	}
+	for _, candidate := range c.verified {
+		return candidate.confirmed()
+	}
+	return false
 }
 
 func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
@@ -121,14 +160,11 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 			}, fmt.Errorf("%w: %s", ErrConflictingValues, strings.Join(families, ", "))
 		}
 		for _, candidate := range c.verified {
-			return LookupResult{
-				Value:           candidate.value.raw,
-				Verified:        true,
-				SourceCount:     len(candidate.sources),
-				ExactMatchCount: len(candidate.exactHits),
-				QueriedNodes:    queried,
-				RejectedValues:  c.rejected,
-			}, nil
+			result := candidate.lookupResult(queried, c.rejected)
+			if !candidate.confirmed() {
+				return result, fmt.Errorf("%w: exact=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactNetworks), candidate.exactWeight)
+			}
+			return result, nil
 		}
 	}
 
@@ -169,16 +205,152 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		}, fmt.Errorf("%w: conflicting unverified values for key %q", ErrConflictingValues, c.key)
 	}
 
+	return best.lookupResult(queried, c.rejected), nil
+}
+
+func newCandidateObservation(value validatedValue) *candidateObservation {
+	return &candidateObservation{
+		value:         value,
+		sources:       map[string]sourceObservation{},
+		exactSources:  map[string]sourceObservation{},
+		networks:      map[string]struct{}{},
+		exactNetworks: map[string]struct{}{},
+		publishers:    map[string]struct{}{},
+	}
+}
+
+func (c *candidateObservation) addSource(source sourceObservation) {
+	if _, ok := c.sources[source.nodeID]; !ok {
+		c.sources[source.nodeID] = source
+	}
+	if network := source.networkKey(); network != "" {
+		c.networks[network] = struct{}{}
+	}
+}
+
+func (c *candidateObservation) addExactSource(source sourceObservation, value validatedValue) {
+	if _, ok := c.exactSources[source.nodeID]; !ok {
+		c.exactSources[source.nodeID] = source
+		c.exactWeight += source.weightFor(value)
+	}
+	if network := source.networkKey(); network != "" {
+		c.exactNetworks[network] = struct{}{}
+	}
+	if value.publisherNodeID != "" {
+		c.publishers[value.publisherNodeID] = struct{}{}
+	}
+}
+
+func (c *candidateObservation) confirmed() bool {
+	if !c.value.verified {
+		return true
+	}
+	if len(c.exactSources) < minTrustedSupportingSources {
+		return false
+	}
+	if c.exactWeight < minTrustedConfirmationScore {
+		return false
+	}
+	if len(c.exactNetworks) >= minTrustedNetworkGroups {
+		return true
+	}
+	return c.onlyLoopbackNetworks()
+}
+
+func (c *candidateObservation) onlyLoopbackNetworks() bool {
+	if len(c.exactNetworks) == 0 {
+		return false
+	}
+	for network := range c.exactNetworks {
+		if !strings.HasPrefix(network, "loopback:") {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *candidateObservation) lookupResult(queried, rejected int) LookupResult {
 	return LookupResult{
-		Value:           best.value.raw,
-		SourceCount:     len(best.sources),
-		ExactMatchCount: len(best.exactHits),
-		QueriedNodes:    queried,
-		RejectedValues:  c.rejected,
-	}, nil
+		Value:            c.value.raw,
+		Verified:         c.value.verified,
+		SourceCount:      len(c.sources),
+		ExactMatchCount:  len(c.exactSources),
+		QueriedNodes:     queried,
+		RejectedValues:   rejected,
+		PublisherCount:   len(c.publishers),
+		NetworkDiversity: len(c.exactNetworks),
+		TrustWeight:      c.exactWeight,
+		Version:          c.value.version,
+	}
+}
+
+func (s sourceObservation) networkKey() string {
+	host := s.addr
+	if parsedHost, _, err := net.SplitHostPort(s.addr); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ""
+	}
+	if ip.IsLoopback() {
+		return "loopback:" + ip.String()
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return "ipv4:" + v4.Mask(net.CIDRMask(24, 32)).String()
+	}
+	return "ipv6:" + ip.Mask(net.CIDRMask(64, 128)).String()
+}
+
+func (s sourceObservation) weightFor(value validatedValue) int {
+	weight := s.trust
+	if value.enveloped {
+		weight++
+	}
+	if value.authoritativePublisher {
+		weight++
+	}
+	return weight
 }
 
 func validateLookupValue(key, raw string, now time.Time) (validatedValue, error) {
+	env, ok, err := maybeDecodeEnvelope(raw)
+	if err != nil {
+		return validatedValue{}, err
+	}
+	if ok {
+		if err := verifyEnvelope(key, env, now); err != nil {
+			return validatedValue{}, err
+		}
+		value, err := validateInnerLookupValue(key, env.Value, now)
+		if err != nil {
+			return validatedValue{}, err
+		}
+		value.storedRaw = raw
+		value.publisherNodeID = env.PublisherNodeID
+		value.enveloped = true
+		if value.verified {
+			if env.OriginNodeID != value.originNodeID {
+				return validatedValue{}, fmt.Errorf("envelope origin %q does not match record origin %q", env.OriginNodeID, value.originNodeID)
+			}
+			if env.Version != value.version {
+				return validatedValue{}, fmt.Errorf("envelope version %d does not match record version %d", env.Version, value.version)
+			}
+			if env.IssuedAt != value.issuedAt.UTC().Format(time.RFC3339) {
+				return validatedValue{}, fmt.Errorf("envelope issued_at does not match wrapped record")
+			}
+			if env.ExpiresAt != value.expiresAt.UTC().Format(time.RFC3339) {
+				return validatedValue{}, fmt.Errorf("envelope expires_at does not match wrapped record")
+			}
+		}
+		value.authoritativePublisher = value.originNodeID != "" && value.publisherNodeID == value.originNodeID
+		return value, nil
+	}
+	return validateInnerLookupValue(key, raw, now)
+}
+
+func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, error) {
 	switch {
 	case strings.HasPrefix(key, "node/name/"):
 		want := strings.TrimPrefix(key, "node/name/")
@@ -192,16 +364,20 @@ func validateLookupValue(key, raw string, now time.Time) (validatedValue, error)
 		if rec.NodeName != want {
 			return validatedValue{}, fmt.Errorf("endpoint record name %q does not match key %q", rec.NodeName, want)
 		}
-		issuedAt, err := time.Parse(time.RFC3339, rec.IssuedAt)
+		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {
-			return validatedValue{}, fmt.Errorf("parse endpoint issued_at: %w", err)
+			return validatedValue{}, err
 		}
 		return validatedValue{
-			raw:         raw,
-			verified:    true,
-			family:      "endpoint:" + rec.NodeID,
-			fingerprint: record.Fingerprint(rec),
-			issuedAt:    issuedAt,
+			storedRaw:    raw,
+			raw:          raw,
+			verified:     true,
+			family:       "endpoint:" + rec.NodeID,
+			fingerprint:  record.Fingerprint(rec),
+			issuedAt:     issuedAt,
+			expiresAt:    expiresAt,
+			version:      version,
+			originNodeID: rec.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "node/id/"):
 		want := strings.TrimPrefix(key, "node/id/")
@@ -215,16 +391,20 @@ func validateLookupValue(key, raw string, now time.Time) (validatedValue, error)
 		if rec.NodeID != want {
 			return validatedValue{}, fmt.Errorf("endpoint record node id %q does not match key %q", rec.NodeID, want)
 		}
-		issuedAt, err := time.Parse(time.RFC3339, rec.IssuedAt)
+		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {
-			return validatedValue{}, fmt.Errorf("parse endpoint issued_at: %w", err)
+			return validatedValue{}, err
 		}
 		return validatedValue{
-			raw:         raw,
-			verified:    true,
-			family:      "endpoint:" + rec.NodeID,
-			fingerprint: record.Fingerprint(rec),
-			issuedAt:    issuedAt,
+			storedRaw:    raw,
+			raw:          raw,
+			verified:     true,
+			family:       "endpoint:" + rec.NodeID,
+			fingerprint:  record.Fingerprint(rec),
+			issuedAt:     issuedAt,
+			expiresAt:    expiresAt,
+			version:      version,
+			originNodeID: rec.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "service/"):
 		want := strings.TrimPrefix(key, "service/")
@@ -238,16 +418,20 @@ func validateLookupValue(key, raw string, now time.Time) (validatedValue, error)
 		if record.FullServiceName(rec.NodeName, rec.ServiceName) != want {
 			return validatedValue{}, fmt.Errorf("service record name %q does not match key %q", record.FullServiceName(rec.NodeName, rec.ServiceName), want)
 		}
-		issuedAt, err := time.Parse(time.RFC3339, rec.IssuedAt)
+		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {
-			return validatedValue{}, fmt.Errorf("parse service issued_at: %w", err)
+			return validatedValue{}, err
 		}
 		return validatedValue{
-			raw:         raw,
-			verified:    true,
-			family:      "service:" + rec.NodeID + ":" + want,
-			fingerprint: serviceFingerprint(rec),
-			issuedAt:    issuedAt,
+			storedRaw:    raw,
+			raw:          raw,
+			verified:     true,
+			family:       "service:" + rec.NodeID + ":" + want,
+			fingerprint:  serviceFingerprint(rec),
+			issuedAt:     issuedAt,
+			expiresAt:    expiresAt,
+			version:      version,
+			originNodeID: rec.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "hidden/"):
 		want := strings.TrimPrefix(key, "hidden/")
@@ -261,65 +445,80 @@ func validateLookupValue(key, raw string, now time.Time) (validatedValue, error)
 		if !rec.IsHidden || rec.Alias != want {
 			return validatedValue{}, fmt.Errorf("hidden service alias %q does not match key %q", rec.Alias, want)
 		}
-		issuedAt, err := time.Parse(time.RFC3339, rec.IssuedAt)
+		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
 		if err != nil {
-			return validatedValue{}, fmt.Errorf("parse hidden service issued_at: %w", err)
+			return validatedValue{}, err
 		}
 		return validatedValue{
-			raw:         raw,
-			verified:    true,
-			family:      "hidden:" + rec.NodeID + ":" + want,
-			fingerprint: serviceFingerprint(rec),
-			issuedAt:    issuedAt,
+			storedRaw:    raw,
+			raw:          raw,
+			verified:     true,
+			family:       "hidden:" + rec.NodeID + ":" + want,
+			fingerprint:  serviceFingerprint(rec),
+			issuedAt:     issuedAt,
+			expiresAt:    expiresAt,
+			version:      version,
+			originNodeID: rec.NodeID,
 		}, nil
 	default:
 		return validatedValue{
+			storedRaw:   raw,
 			raw:         raw,
 			fingerprint: rawFingerprint(raw),
 		}, nil
 	}
 }
 
-func chooseStoredValue(key, existing, incoming string, now time.Time) (string, bool, error) {
+func chooseStoredValue(key, existing, incoming string, now time.Time) (string, bool, validatedValue, validatedValue, error) {
 	if existing == "" {
-		return incoming, true, nil
+		incomingValue, err := validateLookupValue(key, incoming, now)
+		if err != nil {
+			return "", false, validatedValue{}, validatedValue{}, err
+		}
+		return incoming, true, validatedValue{}, incomingValue, nil
 	}
 
 	incomingValue, err := validateLookupValue(key, incoming, now)
 	if err != nil {
-		return "", false, err
+		return "", false, validatedValue{}, validatedValue{}, err
 	}
-	if !incomingValue.verified {
-		if existing == incoming {
-			return existing, false, nil
-		}
-		return incoming, true, nil
-	}
-
 	existingValue, err := validateLookupValue(key, existing, now)
 	if err != nil {
-		return incoming, true, nil
+		return incoming, true, validatedValue{}, incomingValue, nil
+	}
+
+	if !incomingValue.verified {
+		if existing == incoming {
+			return existing, false, existingValue, incomingValue, nil
+		}
+		return incoming, true, existingValue, incomingValue, nil
 	}
 	if !existingValue.verified {
-		return incoming, true, nil
+		return incoming, true, existingValue, incomingValue, nil
 	}
 	if existingValue.family != incomingValue.family {
-		return existing, false, fmt.Errorf("%w: existing=%s incoming=%s", ErrConflictingValues, existingValue.family, incomingValue.family)
+		return existing, false, existingValue, incomingValue, fmt.Errorf("%w: existing=%s incoming=%s", ErrConflictingValues, existingValue.family, incomingValue.family)
 	}
 	if incomingValue.fingerprint == existingValue.fingerprint {
-		return existing, false, nil
+		return existing, false, existingValue, incomingValue, nil
 	}
 	if isNewerValue(incomingValue, existingValue) {
-		return incoming, true, nil
+		return incoming, true, existingValue, incomingValue, nil
 	}
-	return existing, false, nil
+	return existing, false, existingValue, incomingValue, nil
 }
 
 func compareObservationStrength(left, right *candidateObservation) int {
-	if len(left.sources) > len(right.sources) {
+	if len(left.exactSources) > len(right.exactSources) {
 		return 1
 	}
-	if len(left.sources) < len(right.sources) {
+	if len(left.exactSources) < len(right.exactSources) {
+		return -1
+	}
+	if left.exactWeight > right.exactWeight {
+		return 1
+	}
+	if left.exactWeight < right.exactWeight {
 		return -1
 	}
 	if left.value.fingerprint < right.value.fingerprint {
@@ -332,6 +531,12 @@ func compareObservationStrength(left, right *candidateObservation) int {
 }
 
 func isNewerValue(candidate, current validatedValue) bool {
+	if candidate.version > current.version {
+		return true
+	}
+	if candidate.version < current.version {
+		return false
+	}
 	if candidate.issuedAt.After(current.issuedAt) {
 		return true
 	}
@@ -339,6 +544,18 @@ func isNewerValue(candidate, current validatedValue) bool {
 		return false
 	}
 	return candidate.fingerprint > current.fingerprint
+}
+
+func recordTimes(issuedAtRaw, expiresAtRaw string) (time.Time, time.Time, uint64, error) {
+	issuedAt, err := time.Parse(time.RFC3339, issuedAtRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, fmt.Errorf("parse issued_at: %w", err)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, fmt.Errorf("parse expires_at: %w", err)
+	}
+	return issuedAt, expiresAt, uint64(issuedAt.UTC().Unix()), nil
 }
 
 func rawFingerprint(raw string) string {

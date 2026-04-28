@@ -174,7 +174,7 @@ func startTestVX6Node(t *testing.T, parent context.Context, dir, name string, bo
 			Services:       map[string]string{},
 			Identity:       id,
 			Registry:       registry,
-			DHT:            dht.NewServer(id.NodeID),
+			DHT:            dht.NewServerWithIdentity(id),
 		})
 	}()
 

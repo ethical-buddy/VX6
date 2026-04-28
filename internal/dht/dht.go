@@ -9,19 +9,38 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 )
 
 type Server struct {
-	RT     *RoutingTable
-	Values map[string]string // The decentralized database
-	mu     sync.RWMutex
+	RT        *RoutingTable
+	Values    map[string]string // The decentralized database
+	publisher identity.Identity
+	versions  map[string]StoredValueState
+	mu        sync.RWMutex
 }
 
 const (
 	lookupAlpha       = 3
-	lookupQueryBudget = 8
+	lookupQueryBudget = 12
+	replicationFactor = 5
 )
+
+type StoredVersion struct {
+	Family          string
+	Fingerprint     string
+	PublisherNodeID string
+	Version         uint64
+	IssuedAt        string
+	ExpiresAt       string
+}
+
+type StoredValueState struct {
+	Current   StoredVersion
+	Previous  []StoredVersion
+	Conflicts []StoredVersion
+}
 
 func NodeNameKey(name string) string {
 	return "node/name/" + name
@@ -41,12 +60,36 @@ func HiddenServiceKey(alias string) string {
 
 func NewServer(selfID string) *Server {
 	return &Server{
-		RT:     NewRoutingTable(selfID),
-		Values: make(map[string]string),
+		RT:       NewRoutingTable(selfID),
+		Values:   make(map[string]string),
+		versions: make(map[string]StoredValueState),
 	}
 }
 
-// HandleDHT processes an incoming DHT request from a peer
+func NewServerWithIdentity(id identity.Identity) *Server {
+	server := NewServer(id.NodeID)
+	_ = server.SetPublisherIdentity(id)
+	return server
+}
+
+func (s *Server) SetPublisherIdentity(id identity.Identity) error {
+	if err := id.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publisher = id
+	return nil
+}
+
+func (s *Server) LookupState(key string) (StoredValueState, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	state, ok := s.versions[key]
+	return state, ok
+}
+
+// HandleDHT processes an incoming DHT request from a peer.
 func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequest) error {
 	resp := proto.DHTResponse{}
 
@@ -54,13 +97,12 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 	case "find_node":
 		resp.Nodes = s.RT.ClosestNodes(req.Target, K)
 	case "find_value":
+		resp.Nodes = s.RT.ClosestNodes(req.Target, K)
 		s.mu.RLock()
 		val, ok := s.Values[req.Target]
 		s.mu.RUnlock()
 		if ok {
 			resp.Value = val
-		} else {
-			resp.Nodes = s.RT.ClosestNodes(req.Target, K)
 		}
 	case "store":
 		if _, _, err := s.storeValidated(req.Target, req.Data, time.Now()); err != nil {
@@ -80,9 +122,12 @@ func (s *Server) StoreLocal(key, value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Values[key] = value
+	if validated, err := validateLookupValue(key, value, time.Now()); err == nil {
+		s.versions[key] = StoredValueState{Current: storedVersionFromValidated(validated)}
+	}
 }
 
-// RecursiveFindNode searches the network for a specific NodeID
+// RecursiveFindNode searches the network for a specific NodeID.
 func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]proto.NodeInfo, error) {
 	visited := make(map[string]bool)
 	candidates := s.RT.ClosestNodes(targetID, K)
@@ -96,15 +141,17 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 			}
 			visited[node.ID] = true
 
-			// Ask this node for its closest nodes to the target
 			newNodes, err := s.QueryNode(ctx, node.Addr, targetID)
-			if err == nil {
-				for _, n := range newNodes {
-					if !visited[n.ID] {
-						s.RT.AddNode(n)
-						newCandidates = append(newCandidates, n)
-						foundNew = true
-					}
+			if err != nil {
+				s.RT.NoteFailure(node.ID)
+				continue
+			}
+			s.RT.AddNode(node)
+			for _, n := range newNodes {
+				if !visited[n.ID] {
+					s.RT.AddNode(n)
+					newCandidates = append(newCandidates, n)
+					foundNew = true
 				}
 			}
 		}
@@ -118,16 +165,38 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 	return s.RT.ClosestNodes(targetID, K), nil
 }
 
-// Store saves a value on the K closest nodes to the targetID
+// Store saves a value on a bounded set of the closest nodes to the target key.
 func (s *Server) Store(ctx context.Context, targetID, value string) error {
-	if _, _, err := s.storeValidated(targetID, value, time.Now()); err != nil {
+	wrapped, err := s.prepareStoreValue(targetID, value, time.Now())
+	if err != nil {
 		return err
 	}
-	nodes := s.RT.ClosestNodes(targetID, K)
+	if _, _, err := s.storeValidated(targetID, wrapped, time.Now()); err != nil {
+		return err
+	}
+	nodes := selectReplicationNodes(s.RT.ClosestNodes(targetID, K), replicationFactor)
 	for _, n := range nodes {
-		_ = s.sendStore(ctx, n.Addr, targetID, value)
+		_ = s.sendStore(ctx, n.Addr, targetID, wrapped)
 	}
 	return nil
+}
+
+func (s *Server) prepareStoreValue(key, value string, now time.Time) (string, error) {
+	info, err := validateInnerLookupValue(key, value, now)
+	if err != nil {
+		return "", err
+	}
+	if !info.verified {
+		return value, nil
+	}
+
+	s.mu.RLock()
+	publisher := s.publisher
+	s.mu.RUnlock()
+	if err := publisher.Validate(); err != nil {
+		return value, nil
+	}
+	return wrapSignedEnvelope(publisher, key, value, info, now)
 }
 
 func (s *Server) storeValidated(key, value string, now time.Time) (string, bool, error) {
@@ -135,13 +204,17 @@ func (s *Server) storeValidated(key, value string, now time.Time) (string, bool,
 	defer s.mu.Unlock()
 
 	current := s.Values[key]
-	chosen, changed, err := chooseStoredValue(key, current, value, now)
+	chosen, changed, previousValue, incomingValue, err := chooseStoredValue(key, current, value, now)
 	if err != nil {
+		if incomingValue.raw != "" {
+			s.recordConflictLocked(key, incomingValue)
+		}
 		return current, false, err
 	}
 	if changed {
 		s.Values[key] = chosen
 	}
+	s.recordVersionLocked(key, previousValue, incomingValue, changed)
 	return chosen, changed, nil
 }
 
@@ -177,7 +250,7 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 	return err
 }
 
-// RecursiveFindValue searches for a value in the network
+// RecursiveFindValue searches for a value in the network.
 func (s *Server) RecursiveFindValue(ctx context.Context, key string) (string, error) {
 	result, err := s.RecursiveFindValueDetailed(ctx, key)
 	if err != nil {
@@ -194,7 +267,7 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 
 	s.mu.RLock()
 	if local, ok := s.Values[key]; ok && local != "" {
-		collector.Observe("local:"+s.RT.SelfID, local)
+		collector.Observe(sourceObservation{nodeID: "local:" + s.RT.SelfID, trust: 3}, local)
 	}
 	s.mu.RUnlock()
 
@@ -228,14 +301,19 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 			result := <-resultsCh
 			queried++
 			if result.err != nil {
+				s.RT.NoteFailure(result.node.ID)
 				continue
 			}
+			s.RT.AddNode(result.node)
 			if result.value != "" {
-				collector.Observe(result.node.ID, result.value)
+				collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1}, result.value)
 			}
 			candidates = mergeCandidateNodes(candidates, result.next, visited, key, s.RT)
 		}
 
+		if collector.IsConfirmed() {
+			break
+		}
 	}
 
 	return collector.Resolve(queried)
@@ -251,21 +329,30 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 		return nil, err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	req := proto.DHTRequest{Action: "find_node", Target: targetID}
-	_ = proto.WriteHeader(conn, proto.KindDHT)
+	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
+		return nil, err
+	}
 	payload, _ := json.Marshal(req)
-	_ = proto.WriteLengthPrefixed(conn, payload)
+	if err := proto.WriteLengthPrefixed(conn, payload); err != nil {
+		return nil, err
+	}
 
 	kind, err := proto.ReadHeader(conn)
 	if err != nil || kind != proto.KindDHT {
 		return nil, fmt.Errorf("invalid response")
 	}
 
-	resPayload, _ := proto.ReadLengthPrefixed(conn, 1024*1024)
+	resPayload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	if err != nil {
+		return nil, err
+	}
 	var resp proto.DHTResponse
-	_ = json.Unmarshal(resPayload, &resp)
-
+	if err := json.Unmarshal(resPayload, &resp); err != nil {
+		return nil, err
+	}
 	return resp.Nodes, nil
 }
 
@@ -279,21 +366,30 @@ func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []pr
 		return "", nil, err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	req := proto.DHTRequest{Action: "find_value", Target: key}
-	_ = proto.WriteHeader(conn, proto.KindDHT)
+	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
+		return "", nil, err
+	}
 	payload, _ := json.Marshal(req)
-	_ = proto.WriteLengthPrefixed(conn, payload)
+	if err := proto.WriteLengthPrefixed(conn, payload); err != nil {
+		return "", nil, err
+	}
 
 	kind, err := proto.ReadHeader(conn)
 	if err != nil || kind != proto.KindDHT {
 		return "", nil, fmt.Errorf("invalid response")
 	}
 
-	resPayload, _ := proto.ReadLengthPrefixed(conn, 1024*1024)
+	resPayload, err := proto.ReadLengthPrefixed(conn, 1024*1024)
+	if err != nil {
+		return "", nil, err
+	}
 	var resp proto.DHTResponse
-	_ = json.Unmarshal(resPayload, &resp)
-
+	if err := json.Unmarshal(resPayload, &resp); err != nil {
+		return "", nil, err
+	}
 	return resp.Value, resp.Nodes, nil
 }
 
@@ -337,4 +433,90 @@ func mergeCandidateNodes(existing, incoming []proto.NodeInfo, visited map[string
 		return distI.Cmp(distJ) < 0
 	})
 	return dedup
+}
+
+func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo {
+	if len(nodes) <= limit {
+		return append([]proto.NodeInfo(nil), nodes...)
+	}
+
+	out := make([]proto.NodeInfo, 0, limit)
+	sameNetwork := make([]proto.NodeInfo, 0, len(nodes))
+	networks := map[string]struct{}{}
+
+	for _, node := range nodes {
+		network := sourceObservation{addr: node.Addr}.networkKey()
+		if network == "" {
+			out = append(out, node)
+		} else if _, ok := networks[network]; !ok {
+			networks[network] = struct{}{}
+			out = append(out, node)
+		} else {
+			sameNetwork = append(sameNetwork, node)
+		}
+		if len(out) == limit {
+			return out
+		}
+	}
+
+	for _, node := range sameNetwork {
+		out = append(out, node)
+		if len(out) == limit {
+			return out
+		}
+	}
+	return out
+}
+
+func storedVersionFromValidated(value validatedValue) StoredVersion {
+	return StoredVersion{
+		Family:          value.family,
+		Fingerprint:     value.fingerprint,
+		PublisherNodeID: value.publisherNodeID,
+		Version:         value.version,
+		IssuedAt:        value.issuedAt.UTC().Format(time.RFC3339),
+		ExpiresAt:       value.expiresAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func (s *Server) recordVersionLocked(key string, previous, incoming validatedValue, changed bool) {
+	if incoming.raw == "" {
+		return
+	}
+	state := s.versions[key]
+	if changed {
+		if previous.raw != "" {
+			state.Previous = appendBoundedVersion(state.Previous, storedVersionFromValidated(previous))
+		}
+		state.Current = storedVersionFromValidated(incoming)
+		s.versions[key] = state
+		return
+	}
+	if state.Current.Fingerprint == "" {
+		state.Current = storedVersionFromValidated(incoming)
+		s.versions[key] = state
+	}
+}
+
+func (s *Server) recordConflictLocked(key string, incoming validatedValue) {
+	if incoming.raw == "" {
+		return
+	}
+	state := s.versions[key]
+	state.Conflicts = appendBoundedVersion(state.Conflicts, storedVersionFromValidated(incoming))
+	s.versions[key] = state
+}
+
+func appendBoundedVersion(values []StoredVersion, incoming StoredVersion) []StoredVersion {
+	for _, existing := range values {
+		if existing.Fingerprint == incoming.Fingerprint && existing.Version == incoming.Version && existing.PublisherNodeID == incoming.PublisherNodeID {
+			return values
+		}
+	}
+	values = append(values, incoming)
+	const maxTrackedVersions = 6
+	if len(values) > maxTrackedVersions {
+		values = values[len(values)-maxTrackedVersions:]
+	}
+	return values
 }
