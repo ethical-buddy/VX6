@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,49 @@ func TestReceiveFile(t *testing.T) {
 	}
 	if string(received) != string(payload) {
 		t.Fatalf("unexpected payload %q", string(received))
+	}
+}
+
+func TestReceiveFileRejectsUnauthorizedSender(t *testing.T) {
+	t.Parallel()
+
+	receiveDir := t.TempDir()
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	clientDone := make(chan error, 1)
+	go func() {
+		defer clientConn.Close()
+
+		if err := writeMetadata(clientConn, metadata{
+			NodeName: "alpha",
+			FileName: "blocked.txt",
+			FileSize: 32,
+		}); err != nil {
+			clientDone <- err
+			return
+		}
+		_, err := readResumeState(clientConn)
+		clientDone <- err
+	}()
+
+	_, err := ReceiveFileWithPolicy(serverConn, receiveDir, ReceivePolicy{
+		Mode: ReceiveModeTrusted,
+		AllowedSenders: map[string]struct{}{
+			"beta": {},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `file transfer from "alpha" is not allowed`) {
+		t.Fatalf("unexpected receive error %v", err)
+	}
+
+	clientErr := <-clientDone
+	if clientErr == nil || !strings.Contains(clientErr.Error(), "transfer rejected") {
+		t.Fatalf("unexpected client error %v", clientErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(receiveDir, "blocked.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected blocked file to be absent, got %v", statErr)
 	}
 }
 

@@ -357,7 +357,10 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	hiddenDone := make(chan error, 1)
 	go func() {
 		hiddenDone <- serviceproxy.ServeLocalForward(hiddenCtx, hiddenAddr, serviceRec, client.id, func(ctx context.Context) (net.Conn, error) {
-			return hidden.DialHiddenServiceWithOptions(ctx, serviceRec, client.registry, hidden.DialOptions{SelfAddr: client.listenAddr})
+			return hidden.DialHiddenServiceWithOptions(ctx, serviceRec, client.registry, hidden.DialOptions{
+				SelfAddr: client.listenAddr,
+				Identity: client.id,
+			})
 		})
 	}()
 	assertEchoEventually(t, hiddenAddr, "hidden rendezvous path")
@@ -374,19 +377,25 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	traceMu.Lock()
 	gotTraces := append([]onion.TraceEvent(nil), traces...)
 	traceMu.Unlock()
-	if len(gotTraces) < 2 {
-		t.Fatalf("expected at least two hidden-service circuit traces, got %d", len(gotTraces))
+	filtered := make([]onion.TraceEvent, 0, len(gotTraces))
+	for _, trace := range gotTraces {
+		if trace.Purpose == "hidden-rendezvous" {
+			filtered = append(filtered, trace)
+		}
 	}
-	gotTraces = gotTraces[len(gotTraces)-2:]
-	if gotTraces[0].TargetAddr == "" || gotTraces[0].TargetAddr != gotTraces[1].TargetAddr {
-		t.Fatalf("expected both hidden-service circuits to share one rendezvous target, got %q and %q", gotTraces[0].TargetAddr, gotTraces[1].TargetAddr)
+	if len(filtered) < 2 {
+		t.Fatalf("expected at least two hidden rendezvous traces, got %d total and %d rendezvous traces", len(gotTraces), len(filtered))
 	}
-	if len(gotTraces[0].RelayAddrs) != 3 || len(gotTraces[1].RelayAddrs) != 3 {
-		t.Fatalf("expected 3 relay hops on both sides, got %d and %d", len(gotTraces[0].RelayAddrs), len(gotTraces[1].RelayAddrs))
+	filtered = filtered[len(filtered)-2:]
+	if filtered[0].TargetAddr == "" || filtered[0].TargetAddr != filtered[1].TargetAddr {
+		t.Fatalf("expected both hidden-service circuits to share one rendezvous target, got %q and %q", filtered[0].TargetAddr, filtered[1].TargetAddr)
+	}
+	if len(filtered[0].RelayAddrs) != 3 || len(filtered[1].RelayAddrs) != 3 {
+		t.Fatalf("expected 3 relay hops on both sides, got %d and %d", len(filtered[0].RelayAddrs), len(filtered[1].RelayAddrs))
 	}
 
 	seenRelays := map[string]struct{}{}
-	for _, trace := range gotTraces {
+	for _, trace := range filtered {
 		for _, addr := range trace.RelayAddrs {
 			if _, ok := seenRelays[addr]; ok {
 				t.Fatalf("expected disjoint hidden-service relay sets, duplicate %s detected", addr)
@@ -399,6 +408,183 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	}
 	if len(seenRelays) != 6 {
 		t.Fatalf("expected 6 unique hidden-service relays, got %d", len(seenRelays))
+	}
+}
+
+func TestOnionRelayInspectVisibility(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping onion relay inspection integration test in short mode")
+	}
+
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	baseDir := t.TempDir()
+	bootstrap := startVX6Node(t, rootCtx, filepath.Join(baseDir, "bootstrap"), "bootstrap", nil, nil)
+
+	echoAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	startEchoServer(t, rootCtx, echoAddr)
+
+	owner := startVX6Node(
+		t,
+		rootCtx,
+		filepath.Join(baseDir, "owner"),
+		"owner",
+		[]string{bootstrap.listenAddr},
+		map[string]string{"echo": echoAddr},
+	)
+	client := startVX6Node(t, rootCtx, filepath.Join(baseDir, "client"), "client", []string{bootstrap.listenAddr}, nil)
+
+	for i := 0; i < 8; i++ {
+		relayName := fmt.Sprintf("irelay%02d", i+1)
+		startVX6Node(
+			t,
+			rootCtx,
+			filepath.Join(baseDir, fmt.Sprintf("inspect-relay-%02d", i+1)),
+			relayName,
+			[]string{bootstrap.listenAddr},
+			nil,
+		)
+	}
+
+	waitForCondition(t, 10*time.Second, func() bool {
+		nodes, services := bootstrap.registry.Snapshot()
+		return len(nodes) >= 11 && len(services) >= 1
+	}, "inspection mesh convergence")
+
+	records, services, err := discovery.Snapshot(rootCtx, bootstrap.listenAddr)
+	if err != nil {
+		t.Fatalf("snapshot inspection registry: %v", err)
+	}
+	if err := client.registry.Import(records, services); err != nil {
+		t.Fatalf("import inspection registry: %v", err)
+	}
+
+	serviceName := record.FullServiceName(owner.name, "echo")
+	serviceRec, err := client.registry.ResolveServiceLocal(serviceName)
+	if err != nil {
+		t.Fatalf("resolve inspection service: %v", err)
+	}
+
+	onionPeers := filterPeers(records, func(rec record.EndpointRecord) bool {
+		return rec.NodeID != owner.id.NodeID && rec.NodeID != client.id.NodeID
+	})
+	plan, err := onion.PlanAutomatedCircuit(serviceRec, onionPeers, 3, nil)
+	if err != nil {
+		t.Fatalf("plan inspection circuit: %v", err)
+	}
+
+	var (
+		inspectMu sync.Mutex
+		events    []onion.InspectEvent
+	)
+	restoreInspect := onion.SetInspectHook(func(ev onion.InspectEvent) {
+		inspectMu.Lock()
+		events = append(events, ev)
+		inspectMu.Unlock()
+	})
+	defer restoreInspect()
+
+	onionAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	onionCtx, onionCancel := context.WithCancel(rootCtx)
+	onionDone := make(chan error, 1)
+	go func() {
+		onionDone <- serviceproxy.ServeLocalForward(onionCtx, onionAddr, serviceRec, client.id, func(ctx context.Context) (net.Conn, error) {
+			return onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{Identity: client.id})
+		})
+	}()
+	assertEchoEventually(t, onionAddr, "inspection path")
+	onionCancel()
+	waitForShutdown(t, onionDone)
+
+	inspectMu.Lock()
+	gotEvents := append([]onion.InspectEvent(nil), events...)
+	inspectMu.Unlock()
+
+	filtered := make([]onion.InspectEvent, 0, len(gotEvents))
+	for _, ev := range gotEvents {
+		if ev.CircuitID == plan.CircuitID {
+			filtered = append(filtered, ev)
+		}
+	}
+	if len(filtered) == 0 {
+		t.Fatal("expected relay inspection events for planned circuit")
+	}
+
+	firstID := plan.Relays[0].NodeID
+	secondID := plan.Relays[1].NodeID
+	lastID := plan.Relays[2].NodeID
+
+	assertRelayVisibility := func(nodeID string, forbiddenTarget string, wantExtend string, wantBegin bool) []onion.InspectEvent {
+		t.Helper()
+		nodeEvents := make([]onion.InspectEvent, 0)
+		for _, ev := range filtered {
+			if ev.NodeID == nodeID {
+				nodeEvents = append(nodeEvents, ev)
+			}
+		}
+		if len(nodeEvents) == 0 {
+			t.Fatalf("expected inspection events for relay %s", nodeID)
+		}
+		for _, ev := range nodeEvents {
+			if forbiddenTarget != "" && ev.TargetAddr == forbiddenTarget {
+				t.Fatalf("relay %s should not have seen final target %s", nodeID, forbiddenTarget)
+			}
+		}
+		if wantExtend != "" {
+			found := false
+			for _, ev := range nodeEvents {
+				if ev.Command == "extend" && ev.NextHop == wantExtend {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("relay %s did not process expected extend to %s: %+v", nodeID, wantExtend, nodeEvents)
+			}
+		}
+		foundBegin := false
+		for _, ev := range nodeEvents {
+			if ev.Command == "begin" {
+				foundBegin = true
+			}
+		}
+		if wantBegin != foundBegin {
+			t.Fatalf("relay %s begin visibility mismatch: want=%v got=%v events=%+v", nodeID, wantBegin, foundBegin, nodeEvents)
+		}
+		return nodeEvents
+	}
+
+	firstEvents := assertRelayVisibility(firstID, owner.listenAddr, plan.Relays[1].Address, false)
+	secondEvents := assertRelayVisibility(secondID, owner.listenAddr, plan.Relays[2].Address, false)
+	lastEvents := assertRelayVisibility(lastID, "", "", true)
+
+	for _, ev := range firstEvents {
+		if ev.Command == "data" || ev.Command == "begin" {
+			t.Fatalf("first hop should not process inner payload commands: %+v", firstEvents)
+		}
+	}
+	for _, ev := range secondEvents {
+		if ev.Command == "data" || ev.Command == "begin" {
+			t.Fatalf("middle hop should not process exit commands: %+v", secondEvents)
+		}
+	}
+
+	sawTarget := false
+	sawData := false
+	for _, ev := range lastEvents {
+		if ev.Command == "begin" && ev.TargetAddr == owner.listenAddr {
+			sawTarget = true
+		}
+		if ev.Command == "data" && ev.Bytes > 0 {
+			sawData = true
+		}
+	}
+	if !sawTarget {
+		t.Fatalf("exit hop did not observe final target %s: %+v", owner.listenAddr, lastEvents)
+	}
+	if !sawData {
+		t.Fatalf("exit hop did not observe application data: %+v", lastEvents)
 	}
 }
 

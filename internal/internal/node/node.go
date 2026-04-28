@@ -235,17 +235,12 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					return
 				}
 				defer release()
-				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
+				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindExtend, cfg.Identity)
 				if err != nil {
-					fmt.Fprintf(log, "extend read error from %s: %v\n", conn.RemoteAddr().String(), err)
+					fmt.Fprintf(log, "extend secure handshake error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
-				var er proto.ExtendRequest
-				if err := json.Unmarshal(payload, &er); err != nil {
-					fmt.Fprintf(log, "extend decode error from %s: %v\n", conn.RemoteAddr().String(), err)
-					return
-				}
-				if err := onion.HandleExtend(ctx, conn, er); err != nil {
+				if err := onion.HandleExtend(ctx, secureConn, cfg.Identity); err != nil {
 					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			case proto.KindRendezvous:

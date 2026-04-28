@@ -2,11 +2,27 @@ package hidden
 
 import (
 	"context"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
 )
+
+type testControlConn struct {
+	net.Conn
+	local string
+	peer  string
+}
+
+func (c testControlConn) LocalNodeID() string {
+	return c.local
+}
+
+func (c testControlConn) PeerNodeID() string {
+	return c.peer
+}
 
 func TestSelectTopologyManualPrefersChosenIntros(t *testing.T) {
 	t.Parallel()
@@ -55,10 +71,485 @@ func TestSelectTopologyManualPrefersChosenIntros(t *testing.T) {
 	if topology.ActiveIntros[0] != nodes[2].Address || topology.ActiveIntros[1] != nodes[0].Address || topology.ActiveIntros[2] != nodes[1].Address {
 		t.Fatalf("manual intro selection was not preserved: %#v", topology.ActiveIntros)
 	}
-	if len(topology.StandbyIntros) != 2 {
-		t.Fatalf("expected 2 standby intros, got %d", len(topology.StandbyIntros))
+	if len(topology.StandbyIntros) != 1 {
+		t.Fatalf("expected 1 standby intro after reserving guard capacity, got %d", len(topology.StandbyIntros))
 	}
-	if len(topology.Guards) != 1 {
-		t.Fatalf("expected 1 remaining guard candidate after reserving 5 intros, got %d", len(topology.Guards))
+	if len(topology.Guards) != 2 {
+		t.Fatalf("expected 2 guards to be reserved first, got %d", len(topology.Guards))
 	}
+}
+
+func TestSelectTopologyKeepsGuardSetStable(t *testing.T) {
+	t.Parallel()
+
+	healthMu.Lock()
+	for i := 0; i < 8; i++ {
+		addr := "[2001:db8::" + string(rune('1'+i)) + "]:4242"
+		healthCache[addr] = healthEntry{
+			Healthy:     true,
+			RTT:         time.Duration(i+1) * time.Millisecond,
+			LastChecked: time.Now(),
+		}
+	}
+	healthMu.Unlock()
+	t.Cleanup(func() {
+		healthMu.Lock()
+		defer healthMu.Unlock()
+		for i := 0; i < 8; i++ {
+			delete(healthCache, "[2001:db8::"+string(rune('1'+i))+"]:4242")
+		}
+	})
+
+	nodes := make([]record.EndpointRecord, 0, 8)
+	for i := 0; i < 8; i++ {
+		nodes = append(nodes, record.EndpointRecord{
+			NodeName: "relay-" + string(rune('a'+i)),
+			Address:  "[2001:db8::" + string(rune('1'+i)) + "]:4242",
+		})
+	}
+
+	first := SelectTopology(context.Background(), "[2001:db8::ffff]:4242", nodes, nil, IntroModeRandom, "fast")
+	second := SelectTopology(context.Background(), "[2001:db8::ffff]:4242", nodes, nil, IntroModeRandom, "fast")
+	if len(first.Guards) == 0 {
+		t.Fatal("expected guard set to be populated")
+	}
+	if len(first.Guards) != len(second.Guards) {
+		t.Fatalf("expected stable guard count, got %d and %d", len(first.Guards), len(second.Guards))
+	}
+	for i := range first.Guards {
+		if first.Guards[i] != second.Guards[i] {
+			t.Fatalf("expected stable guard selection, got %#v and %#v", first.Guards, second.Guards)
+		}
+	}
+}
+
+func TestGuardCallbackRegistrationAndForwarding(t *testing.T) {
+	guardMu.Lock()
+	original := guardServices
+	guardServices = map[string]*guardRegistration{}
+	guardMu.Unlock()
+	defer func() {
+		guardMu.Lock()
+		guardServices = original
+		guardMu.Unlock()
+	}()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	scope := nodeScopedService("guard-a", "ghost")
+	done := make(chan error, 1)
+	go func() {
+		done <- holdGuardRegistration(serverConn, scope, "cb-1")
+	}()
+
+	waitForGuardRegistration(t, scope)
+
+	msgCh := make(chan Message, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		msg, err := readControl(clientConn)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		msgCh <- msg
+	}()
+
+	if err := sendGuardCallback(scope, Message{
+		Action:       "intro_notify",
+		Service:      "ghost",
+		RendezvousID: "rv-1",
+	}); err != nil {
+		t.Fatalf("send guard callback: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("read callback message: %v", err)
+	case msg := <-msgCh:
+		if msg.Action != "intro_notify" || msg.RendezvousID != "rv-1" || msg.Service != "ghost" {
+			t.Fatalf("unexpected callback message: %+v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for callback message")
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("guard registration did not shut down after connection close")
+	}
+}
+
+func TestGuardCallbackScopesAreIsolatedPerNode(t *testing.T) {
+	guardMu.Lock()
+	original := guardServices
+	guardServices = map[string]*guardRegistration{}
+	guardMu.Unlock()
+	defer func() {
+		guardMu.Lock()
+		guardServices = original
+		guardMu.Unlock()
+	}()
+
+	scopeA := nodeScopedService("guard-a", "ghost")
+	scopeB := nodeScopedService("guard-b", "ghost")
+	leftA, rightA := net.Pipe()
+	defer leftA.Close()
+	defer rightA.Close()
+
+	guardMu.Lock()
+	guardServices[scopeA] = &guardRegistration{CallbackID: "cb-a", Conn: leftA}
+	guardMu.Unlock()
+
+	msgCh := make(chan Message, 1)
+	go func() {
+		msg, err := readControl(rightA)
+		if err == nil {
+			msgCh <- msg
+		}
+	}()
+
+	if err := sendGuardCallback(scopeA, Message{Action: "intro_notify", Service: "ghost", RendezvousID: "rv-a"}); err != nil {
+		t.Fatalf("send scoped callback: %v", err)
+	}
+
+	select {
+	case msg := <-msgCh:
+		if msg.RendezvousID != "rv-a" {
+			t.Fatalf("unexpected scoped callback message: %+v", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for scoped callback message")
+	}
+
+	if err := sendGuardCallback(scopeB, Message{Action: "intro_notify", Service: "ghost"}); err == nil {
+		t.Fatal("expected callback on missing guard scope to fail")
+	}
+}
+
+func TestControlEnvelopeValidationRejectsReplayAndWrongPeer(t *testing.T) {
+	controlReplayMu.Lock()
+	originalReplays := controlReplays
+	controlReplays = map[string]time.Time{}
+	controlReplayMu.Unlock()
+	t.Cleanup(func() {
+		controlReplayMu.Lock()
+		controlReplays = originalReplays
+		controlReplayMu.Unlock()
+	})
+
+	sender := testControlConn{local: "node-a"}
+	receiver := testControlConn{peer: "node-a"}
+
+	msg, err := stampControlMessage(sender, Message{Action: "intro_request", Service: "ghost"})
+	if err != nil {
+		t.Fatalf("stamp control message: %v", err)
+	}
+	if msg.SenderNodeID != "node-a" || msg.Nonce == "" || msg.Epoch == 0 {
+		t.Fatalf("unexpected stamped control envelope: %+v", msg)
+	}
+	if err := validateControlMessage(receiver, msg); err != nil {
+		t.Fatalf("validate control message: %v", err)
+	}
+	if err := validateControlMessage(receiver, msg); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("expected replay detection, got %v", err)
+	}
+
+	msg, err = stampControlMessage(sender, Message{Action: "intro_request", Service: "ghost"})
+	if err != nil {
+		t.Fatalf("restamp control message: %v", err)
+	}
+	if err := validateControlMessage(testControlConn{peer: "node-b"}, msg); err == nil || !strings.Contains(err.Error(), "sender mismatch") {
+		t.Fatalf("expected sender mismatch, got %v", err)
+	}
+
+	expired := Message{
+		Action:       "intro_request",
+		Service:      "ghost",
+		SenderNodeID: "node-a",
+		Epoch:        controlEpoch(time.Now().Add(-2 * hiddenControlEpochDuration)),
+		Nonce:        "expired-nonce",
+	}
+	if err := validateControlMessage(receiver, expired); err == nil || !strings.Contains(err.Error(), "epoch") {
+		t.Fatalf("expected expired epoch rejection, got %v", err)
+	}
+}
+
+func TestIntroRegistrationReplacesNotifyTargets(t *testing.T) {
+	introMu.Lock()
+	original := introServices
+	introServices = map[string]introRegistration{}
+	introMu.Unlock()
+	defer func() {
+		introMu.Lock()
+		introServices = original
+		introMu.Unlock()
+	}()
+
+	scope := nodeScopedService("intro-a", "ghost")
+	serverA, clientA := net.Pipe()
+	defer clientA.Close()
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- holdIntroRegistration(serverA, scope, []string{"guard-a"})
+	}()
+
+	waitForIntroRegistration(t, scope)
+	introMu.RLock()
+	first := introServices[scope]
+	introMu.RUnlock()
+	if len(first.NotifyAddrs) != 1 || first.NotifyAddrs[0] != "guard-a" {
+		t.Fatalf("unexpected first intro registration: %+v", first)
+	}
+
+	serverB, clientB := net.Pipe()
+	defer clientB.Close()
+	doneB := make(chan error, 1)
+	go func() {
+		doneB <- holdIntroRegistration(serverB, scope, []string{"guard-b", "guard-c"})
+	}()
+
+	waitForIntroNotifyAddrs(t, scope, []string{"guard-b", "guard-c"})
+
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("old intro registration did not shut down after replacement")
+	}
+
+	introMu.RLock()
+	second := introServices[scope]
+	introMu.RUnlock()
+	if len(second.NotifyAddrs) != 2 || second.NotifyAddrs[0] != "guard-b" || second.NotifyAddrs[1] != "guard-c" {
+		t.Fatalf("unexpected replacement intro registration: %+v", second)
+	}
+
+	_ = clientB.Close()
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("replacement intro registration did not shut down after connection close")
+	}
+}
+
+func TestHoldGuardRegistrationRespondsToControlPing(t *testing.T) {
+	guardMu.Lock()
+	original := guardServices
+	guardServices = map[string]*guardRegistration{}
+	guardMu.Unlock()
+	defer func() {
+		guardMu.Lock()
+		guardServices = original
+		guardMu.Unlock()
+	}()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	scope := nodeScopedService("guard-a", "ghost")
+	done := make(chan error, 1)
+	go func() {
+		done <- holdGuardRegistration(serverConn, scope, "cb-1")
+	}()
+
+	waitForGuardRegistration(t, scope)
+
+	if err := writeControl(clientConn, Message{Action: "control_ping"}); err != nil {
+		t.Fatalf("write guard ping: %v", err)
+	}
+	msg, err := readControl(clientConn)
+	if err != nil {
+		t.Fatalf("read guard pong: %v", err)
+	}
+	if msg.Action != "control_pong" {
+		t.Fatalf("expected control_pong, got %+v", msg)
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("guard registration did not shut down after ping test")
+	}
+}
+
+func TestHoldIntroRegistrationRespondsToControlPing(t *testing.T) {
+	introMu.Lock()
+	original := introServices
+	introServices = map[string]introRegistration{}
+	introMu.Unlock()
+	defer func() {
+		introMu.Lock()
+		introServices = original
+		introMu.Unlock()
+	}()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	scope := nodeScopedService("intro-a", "ghost")
+	done := make(chan error, 1)
+	go func() {
+		done <- holdIntroRegistration(serverConn, scope, []string{"guard-a"})
+	}()
+
+	waitForIntroRegistration(t, scope)
+
+	if err := writeControl(clientConn, Message{Action: "control_ping"}); err != nil {
+		t.Fatalf("write intro ping: %v", err)
+	}
+	msg, err := readControl(clientConn)
+	if err != nil {
+		t.Fatalf("read intro pong: %v", err)
+	}
+	if msg.Action != "control_pong" {
+		t.Fatalf("expected control_pong, got %+v", msg)
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("intro registration did not shut down after ping test")
+	}
+}
+
+func TestPruneOwnerRegistrationsCancelsStaleLeases(t *testing.T) {
+	introClientMu.Lock()
+	origIntro := introClients
+	introClients = map[string]registrationLease{}
+	introClientMu.Unlock()
+	defer func() {
+		introClientMu.Lock()
+		introClients = origIntro
+		introClientMu.Unlock()
+	}()
+
+	guardClientMu.Lock()
+	origGuard := guardClients
+	guardClients = map[string]registrationLease{}
+	guardClientMu.Unlock()
+	defer func() {
+		guardClientMu.Lock()
+		guardClients = origGuard
+		guardClientMu.Unlock()
+	}()
+
+	introCanceled := make(chan string, 2)
+	guardCanceled := make(chan string, 2)
+	introKeep := introClientKey("owner-a", "[::1]:4001", "ghost")
+	introDrop := introClientKey("owner-a", "[::1]:4002", "ghost")
+	guardKeep := guardClientKey("owner-a", "[::1]:5001", "ghost")
+	guardDrop := guardClientKey("owner-a", "[::1]:5002", "ghost")
+
+	introClientMu.Lock()
+	introClients[introKeep] = registrationLease{Cancel: func() { introCanceled <- introKeep }}
+	introClients[introDrop] = registrationLease{Cancel: func() { introCanceled <- introDrop }}
+	introClientMu.Unlock()
+
+	guardClientMu.Lock()
+	guardClients[guardKeep] = registrationLease{Cancel: func() { guardCanceled <- guardKeep }}
+	guardClients[guardDrop] = registrationLease{Cancel: func() { guardCanceled <- guardDrop }}
+	guardClientMu.Unlock()
+
+	PruneOwnerRegistrations("owner-a", []OwnerRegistrationTarget{{
+		LookupKey:  "ghost",
+		IntroAddrs: []string{"[::1]:4001"},
+		GuardAddrs: []string{"[::1]:5001"},
+	}})
+
+	select {
+	case got := <-introCanceled:
+		if got != introDrop {
+			t.Fatalf("unexpected intro lease canceled: %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected stale intro lease to be canceled")
+	}
+	select {
+	case got := <-guardCanceled:
+		if got != guardDrop {
+			t.Fatalf("unexpected guard lease canceled: %s", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected stale guard lease to be canceled")
+	}
+
+	introClientMu.Lock()
+	if _, ok := introClients[introKeep]; !ok {
+		t.Fatal("expected desired intro lease to remain")
+	}
+	if _, ok := introClients[introDrop]; ok {
+		t.Fatal("expected stale intro lease to be pruned")
+	}
+	introClientMu.Unlock()
+
+	guardClientMu.Lock()
+	if _, ok := guardClients[guardKeep]; !ok {
+		t.Fatal("expected desired guard lease to remain")
+	}
+	if _, ok := guardClients[guardDrop]; ok {
+		t.Fatal("expected stale guard lease to be pruned")
+	}
+	guardClientMu.Unlock()
+}
+
+func waitForGuardRegistration(t *testing.T, scope string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		guardMu.RLock()
+		_, ok := guardServices[scope]
+		guardMu.RUnlock()
+		if ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for guard registration %q", scope)
+}
+
+func waitForIntroRegistration(t *testing.T, scope string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		introMu.RLock()
+		_, ok := introServices[scope]
+		introMu.RUnlock()
+		if ok {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for intro registration %q", scope)
+}
+
+func waitForIntroNotifyAddrs(t *testing.T, scope string, want []string) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		introMu.RLock()
+		reg, ok := introServices[scope]
+		introMu.RUnlock()
+		if ok && len(reg.NotifyAddrs) == len(want) {
+			match := true
+			for i := range want {
+				if reg.NotifyAddrs[i] != want[i] {
+					match = false
+					break
+				}
+			}
+			if match {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for intro notify addrs %q", scope)
 }

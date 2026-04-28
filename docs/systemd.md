@@ -13,6 +13,21 @@ The recommended mode is a user service:
 Build and install:
 
 ```bash
+make build
+sudo make install
+```
+
+`make install` only installs the existing `./vx6` binary and the systemd unit.
+It does not rebuild the project.
+
+Run `make build` as your normal user, not through `sudo`. Only `make install` needs `sudo`.
+
+If `./vx6` is already present in the repo root, `sudo make install` will install that binary directly and will not touch `clang`, eBPF headers, or Go.
+
+If you want to rebuild the eBPF object too:
+
+```bash
+make build-ebpf
 sudo make install
 ```
 

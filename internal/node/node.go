@@ -23,13 +23,17 @@ import (
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/runtimectl"
 	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const (
-	syncCycleInterval   = 30 * time.Second
+	syncCycleInterval   = 10 * time.Second
+	syncWarmupInterval  = 2 * time.Second
+	syncWarmupRounds    = 4
 	syncTargetTimeout   = 2 * time.Second
 	syncProbeTimeout    = 1 * time.Second
 	syncMaxRounds       = 3
@@ -39,21 +43,27 @@ const (
 type ServiceRefresher func() map[string]string
 
 type Config struct {
-	Name            string
-	NodeID          string
-	ListenAddr      string
-	AdvertiseAddr   string
-	HideEndpoint    bool
-	DataDir         string
-	ReceiveDir      string
-	ConfigPath      string
-	RefreshServices ServiceRefresher
-	BootstrapAddrs  []string
-	Services        map[string]string
-	Identity        identity.Identity
-	Registry        *discovery.Registry
-	DHT             *dht.Server
-	Reload          <-chan struct{}
+	Name                 string
+	NodeID               string
+	ListenAddr           string
+	AdvertiseAddr        string
+	TransportMode        string
+	HideEndpoint         bool
+	RelayMode            string
+	RelayResourcePercent int
+	DataDir              string
+	ReceiveDir           string
+	FileReceiveMode      string
+	AllowedFileSenders   []string
+	ConfigPath           string
+	ControlInfoPath      string
+	RefreshServices      ServiceRefresher
+	BootstrapAddrs       []string
+	Services             map[string]string
+	Identity             identity.Identity
+	Registry             *discovery.Registry
+	DHT                  *dht.Server
+	Reload               chan struct{}
 }
 
 const SeedBootstrapDomain = "bootstrap.vx6.dev"
@@ -87,12 +97,50 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Services == nil {
 		cfg.Services = map[string]string{}
 	}
+	startedAt := time.Now()
 
-	listener, err := net.Listen("tcp6", cfg.ListenAddr)
+	listener, err := vxtransport.Listen(cfg.TransportMode, cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
 	}
 	defer listener.Close()
+	relayGovernor := newRelayGovernor(cfg.RelayMode, cfg.RelayResourcePercent)
+	if cfg.ControlInfoPath != "" {
+		controlServer, err := runtimectl.Start(cfg.ControlInfoPath, os.Getpid(), func() error {
+			if cfg.Reload == nil {
+				return fmt.Errorf("reload channel is not configured")
+			}
+			select {
+			case cfg.Reload <- struct{}{}:
+			default:
+			}
+			return nil
+		}, func() runtimectl.Status {
+			liveCfg := runtimeConfig(cfg)
+			nodeCount := 0
+			serviceCount := 0
+			if cfg.Registry != nil {
+				nodes, services := cfg.Registry.Snapshot()
+				nodeCount = len(nodes)
+				serviceCount = len(services)
+			}
+			return runtimectl.Status{
+				NodeName:         liveCfg.Name,
+				EndpointPublish:  endpointPublishMode(liveCfg.HideEndpoint),
+				TransportConfig:  liveCfg.TransportMode,
+				TransportActive:  vxtransport.EffectiveMode(liveCfg.TransportMode),
+				RelayMode:        liveCfg.RelayMode,
+				RelayPercent:     liveCfg.RelayResourcePercent,
+				RegistryNodes:    nodeCount,
+				RegistryServices: serviceCount,
+				UptimeSeconds:    int64(time.Since(startedAt).Seconds()),
+			}
+		})
+		if err != nil {
+			return err
+		}
+		defer controlServer.Close()
+	}
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
@@ -138,6 +186,8 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
 				return
 			}
+			liveCfg := runtimeConfig(cfg)
+			relayGovernor.Update(liveCfg.RelayMode, liveCfg.RelayResourcePercent)
 
 			switch kind {
 			case proto.KindFileTransfer:
@@ -146,7 +196,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
-				res, err := transfer.ReceiveFile(secureConn, cfg.ReceiveDir)
+				res, err := transfer.ReceiveFileWithPolicy(secureConn, liveCfg.ReceiveDir, fileReceivePolicy(liveCfg))
 				if err != nil {
 					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
@@ -179,23 +229,32 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					}
 				}
 			case proto.KindExtend:
-				payload, err := proto.ReadLengthPrefixed(reader, 1024*1024)
+				release, err := relayGovernor.Acquire(kind)
 				if err != nil {
-					fmt.Fprintf(log, "extend read error from %s: %v\n", conn.RemoteAddr().String(), err)
+					fmt.Fprintf(log, "relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
-				var er proto.ExtendRequest
-				if err := json.Unmarshal(payload, &er); err != nil {
-					fmt.Fprintf(log, "extend decode error from %s: %v\n", conn.RemoteAddr().String(), err)
+				defer release()
+				secureConn, err := secure.Server(&bufferedConn{Conn: conn, reader: reader}, proto.KindExtend, cfg.Identity)
+				if err != nil {
+					fmt.Fprintf(log, "extend secure handshake error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
-				if err := onion.HandleExtend(ctx, conn, er); err != nil {
+				if err := onion.HandleExtend(ctx, secureConn, cfg.Identity); err != nil {
 					fmt.Fprintf(log, "extend error from %s: %v\n", conn.RemoteAddr().String(), err)
 				}
 			case proto.KindRendezvous:
-				liveServices := runtimeServices(cfg)
+				release, err := relayGovernor.Acquire(kind)
+				if err != nil {
+					fmt.Fprintf(log, "relay admission denied for %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+				defer release()
+				liveServices := liveCfg.Services
 				if err := hidden.HandleConn(ctx, &bufferedConn{Conn: conn, reader: reader}, hidden.HandlerConfig{
 					Identity:      cfg.Identity,
+					AdvertiseAddr: liveCfg.AdvertiseAddr,
+					TransportMode: liveCfg.TransportMode,
 					Services:      liveServices,
 					HiddenAliases: hiddenAliasMap(cfg.ConfigPath),
 					Registry:      cfg.Registry,
@@ -211,6 +270,13 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 		}()
 	}
+}
+
+func endpointPublishMode(hidden bool) string {
+	if hidden {
+		return "hidden"
+	}
+	return "published"
 }
 
 func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
@@ -276,6 +342,7 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
 		serviceRecords, hiddenTopologies := buildServiceRecords(ctx, liveCfg, nodes)
 		publishServicesToTargets(ctx, liveCfg, log, targets, serviceRecords)
+		hiddenTargets := make([]hidden.OwnerRegistrationTarget, 0)
 
 		for _, srec := range serviceRecords {
 			if !srec.IsHidden {
@@ -286,17 +353,40 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			if len(notifyAddrs) == 0 {
 				notifyAddrs = []string{liveCfg.AdvertiseAddr}
 			}
-			hidden.TrackAddresses(ctx, append(append([]string(nil), topology.ActiveIntros...), append(topology.StandbyIntros, topology.Guards...)...), 20*time.Second)
+			controlOpts := hidden.ControlOptions{
+				Identity:      liveCfg.Identity,
+				Registry:      liveCfg.Registry,
+				SelfAddr:      liveCfg.AdvertiseAddr,
+				TransportMode: liveCfg.TransportMode,
+				RelayHopCount: hidden.ControlHopCountForProfile(srec.HiddenProfile),
+				RequireRelay:  true,
+			}
+			allIntros := append([]string(nil), srec.IntroPoints...)
+			allIntros = append(allIntros, srec.StandbyIntroPoints...)
+			hidden.TrackAddresses(ctx, append(append([]string(nil), allIntros...), topology.Guards...), 20*time.Second)
 			for _, guardAddr := range topology.Guards {
-				_ = hidden.RegisterGuard(ctx, guardAddr, record.ServiceLookupKey(srec), liveCfg.AdvertiseAddr)
+				hidden.EnsureGuardRegistration(ctx, controlOpts, guardAddr, record.ServiceLookupKey(srec), func() hidden.HandlerConfig {
+					current := runtimeConfig(cfg)
+					return hidden.HandlerConfig{
+						Identity:      cfg.Identity,
+						AdvertiseAddr: current.AdvertiseAddr,
+						TransportMode: current.TransportMode,
+						Services:      current.Services,
+						HiddenAliases: hiddenAliasMap(cfg.ConfigPath),
+						Registry:      cfg.Registry,
+					}
+				})
 			}
-			for _, introAddr := range append([]string(nil), srec.IntroPoints...) {
-				_ = hidden.RegisterIntro(ctx, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
+			for _, introAddr := range allIntros {
+				hidden.EnsureIntroRegistration(ctx, controlOpts, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
 			}
-			for _, introAddr := range srec.StandbyIntroPoints {
-				_ = hidden.RegisterIntro(ctx, introAddr, record.ServiceLookupKey(srec), notifyAddrs)
-			}
+			hiddenTargets = append(hiddenTargets, hidden.OwnerRegistrationTarget{
+				LookupKey:  record.ServiceLookupKey(srec),
+				GuardAddrs: append([]string(nil), topology.Guards...),
+				IntroAddrs: append([]string(nil), allIntros...),
+			})
 		}
+		hidden.PruneOwnerRegistrations(liveCfg.Identity.NodeID, hiddenTargets)
 
 		publishRecordsToTargets(ctx, liveCfg, log, targets, rec, serviceRecords)
 
@@ -304,7 +394,9 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 	}
 
 	publishAndSync()
-	ticker := time.NewTicker(syncCycleInterval)
+	ticker := time.NewTicker(syncWarmupInterval)
+	defer ticker.Stop()
+	warmupRounds := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -314,6 +406,12 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			publishAndSync()
 		case <-ticker.C:
 			publishAndSync()
+			if warmupRounds < syncWarmupRounds {
+				warmupRounds++
+				if warmupRounds == syncWarmupRounds {
+					ticker.Reset(syncCycleInterval)
+				}
+			}
 		}
 	}
 }
@@ -641,14 +739,7 @@ func addSyncTarget(targets map[string]struct{}, selfAddr, addr string) {
 func probeSyncTarget(ctx context.Context, addr string) bool {
 	dialCtx, cancel := context.WithTimeout(ctx, syncProbeTimeout)
 	defer cancel()
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
+	return vxtransport.ProbeContext(dialCtx, vxtransport.ModeTCP, addr)
 }
 
 func withSyncTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -682,8 +773,13 @@ func runtimeConfig(base Config) Config {
 	if cfgFile.Node.AdvertiseAddr != "" {
 		live.AdvertiseAddr = cfgFile.Node.AdvertiseAddr
 	}
+	live.TransportMode = cfgFile.Node.TransportMode
 	live.HideEndpoint = cfgFile.Node.HideEndpoint
+	live.RelayMode = cfgFile.Node.RelayMode
+	live.RelayResourcePercent = cfgFile.Node.RelayResourcePercent
 	live.BootstrapAddrs = append([]string(nil), cfgFile.Node.BootstrapAddrs...)
+	live.FileReceiveMode = cfgFile.Node.FileReceiveMode
+	live.AllowedFileSenders = append([]string(nil), cfgFile.Node.AllowedFileSenders...)
 	live.Services = serviceTargets(cfgFile.Services)
 	if len(live.Services) == 0 && base.RefreshServices != nil {
 		live.Services = base.RefreshServices()
@@ -697,6 +793,17 @@ func runtimeConfig(base Config) Config {
 
 func runtimeServices(base Config) map[string]string {
 	return runtimeConfig(base).Services
+}
+
+func fileReceivePolicy(cfg Config) transfer.ReceivePolicy {
+	allowed := make(map[string]struct{}, len(cfg.AllowedFileSenders))
+	for _, sender := range cfg.AllowedFileSenders {
+		allowed[sender] = struct{}{}
+	}
+	return transfer.ReceivePolicy{
+		Mode:           cfg.FileReceiveMode,
+		AllowedSenders: allowed,
+	}
 }
 
 func serviceTargets(entries map[string]config.ServiceEntry) map[string]string {

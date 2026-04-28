@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -48,6 +49,30 @@ func TestRuntimePIDPathUsesConfigDirectory(t *testing.T) {
 	}
 }
 
+func TestRuntimeLockPathUsesConfigDirectory(t *testing.T) {
+	t.Parallel()
+
+	path, err := RuntimeLockPath("/tmp/vx6/config.json")
+	if err != nil {
+		t.Fatalf("runtime lock path: %v", err)
+	}
+	if path != "/tmp/vx6/node.lock" {
+		t.Fatalf("unexpected lock path %q", path)
+	}
+}
+
+func TestRuntimeControlPathUsesConfigDirectory(t *testing.T) {
+	t.Parallel()
+
+	path, err := RuntimeControlPath("/tmp/vx6/config.json")
+	if err != nil {
+		t.Fatalf("runtime control path: %v", err)
+	}
+	if path != "/tmp/vx6/node.control.json" {
+		t.Fatalf("unexpected control path %q", path)
+	}
+}
+
 func TestDefaultPathsUseHomeDirectory(t *testing.T) {
 	t.Setenv("HOME", "/tmp/vx6-home")
 
@@ -73,5 +98,118 @@ func TestDefaultPathsUseHomeDirectory(t *testing.T) {
 	}
 	if downloadDir != "/tmp/vx6-home/Downloads" {
 		t.Fatalf("unexpected download dir %q", downloadDir)
+	}
+}
+
+func TestStoreNormalizesTrustedFileReceiveSettings(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load default config: %v", err)
+	}
+	cfg.Node.FileReceiveMode = "TRUSTED"
+	cfg.Node.AllowedFileSenders = []string{"beta", "", "alpha", "beta"}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Node.FileReceiveMode != FileReceiveTrusted {
+		t.Fatalf("unexpected receive mode %q", loaded.Node.FileReceiveMode)
+	}
+	if want := []string{"alpha", "beta"}; !reflect.DeepEqual(loaded.Node.AllowedFileSenders, want) {
+		t.Fatalf("unexpected allowed senders %#v", loaded.Node.AllowedFileSenders)
+	}
+}
+
+func TestStoreClearsAllowListOutsideTrustedMode(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load default config: %v", err)
+	}
+	cfg.Node.FileReceiveMode = FileReceiveOpen
+	cfg.Node.AllowedFileSenders = []string{"alpha"}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Node.FileReceiveMode != FileReceiveOpen {
+		t.Fatalf("unexpected receive mode %q", loaded.Node.FileReceiveMode)
+	}
+	if loaded.Node.AllowedFileSenders != nil {
+		t.Fatalf("expected allow list to be cleared, got %#v", loaded.Node.AllowedFileSenders)
+	}
+}
+
+func TestStoreNormalizesTransportAndRelayDefaults(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load default config: %v", err)
+	}
+	cfg.Node.TransportMode = "AUTO"
+	cfg.Node.RelayMode = ""
+	cfg.Node.RelayResourcePercent = 0
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if loaded.Node.TransportMode != "auto" {
+		t.Fatalf("unexpected transport mode %q", loaded.Node.TransportMode)
+	}
+	if loaded.Node.RelayMode != RelayModeOn {
+		t.Fatalf("unexpected relay mode %q", loaded.Node.RelayMode)
+	}
+	if loaded.Node.RelayResourcePercent != 33 {
+		t.Fatalf("unexpected relay resource percent %d", loaded.Node.RelayResourcePercent)
+	}
+}
+
+func TestAddPeerValidatesNameAndAddress(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	if err := store.AddPeer("Alpha", "[2001:db8::2]:4242"); err == nil {
+		t.Fatal("expected invalid peer name to fail")
+	}
+	if err := store.AddPeer("beta", "127.0.0.1:4242"); err == nil {
+		t.Fatal("expected invalid peer address to fail")
+	}
+	if err := store.AddPeer("beta", "[2001:db8::2]:4242"); err != nil {
+		t.Fatalf("expected valid peer add to succeed, got %v", err)
 	}
 }
