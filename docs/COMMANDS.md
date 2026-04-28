@@ -254,12 +254,14 @@ vx6 debug dht-get --key 'service/alice.ssh'
 ### eBPF / XDP
 
 ```bash
-vx6 debug ebpf-status
+vx6 debug ebpf-status --iface eth0
 vx6 debug ebpf-attach --iface eth0
 vx6 debug ebpf-detach --iface eth0
 ```
 
 `ebpf-attach` and `ebpf-detach` usually require root or the needed Linux capabilities.
+
+See [ebpf.md](./ebpf.md) for the current implementation status and limitations.
 
 ## Help
 

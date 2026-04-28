@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -1195,7 +1194,7 @@ func runDebug(ctx context.Context, args []string) error {
 	case "dht-get":
 		return runDebugDHTGet(ctx, args[1:])
 	case "ebpf-status":
-		return runDebugEBPFStatus()
+		return runDebugEBPFStatus(args[1:]...)
 	case "ebpf-attach":
 		return runDebugEBPFAttach(ctx, args[1:])
 	case "ebpf-detach":
@@ -1210,7 +1209,7 @@ func printDebugUsage(w io.Writer) {
 	fmt.Fprintln(w, "Debug commands:")
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
-	fmt.Fprintln(w, "  vx6 debug ebpf-status")
+	fmt.Fprintln(w, "  vx6 debug ebpf-status [--iface IFACE]")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
 	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
 }
@@ -1333,10 +1332,29 @@ func runDebugDHTGet(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runDebugEBPFStatus() error {
-	fmt.Printf("embedded_bytecode\t%v\n", onion.IsEBPFAvailable())
-	fmt.Printf("bytecode_size\t%d\n", len(onion.OnionRelayBytecode))
-	fmt.Println("attach_status\tavailable via debug ebpf-attach / debug ebpf-detach")
+func runDebugEBPFStatus(args ...string) error {
+	fs := flag.NewFlagSet("debug ebpf-status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	iface := fs.String("iface", "", "network interface name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *iface == "" {
+		printXDPStatus(onion.XDPStatus{
+			EmbeddedBytecode:     onion.IsEBPFAvailable(),
+			BytecodeSize:         len(onion.OnionRelayBytecode),
+			CompatibilityWarning: "embedded XDP program targets the legacy VX6 onion header and is not yet the active fast path for the current encrypted relay data path",
+		})
+		fmt.Println("attach_state\tuse --iface IFACE for live kernel status")
+		return nil
+	}
+
+	status, err := onion.NewXDPManager().Status(context.Background(), *iface)
+	if err != nil {
+		return err
+	}
+	printXDPStatus(status)
 	return nil
 }
 
@@ -1350,42 +1368,14 @@ func runDebugEBPFAttach(ctx context.Context, args []string) error {
 	if *iface == "" {
 		return errors.New("debug ebpf-attach requires --iface")
 	}
-	if !onion.IsEBPFAvailable() {
-		return errors.New("embedded eBPF bytecode is not available")
-	}
 
-	tmpFile, err := os.CreateTemp("", "vx6-onion-*.o")
+	status, err := onion.NewXDPManager().Attach(ctx, *iface)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpFile.Name())
-	if _, err := tmpFile.Write(onion.OnionRelayBytecode); err != nil {
-		_ = tmpFile.Close()
-		return err
-	}
-	if err := tmpFile.Close(); err != nil {
-		return err
-	}
-
-	type attachMode struct {
-		name string
-		args []string
-	}
-	modes := []attachMode{
-		{name: "native", args: []string{"link", "set", "dev", *iface, "xdp", "obj", tmpFile.Name(), "sec", "xdp"}},
-		{name: "generic", args: []string{"link", "set", "dev", *iface, "xdpgeneric", "obj", tmpFile.Name(), "sec", "xdp"}},
-	}
-	failures := make([]string, 0, len(modes))
-	for _, mode := range modes {
-		cmd := exec.CommandContext(ctx, "ip", mode.args...)
-		output, err := cmd.CombinedOutput()
-		if err == nil {
-			fmt.Printf("ebpf_attach\tok\niface\t%s\nmode\t%s\nobject\t%s\n", *iface, mode.name, tmpFile.Name())
-			return nil
-		}
-		failures = append(failures, fmt.Sprintf("%s: %s", mode.name, strings.TrimSpace(string(output))))
-	}
-	return fmt.Errorf("attach XDP program failed: %s", strings.Join(failures, " | "))
+	fmt.Println("ebpf_attach\tok")
+	printXDPStatus(status)
+	return nil
 }
 
 func runDebugEBPFDetach(ctx context.Context, args []string) error {
@@ -1399,13 +1389,38 @@ func runDebugEBPFDetach(ctx context.Context, args []string) error {
 		return errors.New("debug ebpf-detach requires --iface")
 	}
 
-	cmd := exec.CommandContext(ctx, "ip", "link", "set", "dev", *iface, "xdp", "off")
-	output, err := cmd.CombinedOutput()
+	status, err := onion.NewXDPManager().Detach(ctx, *iface)
 	if err != nil {
-		return fmt.Errorf("detach XDP program: %w: %s", err, strings.TrimSpace(string(output)))
+		return err
 	}
-	fmt.Printf("ebpf_detach\tok\niface\t%s\n", *iface)
+	fmt.Println("ebpf_detach\tok")
+	printXDPStatus(status)
 	return nil
+}
+
+func printXDPStatus(status onion.XDPStatus) {
+	fmt.Printf("embedded_bytecode\t%v\n", status.EmbeddedBytecode)
+	fmt.Printf("bytecode_size\t%d\n", status.BytecodeSize)
+	if status.Interface != "" {
+		fmt.Printf("iface\t%s\n", status.Interface)
+	}
+	fmt.Printf("xdp_attached\t%v\n", status.Attached)
+	fmt.Printf("vx6_active\t%v\n", status.VX6Active)
+	if status.Mode != "" {
+		fmt.Printf("mode\t%s\n", status.Mode)
+	}
+	if status.ProgramName != "" {
+		fmt.Printf("program_name\t%s\n", status.ProgramName)
+	}
+	if status.ProgramID > 0 {
+		fmt.Printf("program_id\t%d\n", status.ProgramID)
+	}
+	if status.ProgramTag != "" {
+		fmt.Printf("program_tag\t%s\n", status.ProgramTag)
+	}
+	if status.CompatibilityWarning != "" {
+		fmt.Printf("compatibility_warning\t%s\n", status.CompatibilityWarning)
+	}
 }
 
 func loadLocalRegistry(dataDir string) (*discovery.Registry, error) {
