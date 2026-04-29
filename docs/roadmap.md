@@ -3,21 +3,23 @@
 ## Phase 0
 
 - establish repository structure
-- provide a working Go CLI
-- implement IPv6 file streaming over `tcp6`
+- provide a single working Go executable
+- implement node listen mode over `tcp6`
+- implement IPv6 file streaming over a defined VX6 wire format
 - define documentation and contribution standards
 
 ## Phase 1
 
-- add receiver-side protocol support in Go
-- define transfer metadata framing
+- harden transfer metadata framing
 - add checksums and transfer diagnostics
 - add tests for IPv6 parsing and stream handling
+- add graceful shutdown and node-level logging controls
 
 ## Phase 2
 
+- introduce stable local node configuration
+- define human-readable naming beyond raw IPv6 endpoints
 - introduce node identity
-- persist local configuration
 - formalize peer connection handling
 
 ## Phase 3

@@ -8,5 +8,6 @@ The project direction is guided by a few constraints:
 - endpoint identity should eventually be separable from a changing address
 - service publication and discovery should be designed as composable layers
 - operational simplicity matters as much as protocol ambition
+- one executable should remain the operational surface for users
 
 The current repository does not claim that full system yet. It establishes the code, structure, and standards needed to build toward it without overstating present capabilities.

@@ -2,18 +2,20 @@
 
 ## Current Baseline
 
-The repository starts with a single transport primitive:
+The repository starts with one executable, `vx6`, and a narrow set of responsibilities:
 
-1. Open a `tcp6` connection to a remote IPv6 endpoint.
-2. Stream file bytes over that connection.
-3. Close cleanly after transfer completion or surface the error.
+1. Run a node listener on `tcp6`.
+2. Accept inbound file transfers into a local data directory.
+3. Open outbound `tcp6` connections to other nodes.
+4. Send files using a small framed protocol with node metadata.
 
 This is intentionally narrow. VX6 should earn complexity rather than declare it.
 
 ## Near-Term Direction
 
-The transport primitive in this repository is expected to evolve into a larger IPv6-first system with the following layers:
+The node and transfer primitives in this repository are expected to evolve into a larger IPv6-first system with the following layers:
 
+- stable node naming
 - endpoint handling
 - node identity
 - service publication
@@ -28,3 +30,4 @@ Each layer should remain independently testable. Direct connectivity is the defa
 - Prefer streaming interfaces over whole-file buffering.
 - Keep package boundaries small and responsibility-driven.
 - Add protocol surface gradually and document it as it appears.
+- Keep the single-binary operational model intact as features are added.
