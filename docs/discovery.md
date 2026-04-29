@@ -1,41 +1,66 @@
-# VX6 Discovery Model
+# VX6 Discovery
 
-## Current State
+VX6 uses a practical discovery model:
 
-VX6 now supports a distributed bootstrap discovery stage.
+- bootstrap nodes for first contact
+- signed records for trust
+- local registry cache for resilience
+- DHT-backed lookup for node and service keys
 
-A known VX6 node can act as a registry for signed endpoint records. Other nodes can:
+## What Gets Published
 
-- publish their current signed endpoint record
-- resolve another node by name or node ID
-- save the resolved address into their local peer list
-- pull a snapshot of known records into a local cached registry
-- answer lookups from their local cached registry
+VX6 publishes:
 
-This is enough to test the address-change problem in a practical distributed-bootstrap way:
+- node records
+- direct service records
+- hidden service descriptors
 
-1. a node changes IPv6 address
-2. the daemon republishes a new signed endpoint record to configured bootstrap nodes
-3. another node resolves the record again
-4. the resolved address replaces the stale local peer entry
+Each record is signed by the publishing node.
 
-## What This Solves
+## Bootstrap Role
 
-- removes repeated manual sharing of raw IPv6 addresses after first bootstrap contact
-- allows a known bootstrap node to act as a discovery point for several machines
-- verifies endpoint claims cryptographically before accepting them
-- allows nodes to keep a cached registry snapshot even if the bootstrap becomes temporarily unavailable
-- allows nodes to query cached peers when a bootstrap is temporarily unavailable
+A bootstrap node gives a new node its first known VX6 peers.
 
-## What This Does Not Solve Yet
+After that, nodes:
 
-- there is no full Kademlia-style DHT
-- there is no recursive peer-to-peer search across every cached node
-- there is no quorum, conflict resolution, or multi-bootstrap merge logic
-- nodes do not yet automatically promote discovered peers into a full mesh search fabric
+- keep a local registry cache
+- sync with known peers
+- republish their own node and service records
+- answer lookups from their cached state
 
-## Practical Interpretation
+That means a bootstrap is required for first contact, but not for every later lookup.
 
-This is a distributed bootstrap registry with local cache and peer-assisted lookup, not a fully decentralized DHT yet.
+## DHT Role
 
-It is still the correct next step because it proves the signed-record model and allows multi-device testing before the project takes on the complexity of a real DHT.
+VX6 stores and resolves:
+
+- `node/name/<name>`
+- `node/id/<node_id>`
+- `service/<user.service>`
+- `hidden/<alias>`
+
+## Hidden Services
+
+Hidden services do not publish a direct service endpoint.
+
+They publish:
+
+- alias
+- intro points
+- standby intro points
+- hidden profile
+
+## Practical Model
+
+VX6 is not trying to be bootstrap-free from absolute zero.
+
+The intended model is:
+
+1. first contact through bootstrap or a known peer
+2. node and service state spreads across known nodes
+3. later updates continue through peers and DHT
+
+## Operator Notes
+
+- if you add bootstraps or services while the node is running, use `vx6 reload`
+- if you know a remote IPv6 address already, you can skip discovery entirely and use `--addr`

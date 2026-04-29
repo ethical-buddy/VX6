@@ -21,6 +21,7 @@ type NodeConfig struct {
 	Name           string   `json:"name"`
 	ListenAddr     string   `json:"listen_addr"`
 	AdvertiseAddr  string   `json:"advertise_addr"`
+	HideEndpoint   bool     `json:"hide_endpoint"`
 	DataDir        string   `json:"data_dir"`
 	BootstrapAddrs []string `json:"bootstrap_addrs"`
 }
@@ -30,7 +31,12 @@ type PeerEntry struct {
 }
 
 type ServiceEntry struct {
-	Target string `json:"target"`
+	Target        string   `json:"target"`
+	IsHidden      bool     `json:"is_hidden"`
+	Alias         string   `json:"alias,omitempty"`
+	HiddenProfile string   `json:"hidden_profile,omitempty"`
+	IntroMode     string   `json:"intro_mode,omitempty"`
+	IntroNodes    []string `json:"intro_nodes,omitempty"`
 }
 
 type Store struct {
@@ -50,12 +56,26 @@ func NewStore(path string) (*Store, error) {
 }
 
 func DefaultPath() (string, error) {
+	if p := os.Getenv("VX6_CONFIG_PATH"); p != "" {
+		return p, nil
+	}
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user config directory: %w", err)
 	}
 
 	return filepath.Join(base, "vx6", "config.json"), nil
+}
+
+func RuntimePIDPath(configPath string) (string, error) {
+	if configPath == "" {
+		var err error
+		configPath, err = DefaultPath()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(filepath.Dir(configPath), "node.pid"), nil
 }
 
 func (s *Store) Path() string {
@@ -166,13 +186,23 @@ func (s *Store) ListBootstraps() ([]string, error) {
 	return out, nil
 }
 
-func (s *Store) AddService(name, target string) error {
+func (s *Store) AddService(name, target string, isHidden bool) error {
 	cfg, err := s.Load()
 	if err != nil {
 		return err
 	}
 
-	cfg.Services[name] = ServiceEntry{Target: target}
+	cfg.Services[name] = ServiceEntry{Target: target, IsHidden: isHidden}
+	return s.Save(cfg)
+}
+
+func (s *Store) SetService(name string, entry ServiceEntry) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	cfg.Services[name] = entry
 	return s.Save(cfg)
 }
 
@@ -231,5 +261,23 @@ func normalize(cfg *File) {
 	}
 	if cfg.Services == nil {
 		cfg.Services = map[string]ServiceEntry{}
+	}
+	for name, svc := range cfg.Services {
+		if svc.IntroNodes == nil {
+			svc.IntroNodes = []string{}
+		}
+		if svc.IsHidden {
+			if svc.HiddenProfile == "" {
+				svc.HiddenProfile = "fast"
+			}
+			if svc.IntroMode == "" {
+				if len(svc.IntroNodes) > 0 {
+					svc.IntroMode = "manual"
+				} else {
+					svc.IntroMode = "random"
+				}
+			}
+		}
+		cfg.Services[name] = svc
 	}
 }

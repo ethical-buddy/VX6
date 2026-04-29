@@ -35,3 +35,15 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected peer address %q", loaded.Peers["beta"].Address)
 	}
 }
+
+func TestRuntimePIDPathUsesConfigDirectory(t *testing.T) {
+	t.Parallel()
+
+	path, err := RuntimePIDPath("/tmp/vx6/config.json")
+	if err != nil {
+		t.Fatalf("runtime pid path: %v", err)
+	}
+	if path != "/tmp/vx6/node.pid" {
+		t.Fatalf("unexpected pid path %q", path)
+	}
+}

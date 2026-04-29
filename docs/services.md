@@ -1,54 +1,93 @@
-# VX6 Service Model
+# VX6 Services
 
-## Current State
+VX6 exposes local TCP services through a VX6 node.
 
-VX6 now supports:
+The local target stays local, for example:
 
-- file transfer between nodes
-- local service registration
-- service publication through discovery
-- local forwarding into remote services such as SSH
+- `127.0.0.1:22` for SSH
+- `127.0.0.1:8080` for HTTP
+- `127.0.0.1:5432` for PostgreSQL
 
-## Intended Direction
+## Direct Services
 
-VX6 is meant to sit in front of local services and provide:
+Direct services are named as:
 
-- a stable service name
-- endpoint resolution
-- policy around which peers can connect
-- optional forwarding when direct paths are not available
+```text
+username.servicename
+```
 
-For a local SSH daemon, the current model is:
+Example:
 
-1. a node registers a service such as `ssh`
-2. the service points at a local target like `127.0.0.1:22`
-3. the daemon publishes `surya.ssh` through discovery
-4. another node resolves `surya.ssh`
-5. VX6 connects to the current endpoint and carries the TCP stream over an encrypted node-to-node session
+```text
+alice.ssh
+alice.web
+alice.pg
+```
 
-The same shape applies to HTTP, databases, and other TCP services. The major difference between current VX6 and that future state is the missing discovery and routing layer.
+Flow:
 
-## Naming Direction
+1. the service owner runs `vx6 service add`
+2. the node publishes a signed service record
+3. another node resolves `username.servicename`
+4. VX6 opens an encrypted node-to-node session
+5. the remote VX6 node forwards the TCP stream to the local target
 
-The intended naming pattern is a composition of node identity and service identity, for example:
+## Hidden Services
 
-- `surya.ssh`
-- `surya.blog`
-- `surya.files`
+Hidden services are resolved by alias only.
 
-The exact wire format and naming policy are not fixed yet, but the operational goal is simple: the user chooses a node name and service name, and VX6 resolves the current reachable endpoint behind that name.
+Example:
 
-## Why Raw IPv6 Is Still Visible Today
+```text
+hs-admin
+```
 
-Direct IPv6 connectivity is the transport base, but it is not by itself a naming or discovery system.
+Flow:
 
-To hide changing IPv6 addresses cleanly, VX6 needs:
+1. the owner publishes a hidden service descriptor
+2. the descriptor contains intro nodes, standby intro nodes, and routing profile
+3. the client looks up the alias
+4. the client and owner build relay paths to a rendezvous node
+5. the service is reached without publishing the service endpoint
 
-- a persistent node identity
-- signed endpoint records
-- a way to publish and refresh those records
-- a way for other peers to look them up
+Current hidden-service topology:
 
-VX6 now has the first distributed-bootstrap pieces: persistent identity, signed endpoint records, publish/lookup through known VX6 nodes, automatic republish on daemon start, cached registry snapshots, and encrypted file/service sessions. It still lacks policy-rich service routing and a full decentralized DHT.
+- 3 active intro nodes
+- 2 standby intro nodes
+- 2 guard nodes
+- 3 rendezvous candidates
 
-Current service traffic is encrypted and authenticated between VX6 nodes. The local target behind the remote VX6 node remains the normal local TCP service you exposed, for example `127.0.0.1:22`.
+Profiles:
+
+- `fast`: `3 + X + 3`
+- `balanced`: `5 + X + 5`
+
+## Direct By IPv6 Address
+
+VX6 also supports a simple no-network mode:
+
+```bash
+vx6 connect --service ssh --addr '[2001:db8::10]:4242' --listen 127.0.0.1:2222
+```
+
+This is useful when:
+
+- you do not want to run a bootstrap node
+- you already know the host IPv6 address
+- you want VX6 only for service forwarding
+
+## Proxy Path
+
+For direct services, VX6 can route over a 5-hop relay path:
+
+```bash
+vx6 connect --service alice.ssh --listen 127.0.0.1:2222 --proxy
+```
+
+This requires enough known relay candidates in the local registry.
+
+## Transport Notes
+
+- service traffic is end-to-end encrypted between VX6 nodes
+- hidden-service relay routing is plain multi-hop TCP, not Tor-style per-hop onion encryption
+- the eBPF/XDP tooling exists, but the working service path still uses the VX6 user-space transport

@@ -130,7 +130,7 @@ func (r *Registry) handlePublishService(conn net.Conn, rec record.ServiceRecord)
 		return writeResponse(conn, response{Error: err.Error()})
 	}
 
-	fullName := record.FullServiceName(rec.NodeName, rec.ServiceName)
+	fullName := record.ServiceLookupKey(rec)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -266,7 +266,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		fullName := record.FullServiceName(rec.NodeName, rec.ServiceName)
+		fullName := record.ServiceLookupKey(rec)
 		existing, ok := r.serviceByName[fullName]
 		if ok {
 			oldIssuedAt, _ := time.Parse(time.RFC3339, existing.IssuedAt)
@@ -309,7 +309,7 @@ func (r *Registry) load() error {
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		r.serviceByName[record.FullServiceName(rec.NodeName, rec.ServiceName)] = rec
+		r.serviceByName[record.ServiceLookupKey(rec)] = rec
 	}
 	return nil
 }

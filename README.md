@@ -1,57 +1,68 @@
 # VX6
 
-VX6 is an IPv6-first transport and service fabric for direct, host-to-host connectivity without central tunnel infrastructure.
+VX6 is an IPv6-first node, service, and relay runtime.
 
-The project is built around one executable: `vx6`. The same binary is intended to act as a node, transfer endpoint, and later a routing and proxy participant. The current stage is intentionally small: a node can listen on `tcp6`, accept file transfers, and another node can send files to it using a simple framed protocol.
+It lets you:
 
-## Current Stage
+- share files between VX6 nodes
+- publish local TCP services such as SSH, HTTP, and databases
+- connect to remote services by name instead of raw IP
+- route traffic through a 5-hop relay path when you want a proxy path
+- publish hidden services by alias without exposing the service endpoint
+- run as a background service under systemd
 
-- Single `vx6` executable for node and sender roles
-- IPv6-only file transfer over `tcp6`
-- Human-readable node names included in transfer metadata
-- Persistent Ed25519 node identity with a stable VX6 node ID
-- Signed endpoint record generation for future discovery
-- Bootstrap discovery registry for publish and resolve through known VX6 nodes
-- Automatic publish and bootstrap sync when the daemon runs with advertise and bootstrap config
-- Automatic advertise-address detection when `advertise_addr` is not configured and a global IPv6 is available
-- Encrypted authenticated transport for file transfer and service proxy sessions
-- Distributed lookup across bootstrap nodes, peers, and cached registry nodes
-- Simple CLI with no external dependencies
-- Linux-first development baseline
-- Clean repository structure for future identity, discovery, and routing work
+## Endpoint Format
 
-## Repository Layout
+VX6 uses IPv6 endpoints in this form:
 
 ```text
-VX6/
-├── cmd/vx6/              # CLI entrypoint
-├── docs/                 # Architecture and roadmap documents
-├── internal/             # Non-exported application packages
-├── .gitignore
-├── CONTRIBUTING.md
-├── LICENSE
-├── go.mod
-└── README.md
+'[2001:db8::10]:4242'
 ```
+
+Rules:
+
+- always include square brackets around the IPv6 address
+- always include the port
+- in shell commands, quote the full endpoint
+
+## Current Features
+
+- IPv6-only transport
+- persistent Ed25519 node identity
+- signed node and service records
+- bootstrap-based discovery with local cache
+- DHT-backed node and service lookup
+- encrypted file transfer
+- encrypted direct service forwarding
+- 5-hop proxy forwarding
+- hidden services with:
+  - alias-only lookup
+  - 3 active intro nodes
+  - 2 standby intro nodes
+  - 2 guard nodes
+  - 3 rendezvous candidates
+  - `fast` profile: `3 + X + 3`
+  - `balanced` profile: `5 + X + 5`
+- direct IPv6 service sharing without joining a VX6 network
+- Linux systemd service support
+- reload of a running background node with `vx6 reload`
 
 ## Quick Start
 
-Build the binary:
+Build:
 
 ```bash
-go build ./cmd/vx6
+go build -o ./vx6 ./cmd/vx6
 ```
 
-Initialize node state once on each machine:
+Initialize a node:
 
 ```bash
-./vx6 init --name receiver-lab --listen '[::]:4242' --bootstrap '[2001:db8::1]:4242' --data-dir ./data/inbox
-```
-
-Inspect the local identity:
-
-```bash
-./vx6 identity show
+./vx6 init \
+  --name alice \
+  --listen '[::]:4242' \
+  --advertise '[2001:db8::10]:4242' \
+  --bootstrap '[2001:db8::1]:4242'
 ```
 
 Start the node:
@@ -60,109 +71,141 @@ Start the node:
 ./vx6 node
 ```
 
-Add another bootstrap later if needed:
+Expose a local service:
 
 ```bash
-./vx6 bootstrap add --addr '[2001:db8::2]:4242'
+./vx6 service add --name ssh --target 127.0.0.1:22
+./vx6 reload
 ```
 
-Send a file to a name:
+Connect from another node:
 
 ```bash
-./vx6 send --file ./example.bin --to receiver-lab
+./vx6 connect --service alice.ssh --listen 127.0.0.1:2222
+ssh -p 2222 user@127.0.0.1
 ```
 
-Print a signed endpoint record for the current node:
+## Common Use Cases
+
+### 1. Direct IPv6 Service Share
+
+No bootstrap. No VX6 naming. Just one friend and one IPv6 address.
+
+On the host:
 
 ```bash
-./vx6 record print
+./vx6 init --name host --listen '[::]:4242' --advertise '[2001:db8::10]:4242'
+./vx6 service add --name ssh --target 127.0.0.1:22
+./vx6 node
 ```
 
-Administrative discovery commands still exist when you want to inspect or force a publish:
+On the client:
 
 ```bash
-./vx6 discover publish --via bootstrap --addr '[2001:db8::10]:4242'
-./vx6 discover resolve --via bootstrap --name receiver-lab --save-peer
+./vx6 connect --service ssh --addr '[2001:db8::10]:4242' --listen 127.0.0.1:2222
 ```
 
-The receive side and send side use the same binary. Transfers include a small metadata header carrying the sender node name, file name, and file size before the payload stream.
+### 2. Named Service Over a VX6 Network
 
-## Practical User Flow
+On the bootstrap:
 
-For normal use, the useful commands are:
+```bash
+./vx6 init --name bootstrap --listen '[::]:4242' --advertise '[2001:db8::1]:4242'
+./vx6 node
+```
 
-- `vx6 init`
-- `vx6 bootstrap add`
-- `vx6 node`
-- `vx6 send --to <name>`
+On a normal node:
 
-When `vx6 node` runs with a configured advertise address and bootstrap addresses, it now:
+```bash
+./vx6 init \
+  --name bob \
+  --listen '[::]:4242' \
+  --advertise '[2001:db8::20]:4242' \
+  --bootstrap '[2001:db8::1]:4242'
+./vx6 service add --name web --target 127.0.0.1:8080
+./vx6 node
+```
 
-- publishes its signed endpoint record on startup
-- republishes periodically
-- pulls a snapshot of known records from bootstrap nodes into a local registry cache
-- serves encrypted file and service sessions
+On a client:
 
-If `advertise_addr` is not configured, `vx6 node` now tries to detect a global IPv6 address automatically using local interface addresses.
+```bash
+./vx6 connect --service bob.web --listen 127.0.0.1:9000
+curl http://127.0.0.1:9000
+```
 
-When `vx6 send --to <name>` runs, VX6 now:
+### 3. Hidden Service
 
-- checks the local peer book first
-- if needed, resolves the name from configured bootstrap nodes, known peers, and cached registry nodes
-- saves the resolved address locally
-- retries with the refreshed address if a stale local address fails
+On the host:
 
-## Service Sharing Direction
+```bash
+./vx6 init \
+  --name ghost \
+  --listen '[::]:4242' \
+  --advertise '[2001:db8::30]:4242' \
+  --bootstrap '[2001:db8::1]:4242' \
+  --hidden-node
 
-The current milestone moves files, not arbitrary TCP services. The intended service model is:
+./vx6 service add \
+  --name admin \
+  --target 127.0.0.1:22 \
+  --hidden \
+  --alias hs-admin \
+  --profile fast
 
-- every machine runs one `vx6` node
-- the node owns naming, peer state, and connection policy
-- services such as SSH, HTTP, or custom TCP applications are published through the node
-- remote users connect to a VX6 service name, and the node resolves that to the current endpoint or forwarding path
+./vx6 node
+```
 
-For SSH specifically, the later shape would look more like `vx6 expose ssh --target 127.0.0.1:22 --name lab-ssh` and `vx6 connect lab-ssh`, with VX6 handling endpoint lookup and the raw IPv6 address staying out of the user flow.
+On the client:
 
-## Current Discovery Model
+```bash
+./vx6 connect --service hs-admin --listen 127.0.0.1:2222
+```
 
-Right now, VX6 has a distributed bootstrap discovery stage. Known VX6 nodes can act as registries for signed endpoint and service records, and nodes can publish or resolve through bootstraps, peers, and cached registry nodes.
+### 4. File Transfer
 
-That means:
+```bash
+./vx6 send --file ./backup.tar --to bob
+```
 
-- if you set up VX6 on several devices today, they can use one or more known bootstrap nodes to publish and resolve signed endpoint records
-- VX6 can now help with address changes because the daemon republishes and other nodes can re-resolve by name
-- nodes now keep a local cached registry snapshot from bootstrap nodes
-- nodes also replicate discovery records across cached peers over time
-- there is still no full Kademlia-style DHT, quorum, or recursive flood-search mesh yet
+## Background Operation
 
-The earlier design documents point toward a decentralized discovery layer. That is still the target. The expected path is:
+VX6 is designed to stay running in the background.
 
-1. local node identity and peer state
-2. stable naming and signed endpoint records
-3. bootstrap publish and resolve
-4. decentralized lookup and endpoint refresh
-5. service publication and forwarding
+- foreground run: `./vx6 node`
+- reload changed config or services: `./vx6 reload`
+- status: `./vx6 status`
 
-So the answer today is no: you do not yet get zero-configuration communication between two fresh devices without exchanging an address somehow. The end goal is also not a permanent central server. It is a decentralized discovery system, but that layer still needs to be built.
+For systemd setup, see [docs/systemd.md](./docs/systemd.md).
 
-## Design Principles
+## Documentation
 
-- IPv6 is a first-class constraint, not an optional fallback.
-- The codebase should stay small, inspectable, and easy to reason about.
-- Initial transport primitives should be reliable before higher-level discovery, naming, and routing layers are added.
-- Identity and discovery data should be verifiable, not just convenient.
-- Documentation should describe the system plainly and precisely.
+- [docs/SETUP.md](./docs/SETUP.md): operator setup guide
+- [docs/COMMANDS.md](./docs/COMMANDS.md): full command reference
+- [docs/systemd.md](./docs/systemd.md): background service setup
+- [docs/services.md](./docs/services.md): service and hidden-service model
+- [docs/discovery.md](./docs/discovery.md): discovery and DHT model
+- [docs/architecture.md](./docs/architecture.md): runtime architecture
+- [README_PROXY.md](./README_PROXY.md): relay and hidden-service path notes
+
+## Build and Test
+
+```bash
+make build
+make test
+```
+
+Or:
+
+```bash
+go test ./...
+```
 
 ## Status
 
-VX6 is at an early distributed-bootstrap stage. The current milestone establishes one executable, one daemon-style node runtime, one local config model, one persistent cryptographic identity, signed node and service records, encrypted file/service transport, automatic advertise detection, and distributed publish/lookup across bootstraps plus cached peers.
+VX6 is usable now for IPv6 file transfer, named service access, hidden services, direct-by-address sharing, and background node operation.
 
-## Run as a Service
+eBPF support is currently limited to the embedded XDP object and attach/detach tooling. The working relay and service transport still run in user space.
 
-For Linux service operation, see [docs/systemd.md](./docs/systemd.md) and the example unit in `deployments/systemd/vx6.service`.
+## License
 
-For a current operator walkthrough, see [docs/SETUP.md](./docs/SETUP.md).
-
-## Contributing
-
-Contribution guidelines are in [CONTRIBUTING.md](./CONTRIBUTING.md).
+[LICENSE](./LICENSE)

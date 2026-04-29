@@ -1,188 +1,246 @@
 # VX6 Setup Guide
 
-This file shows the current working setup for:
+This guide covers the common working setups:
 
-- a bootstrap node
-- normal nodes
+- bootstrap node
+- normal network node
+- direct IPv6 share without bootstrap
+- hidden service
 - file transfer
-- service exposure
-- service access
-- where bootstrap IPs are configured today
+- background reload
 
-## Bootstrap Node
+## One Rule For IPv6 Endpoints
 
-Build VX6:
+Always use this format:
+
+```text
+'[ipv6]:port'
+```
+
+Examples:
+
+- `'[2001:db8::1]:4242'`
+- `'[2406:abcd:1::10]:5000'`
+
+## 1. Bootstrap Node
+
+Build:
 
 ```bash
 go build -o ./vx6 ./cmd/vx6
 ```
 
-Initialize the bootstrap node:
+Initialize:
 
 ```bash
 ./vx6 init \
   --name bootstrap \
   --listen '[::]:4242' \
-  --data-dir ./data/inbox
+  --advertise '[2001:db8::1]:4242'
 ```
 
-Optional explicit advertise address:
-
-```bash
-./vx6 init \
-  --name bootstrap \
-  --listen '[::]:4242' \
-  --advertise '[2401:db8::10]:4242' \
-  --data-dir ./data/inbox
-```
-
-If no `--advertise` address is set, `vx6 node` tries to detect a global IPv6 address automatically when it starts.
-
-Start the daemon:
+Run:
 
 ```bash
 ./vx6 node
 ```
 
-## Normal Node
+Check:
 
-Initialize a normal node with a bootstrap:
+```bash
+./vx6 identity
+./vx6 status
+```
+
+## 2. Normal Network Node
+
+Initialize:
 
 ```bash
 ./vx6 init \
-  --name surya \
+  --name bob \
   --listen '[::]:4242' \
-  --bootstrap '[2401:db8::10]:4242' \
-  --data-dir ./data/inbox
+  --advertise '[2001:db8::20]:4242' \
+  --bootstrap '[2001:db8::1]:4242'
 ```
 
-Optional explicit advertise address:
+Add a service:
 
 ```bash
-./vx6 init \
-  --name surya \
-  --listen '[::]:4242' \
-  --advertise '[2401:db8::20]:4242' \
-  --bootstrap '[2401:db8::10]:4242' \
-  --data-dir ./data/inbox
+./vx6 service add --name ssh --target 127.0.0.1:22
 ```
 
-Add more bootstraps later:
-
-```bash
-./vx6 bootstrap add --addr '[2401:db8::11]:4242'
-./vx6 bootstrap list
-```
-
-Start the daemon:
+Start the node:
 
 ```bash
 ./vx6 node
 ```
 
-When the daemon runs, it now:
+If the node is already running, publish the new service immediately:
 
-- auto-detects a global IPv6 advertise address if one is not pinned
-- publishes its signed node record
-- publishes its signed service records
-- syncs registry snapshots from known discovery targets
-- serves encrypted file and service sessions
+```bash
+./vx6 reload
+```
 
-## File Transfer
+Useful checks:
+
+```bash
+./vx6 service
+./vx6 list --user bob
+./vx6 debug registry
+./vx6 debug dht-get --service bob.ssh
+```
+
+## 3. Client Node
+
+Initialize:
+
+```bash
+./vx6 init \
+  --name client \
+  --listen '[::]:4242' \
+  --advertise '[2001:db8::30]:4242' \
+  --bootstrap '[2001:db8::1]:4242'
+```
+
+Start:
+
+```bash
+./vx6 node
+```
+
+Connect to a published service:
+
+```bash
+./vx6 connect --service bob.ssh --listen 127.0.0.1:2222
+```
+
+Then use the local forwarded port:
+
+```bash
+ssh -p 2222 user@127.0.0.1
+```
+
+## 4. Direct IPv6 Share Without Bootstrap
+
+This is the simplest IPv6 use case.
+
+Host:
+
+```bash
+./vx6 init \
+  --name host \
+  --listen '[::]:4242' \
+  --advertise '[2001:db8::10]:4242'
+
+./vx6 service add --name ssh --target 127.0.0.1:22
+./vx6 node
+```
+
+Client:
+
+```bash
+./vx6 connect --service ssh --addr '[2001:db8::10]:4242' --listen 127.0.0.1:2222
+```
+
+No bootstrap, peer book, or VX6 name is required for this path.
+
+## 5. Hidden Service
+
+Host:
+
+```bash
+./vx6 init \
+  --name ghost \
+  --listen '[::]:4242' \
+  --advertise '[2001:db8::40]:4242' \
+  --bootstrap '[2001:db8::1]:4242' \
+  --hidden-node
+
+./vx6 service add \
+  --name admin \
+  --target 127.0.0.1:22 \
+  --hidden \
+  --alias hs-admin \
+  --profile fast \
+  --intro-mode random
+```
+
+Run:
+
+```bash
+./vx6 node
+```
+
+Client:
+
+```bash
+./vx6 connect --service hs-admin --listen 127.0.0.1:2222
+```
+
+Hidden service notes:
+
+- clients use the alias only
+- the service endpoint is not published
+- the default hidden profile is `fast`
+- `balanced` uses more relay hops
+
+## 6. File Transfer
 
 Send by node name:
 
 ```bash
-./vx6 send --file ./example.bin --to receiver-lab
+./vx6 send --file ./archive.tar --to bob
 ```
 
-VX6 now resolves through:
-
-- local peer entries
-- configured bootstrap nodes
-- cached peer/registry addresses
-
-## Expose a Local Service
-
-Expose local SSH:
+Send directly by IPv6 address:
 
 ```bash
-./vx6 service add --name ssh --target 127.0.0.1:22
-./vx6 service list
+./vx6 send --file ./archive.tar --addr '[2001:db8::20]:4242'
 ```
 
-Keep `./vx6 node` running. The service will be published as:
+## 7. Proxy Path
 
-```text
-surya.ssh
-```
-
-## Access a Remote Service
-
-Create a local forwarder:
+Use the relay path for a direct service:
 
 ```bash
-./vx6 connect --service surya.ssh --listen 127.0.0.1:2222
+./vx6 connect --service bob.ssh --listen 127.0.0.1:2222 --proxy
 ```
 
-Then use it locally:
+This needs enough known relay nodes in the local registry.
+
+## 8. Background Reload
+
+If `vx6 node` is already running and you edit config or add services:
 
 ```bash
-ssh -p 2222 localhost
+./vx6 reload
 ```
 
-The VX6 node-to-node hop is encrypted and authenticated.
+This tells the running node to refresh config and republish immediately.
 
-## Useful Commands
+## 9. Where Config Lives
 
-```bash
-./vx6 init --name <node> --listen '[::]:4242' --bootstrap '[bootstrap_ipv6]:4242'
-./vx6 identity show
-./vx6 node
-
-./vx6 bootstrap add --addr '[ipv6]:4242'
-./vx6 bootstrap list
-
-./vx6 peer add --name <peer> --addr '[ipv6]:4242'
-./vx6 peer list
-
-./vx6 send --file ./file.bin --to <peer>
-
-./vx6 service add --name ssh --target 127.0.0.1:22
-./vx6 service list
-./vx6 connect --service <node>.<service> --listen 127.0.0.1:2222
-```
-
-## Where The Bootstrap IP Is Hardcoded Today
-
-Bootstrap IPs are configured in:
+Default paths:
 
 ```text
 ~/.config/vx6/config.json
+~/.config/vx6/identity.json
+~/.config/vx6/node.pid
 ```
 
-The field is:
+## 10. Useful Commands
 
-```json
-{
-  "node": {
-    "bootstrap_addrs": [
-      "[2401:db8::10]:4242"
-    ]
-  }
-}
+```bash
+./vx6 help
+./vx6 identity
+./vx6 status
+./vx6 list
+./vx6 service
+./vx6 peer
+./vx6 bootstrap
+./vx6 debug registry
+./vx6 debug dht-get --node bob
+./vx6 debug dht-get --service bob.ssh
+./vx6 debug ebpf-status
 ```
-
-You set it in two ways:
-
-1. during init with `--bootstrap '[ipv6]:4242'`
-2. later with `vx6 bootstrap add --addr '[ipv6]:4242'`
-
-That is where the bootstrap IP is effectively hardcoded today.
-
-## Notes
-
-- In `zsh`, always quote bracketed IPv6 endpoints.
-- `--listen` is the local bind address.
-- `--advertise` is the explicit public address to publish. If omitted, VX6 tries to detect one automatically.
-- The bootstrap node does not need a bootstrap address unless you want bootstrap-to-bootstrap sync.

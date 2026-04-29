@@ -1,0 +1,37 @@
+package config
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestStoreRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load default config: %v", err)
+	}
+	cfg.Node.Name = "alpha"
+	cfg.Peers["beta"] = PeerEntry{Address: "[2001:db8::2]:4242"}
+
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if loaded.Node.Name != "alpha" {
+		t.Fatalf("unexpected node name %q", loaded.Node.Name)
+	}
+	if loaded.Peers["beta"].Address != "[2001:db8::2]:4242" {
+		t.Fatalf("unexpected peer address %q", loaded.Peers["beta"].Address)
+	}
+}

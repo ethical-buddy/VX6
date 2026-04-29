@@ -1,13 +1,18 @@
 # VX6 Vision
 
-VX6 is intended to grow from a transport tool into a broader IPv6-native connectivity layer for direct service exposure and peer-to-peer operation.
+VX6 is meant to make public IPv6 practical for real users and small networks.
 
-The project direction is guided by a few constraints:
+The core idea is simple:
 
-- direct IPv6 paths should be preferred over managed tunnel infrastructure
-- endpoint identity should eventually be separable from a changing address
-- service publication and discovery should be designed as composable layers
-- operational simplicity matters as much as protocol ambition
-- one executable should remain the operational surface for users
+- direct IPv6 when you know the endpoint already
+- named lookup when you want a reusable network
+- relay paths when you want indirection
+- hidden aliases when you do not want to publish the service endpoint
 
-The current repository does not claim that full system yet. It establishes the code, structure, and standards needed to build toward it without overstating present capabilities.
+The project tries to keep one operational surface:
+
+- one binary
+- one config file
+- one background node runtime
+
+The priority is working behavior first, not protocol theatre.

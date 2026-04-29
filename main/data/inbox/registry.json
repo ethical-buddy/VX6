@@ -1,0 +1,63 @@
+{
+  "ok": false,
+  "record": {
+    "node_id": "",
+    "node_name": "",
+    "address": "",
+    "public_key": "",
+    "issued_at": "",
+    "expires_at": "",
+    "signature": ""
+  },
+  "service_record": {
+    "node_id": "",
+    "node_name": "",
+    "service_name": "",
+    "address": "",
+    "public_key": "",
+    "issued_at": "",
+    "expires_at": "",
+    "signature": ""
+  },
+  "records": [
+    {
+      "node_id": "vx6_98d7fbf0e192c6c8",
+      "node_name": "Keshav",
+      "address": "[2401:4900:a68a:dd2b:1079:dcd6:79e7:e403]:4242",
+      "public_key": "Lo1+k3pjrLS0tYek5bNlouux8grwQGdZkI5BLLS3hEU=",
+      "issued_at": "2026-04-20T10:04:38Z",
+      "expires_at": "2026-04-20T10:24:38Z",
+      "signature": "EB8jvtCDfOYtb+AklWJe7Fc7zTvGzwZxTgVt2sKseL3HhG4u5aq9bQg7x+ay5VUYuTrN1uz5H5GzlMx0KdsDBw=="
+    },
+    {
+      "node_id": "vx6_2aa4ae9386832032",
+      "node_name": "bootstrap",
+      "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242",
+      "public_key": "wLhSJkWkohvBjPZ8R0rg/jUVM/+iLkcuLsZp49pUnwY=",
+      "issued_at": "2026-04-20T10:03:33Z",
+      "expires_at": "2026-04-20T10:23:33Z",
+      "signature": "bC9dyUm8NBvX4qs/DM8t3urE349Gv8hjETu4PYERMYx+kPBalhOjk/rvp6FrtjLZIwv+JStdRxtw0wbhTde9DQ=="
+    },
+    {
+      "node_id": "vx6_9dba4ed11f7b9c0a",
+      "node_name": "parkhi",
+      "address": "[2401:4900:8247:c59e:33bd:3f5d:daf0:9fc4]:4242",
+      "public_key": "mdrl63KT0RSKPcxjcJNRmO0UPKL7XSEmzklk7QzJCPw=",
+      "issued_at": "2026-04-20T10:04:37Z",
+      "expires_at": "2026-04-20T10:24:37Z",
+      "signature": "FXXPVdjsPTJioCNIFZ/Pj6xiPmCgLJNoPnHslUglzrFdi0gWJqa88wdG3hV3UZ+JYMnYwXpjC9r8PEag0bM5BQ=="
+    }
+  ],
+  "service_records": [
+    {
+      "node_id": "vx6_2aa4ae9386832032",
+      "node_name": "bootstrap",
+      "service_name": "weee",
+      "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242",
+      "public_key": "wLhSJkWkohvBjPZ8R0rg/jUVM/+iLkcuLsZp49pUnwY=",
+      "issued_at": "2026-04-20T10:03:33Z",
+      "expires_at": "2026-04-20T10:23:33Z",
+      "signature": "oOMgfKXJmb5iI0H6HYhHexXGm/UzuYUo0hVmN7vq8bOvvpn7L9jZPmgGvHLQsoarMv5qLZY702coavdEO7IlCg=="
+    }
+  ]
+}

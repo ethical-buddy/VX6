@@ -1,38 +1,81 @@
 # VX6 Architecture
 
-## Current Baseline
+VX6 is a single-binary system with a small set of runtime layers.
 
-The repository starts with one executable, `vx6`, and a narrow set of responsibilities:
+## Main Parts
 
-1. Run a node listener on `tcp6`.
-2. Accept inbound file transfers into a local data directory.
-3. Open outbound `tcp6` connections to other nodes.
-4. Send files using a small framed protocol with node metadata.
-5. Maintain a persistent Ed25519 identity and sign endpoint records.
-6. Publish and resolve endpoint records through a known bootstrap node.
+### 1. Identity
 
-This is intentionally narrow. VX6 should earn complexity rather than declare it.
+Each node has:
 
-## Near-Term Direction
+- a persistent Ed25519 keypair
+- a stable VX6 node ID
 
-The node and transfer primitives in this repository are expected to evolve into a larger IPv6-first system with the following layers:
+Default storage:
 
-- stable node naming
-- endpoint handling
-- node identity
-- signed endpoint records
-- bootstrap discovery
-- service publication
-- discovery
-- forwarding and routing
+- `~/.config/vx6/identity.json`
 
-Each layer should remain independently testable. Direct connectivity is the default path; any relay or proxy behavior should be an explicit extension, not an implicit fallback.
+### 2. Node Runtime
 
-## Implementation Rules
+`vx6 node` runs the IPv6 listener and handles:
 
-- Keep IPv6-only behavior explicit in code and documentation.
-- Prefer streaming interfaces over whole-file buffering.
-- Keep package boundaries small and responsibility-driven.
-- Add protocol surface gradually and document it as it appears.
-- Keep the single-binary operational model intact as features are added.
-- Treat node identity and endpoint claims as signed data, not trusted local strings.
+- file transfer
+- discovery requests
+- DHT requests
+- direct service connections
+- relay path extension
+- hidden-service rendezvous control
+
+### 3. Discovery
+
+The local registry stores:
+
+- known node records
+- known service records
+
+Bootstrap nodes and known peers exchange snapshots and signed updates.
+
+### 4. DHT
+
+The DHT stores lookup keys for:
+
+- nodes by name
+- nodes by ID
+- direct services
+- hidden service aliases
+
+### 5. Service Proxy
+
+Direct services work like this:
+
+1. client resolves a service record
+2. client opens a VX6 session to the remote node
+3. remote node forwards the stream to the local TCP target
+
+### 6. Hidden Services
+
+Hidden services add:
+
+- intro nodes
+- guard nodes
+- rendezvous selection
+- relay planning
+
+The working transport is plain multi-hop TCP plus the VX6 secure session. It is not Tor-style layered onion encryption.
+
+### 7. Background Operation
+
+VX6 can run under systemd and reload changed config with:
+
+```bash
+vx6 reload
+```
+
+Reload is meant for:
+
+- new services
+- changed bootstrap list
+- changed advertise address
+- changed hidden-service settings
+
+Changing the listen address still requires a restart.

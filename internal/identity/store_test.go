@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -30,5 +31,44 @@ func TestStoreEnsureRoundTrip(t *testing.T) {
 	}
 	if first.NodeID != second.NodeID {
 		t.Fatalf("unexpected node id mismatch %q != %q", first.NodeID, second.NodeID)
+	}
+}
+
+func TestNewStoreForConfigUsesDistinctIdentityFilesForCustomConfigs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	firstStore, err := NewStoreForConfig(filepath.Join(dir, "bootstrap.json"))
+	if err != nil {
+		t.Fatalf("new first store: %v", err)
+	}
+	secondStore, err := NewStoreForConfig(filepath.Join(dir, "client.json"))
+	if err != nil {
+		t.Fatalf("new second store: %v", err)
+	}
+
+	if firstStore.Path() == secondStore.Path() {
+		t.Fatalf("expected distinct identity paths, got %s", firstStore.Path())
+	}
+
+	first, _, err := firstStore.Ensure()
+	if err != nil {
+		t.Fatalf("ensure first identity: %v", err)
+	}
+	second, _, err := secondStore.Ensure()
+	if err != nil {
+		t.Fatalf("ensure second identity: %v", err)
+	}
+
+	if first.NodeID == second.NodeID {
+		t.Fatalf("expected distinct node ids, both were %s", first.NodeID)
+	}
+
+	if _, err := os.Stat(firstStore.Path()); err != nil {
+		t.Fatalf("stat first identity path: %v", err)
+	}
+	if _, err := os.Stat(secondStore.Path()); err != nil {
+		t.Fatalf("stat second identity path: %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Identity struct {
@@ -46,7 +47,18 @@ func NewStoreForConfig(configPath string) (*Store, error) {
 		return NewStore("")
 	}
 
-	return &Store{path: filepath.Join(filepath.Dir(configPath), "identity.json")}, nil
+	dir := filepath.Dir(configPath)
+	base := filepath.Base(configPath)
+	if base == "" || base == "." || base == "config.json" {
+		return &Store{path: filepath.Join(dir, "identity.json")}, nil
+	}
+
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	if name == "" {
+		name = "identity"
+	}
+	return &Store{path: filepath.Join(dir, name+".identity.json")}, nil
 }
 
 func DefaultPath() (string, error) {

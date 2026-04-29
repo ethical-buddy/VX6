@@ -1,40 +1,28 @@
 # VX6 Roadmap
 
-## Phase 0
+## Done
 
-- establish repository structure
-- provide a single working Go executable
-- implement node listen mode over `tcp6`
-- implement IPv6 file streaming over a defined VX6 wire format
-- define documentation and contribution standards
+- single `vx6` binary
+- persistent node identity
+- signed node and service records
+- bootstrap discovery with local cache
+- DHT-backed lookup
+- direct service forwarding
+- 5-hop proxy path
+- hidden service aliases
+- systemd background operation
+- reload of a running node
 
-## Phase 1
+## Next
 
-- harden transfer metadata framing
-- add checksums and transfer diagnostics
-- add tests for IPv6 parsing and stream handling
-- add graceful shutdown and node-level logging controls
+- stronger relay role policy and relay weighting
+- better persistence for DHT state
+- resumable multi-chunk transfer diagnostics
+- kernel-assisted relay acceleration where it is safe to add
+- better observability for relay and hidden-service paths
 
-## Phase 2
+## Later
 
-- introduce stable local node configuration
-- define human-readable naming beyond raw IPv6 endpoints
-- introduce node identity
-- generate signed endpoint records
-- formalize peer connection handling
-
-## Phase 3
-
-- add endpoint record exchange between peers
-- define bootstrap peer flow
-- add service advertisement primitives
-- define discovery records
-- document bootstrap and lookup strategy
-
-## Phase 4
-
-- build decentralized endpoint lookup
-- add endpoint refresh and re-sign flows
-- evaluate forwarding, proxying, and policy controls
-- add observability for routing and transfer paths
-- prepare for multi-node integration testing
+- seamless stream migration after relay failure
+- stronger hidden-service privacy
+- broader anti-poisoning and replication policy in DHT storage

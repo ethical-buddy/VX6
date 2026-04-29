@@ -1,0 +1,15 @@
+[Unit]
+Description=VX6 node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/VX6
+ExecStart=/home/%i/VX6/vx6 node
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
