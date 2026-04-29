@@ -131,11 +131,26 @@ func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
 		return err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
 	req := proto.DHTRequest{Action: "store", Target: key, Data: value}
-	_ = proto.WriteHeader(conn, proto.KindDHT)
+	if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
+		return err
+	}
 	payload, _ := json.Marshal(req)
-	return proto.WriteLengthPrefixed(conn, payload)
+	if err := proto.WriteLengthPrefixed(conn, payload); err != nil {
+		return err
+	}
+
+	kind, err := proto.ReadHeader(conn)
+	if err != nil {
+		return err
+	}
+	if kind != proto.KindDHT {
+		return fmt.Errorf("invalid response")
+	}
+	_, err = proto.ReadLengthPrefixed(conn, 1024*1024)
+	return err
 }
 
 // RecursiveFindValue searches for a value in the network

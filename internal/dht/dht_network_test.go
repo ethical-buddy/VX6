@@ -36,6 +36,37 @@ func TestRecursiveFindValueAcrossPeers(t *testing.T) {
 	}
 }
 
+func TestStoreReplicatesAcrossPeer(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	alice := NewServer("alice-node")
+	bob := NewServer("bob-node")
+
+	bobAddr := startDHTListener(t, ctx, bob)
+	alice.RT.AddNode(proto.NodeInfo{ID: "bob-node", Addr: bobAddr})
+
+	if err := alice.Store(ctx, "service/bob.chat", `{"service":"chat"}`); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		bob.mu.RLock()
+		got := bob.Values["service/bob.chat"]
+		bob.mu.RUnlock()
+		if got == `{"service":"chat"}` {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replicated value not found, got %q", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func startDHTListener(t *testing.T, ctx context.Context, srv *Server) string {
 	t.Helper()
 
