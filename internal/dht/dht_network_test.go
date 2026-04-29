@@ -107,6 +107,156 @@ func TestStoreReplicatesAcrossBoundedPeers(t *testing.T) {
 	}
 }
 
+func TestMaintainReplicasRepairsShortfallUsingBackupNodes(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
+	}
+	owner := NewServerWithIdentity(ownerID)
+	key := ServiceKey("owner.echo")
+
+	planned := NewRoutingTable(ownerID.NodeID)
+	plannedNodes := make([]proto.NodeInfo, 0, 8)
+	for i := 0; i < 8; i++ {
+		plannedNodes = append(plannedNodes, proto.NodeInfo{
+			ID:   fmt.Sprintf("replica-node-%02d", i),
+			Addr: fmt.Sprintf("[::1]:%d", 40000+i),
+		})
+		planned.AddNode(plannedNodes[len(plannedNodes)-1])
+	}
+	candidates := selectReplicationNodes(planned.ClosestNodes(key, K), K)
+	deadIDs := map[string]struct{}{}
+	for _, node := range candidates[:2] {
+		deadIDs[node.ID] = struct{}{}
+	}
+
+	type target struct {
+		id     string
+		server *Server
+		addr   string
+	}
+	targets := make([]target, 0, len(plannedNodes))
+	liveTargets := map[string]*Server{}
+	for _, node := range plannedNodes {
+		addr := reserveClosedTCP6Addr(t)
+		var srv *Server
+		if _, dead := deadIDs[node.ID]; !dead {
+			srv = NewServer(node.ID)
+			addr = startDHTListener(t, ctx, srv)
+			liveTargets[node.ID] = srv
+		}
+		targets = append(targets, target{id: node.ID, server: srv, addr: addr})
+		owner.RT.AddNode(proto.NodeInfo{ID: node.ID, Addr: addr})
+	}
+
+	rec := mustServiceRecordForIdentity(t, ownerID, "owner", "echo", "[2001:db8::30]:4242", false, "", time.Now())
+	report, err := owner.MaintainReplicas(ctx, key, mustJSON(t, rec))
+	if err != nil {
+		t.Fatalf("maintain replicas: %v", err)
+	}
+	if report.StoredRemotely != replicationFactor {
+		t.Fatalf("expected repaired remote replica count %d, got %+v", replicationFactor, report)
+	}
+	if report.Attempted <= replicationFactor || len(report.Failed) < 2 {
+		t.Fatalf("expected fallback attempts after dead replicas, got %+v", report)
+	}
+
+	replicated := 0
+	for _, srv := range liveTargets {
+		srv.mu.RLock()
+		got := srv.Values[key]
+		srv.mu.RUnlock()
+		if got != "" {
+			replicated++
+		}
+	}
+	if replicated != replicationFactor {
+		t.Fatalf("expected repaired value on %d live replicas, got %d", replicationFactor, replicated)
+	}
+}
+
+func TestMaintainReplicasSeedsNewPreferredHoldersAfterRoutingChange(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
+	}
+	owner := NewServerWithIdentity(ownerID)
+	key := ServiceKey("owner.api")
+
+	type target struct {
+		id     string
+		server *Server
+		addr   string
+	}
+	targets := map[string]target{}
+	baseNodes := make([]proto.NodeInfo, 0, 8)
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("base-node-%02d", i)
+		srv := NewServer(id)
+		addr := startDHTListener(t, ctx, srv)
+		node := proto.NodeInfo{ID: id, Addr: addr}
+		baseNodes = append(baseNodes, node)
+		targets[id] = target{id: id, server: srv, addr: addr}
+		owner.RT.AddNode(node)
+	}
+
+	rec := mustServiceRecordForIdentity(t, ownerID, "owner", "api", "[2001:db8::41]:4242", false, "", time.Now())
+	if _, err := owner.MaintainReplicas(ctx, key, mustJSON(t, rec)); err != nil {
+		t.Fatalf("seed initial replicas: %v", err)
+	}
+
+	selectedBefore := selectedNodeIDs(selectReplicationNodes(owner.RT.ClosestNodes(key, K), replicationFactor))
+	newNodes := findNewPreferredNodes(t, ownerID.NodeID, key, baseNodes, 2)
+	if len(newNodes) != 2 {
+		t.Fatalf("expected to find 2 new preferred nodes, got %d", len(newNodes))
+	}
+	for _, node := range newNodes {
+		srv := NewServer(node.ID)
+		addr := startDHTListener(t, ctx, srv)
+		node.Addr = addr
+		targets[node.ID] = target{id: node.ID, server: srv, addr: addr}
+		owner.RT.AddNode(node)
+	}
+
+	report, err := owner.MaintainReplicas(ctx, key, mustJSON(t, rec))
+	if err != nil {
+		t.Fatalf("repair replicas after routing change: %v", err)
+	}
+	if report.StoredRemotely != replicationFactor {
+		t.Fatalf("expected full replication after routing change, got %+v", report)
+	}
+
+	selectedAfterNodes := selectReplicationNodes(owner.RT.ClosestNodes(key, K), replicationFactor)
+	selectedAfter := selectedNodeIDs(selectedAfterNodes)
+	if sameStringSet(selectedBefore, selectedAfter) {
+		t.Fatalf("expected preferred replica set to change after adding better nodes: before=%v after=%v", selectedBefore, selectedAfter)
+	}
+	for _, node := range newNodes {
+		if _, ok := selectedAfter[node.ID]; !ok {
+			t.Fatalf("expected new node %s to join preferred replica set: %v", node.ID, selectedAfter)
+		}
+	}
+	for _, node := range selectedAfterNodes {
+		srv := targets[node.ID].server
+		srv.mu.RLock()
+		got := srv.Values[key]
+		srv.mu.RUnlock()
+		if got == "" {
+			t.Fatalf("expected preferred holder %s to receive refreshed replica", node.ID)
+		}
+	}
+}
+
 func TestRecursiveFindValueFiltersPoisonedValueAndUsesConfirmedRecord(t *testing.T) {
 	t.Parallel()
 
@@ -438,6 +588,62 @@ func startDHTListener(t *testing.T, ctx context.Context, srv *Server) string {
 	}()
 
 	return ln.Addr().String()
+}
+
+func reserveClosedTCP6Addr(t *testing.T) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Fatalf("reserve closed dht addr: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
+
+func selectedNodeIDs(nodes []proto.NodeInfo) map[string]struct{} {
+	out := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		out[node.ID] = struct{}{}
+	}
+	return out
+}
+
+func sameStringSet(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key := range left {
+		if _, ok := right[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func findNewPreferredNodes(t *testing.T, selfID, key string, existing []proto.NodeInfo, want int) []proto.NodeInfo {
+	t.Helper()
+
+	found := make([]proto.NodeInfo, 0, want)
+	candidates := append([]proto.NodeInfo(nil), existing...)
+	for i := 0; len(found) < want && i < 10000; i++ {
+		node := proto.NodeInfo{
+			ID:   fmt.Sprintf("preferred-node-%04d", i),
+			Addr: fmt.Sprintf("[::1]:%d", 45000+i),
+		}
+		rt := NewRoutingTable(selfID)
+		for _, existingNode := range candidates {
+			rt.AddNode(existingNode)
+		}
+		rt.AddNode(node)
+		selected := selectedNodeIDs(selectReplicationNodes(rt.ClosestNodes(key, K), replicationFactor))
+		if _, ok := selected[node.ID]; ok {
+			found = append(found, node)
+			candidates = append(candidates, node)
+		}
+	}
+	return found
 }
 
 func mustEndpointRecord(t *testing.T, nodeName, address string, now time.Time) record.EndpointRecord {

@@ -46,6 +46,16 @@ type StoredValueState struct {
 	Conflicts []StoredVersion
 }
 
+type ReplicationReport struct {
+	Key            string
+	Desired        int
+	Attempted      int
+	StoredRemotely int
+	LocalStored    bool
+	Successful     []proto.NodeInfo
+	Failed         []proto.NodeInfo
+}
+
 func NodeNameKey(name string) string {
 	return "node/name/" + name
 }
@@ -211,18 +221,68 @@ func (s *Server) RecursiveFindNode(ctx context.Context, targetID string) ([]prot
 
 // Store saves a value on a bounded set of the closest nodes to the target key.
 func (s *Server) Store(ctx context.Context, targetID, value string) error {
+	_, err := s.MaintainReplicas(ctx, targetID, value)
+	return err
+}
+
+// MaintainReplicas stores a validated value locally and then repairs the remote
+// replica set by walking bounded backup candidates until the desired replica
+// count is reached or no more candidates remain.
+func (s *Server) MaintainReplicas(ctx context.Context, targetID, value string) (ReplicationReport, error) {
+	report := ReplicationReport{Key: targetID}
+
 	wrapped, err := s.prepareStoreValue(targetID, value, time.Now())
 	if err != nil {
-		return err
+		return report, err
 	}
 	if _, _, err := s.storeValidated(targetID, wrapped, time.Now()); err != nil {
-		return err
+		return report, err
 	}
-	nodes := selectReplicationNodes(s.RT.ClosestNodes(targetID, K), replicationFactor)
-	for _, n := range nodes {
-		_ = s.sendStore(ctx, n.Addr, targetID, wrapped)
+	report.LocalStored = true
+
+	candidates := selectReplicationNodes(s.RT.ClosestNodes(targetID, K), K)
+	if len(candidates) < replicationFactor {
+		report.Desired = len(candidates)
+	} else {
+		report.Desired = replicationFactor
 	}
-	return nil
+
+	for offset := 0; offset < len(candidates) && report.StoredRemotely < report.Desired; {
+		remaining := report.Desired - report.StoredRemotely
+		end := offset + remaining
+		if end > len(candidates) {
+			end = len(candidates)
+		}
+		batch := candidates[offset:end]
+		offset = end
+
+		type batchResult struct {
+			node proto.NodeInfo
+			err  error
+		}
+		results := make(chan batchResult, len(batch))
+		for _, node := range batch {
+			node := node
+			go func() {
+				results <- batchResult{node: node, err: s.sendStore(ctx, node.Addr, targetID, wrapped)}
+			}()
+		}
+
+		for range batch {
+			result := <-results
+			report.Attempted++
+			if result.err != nil {
+				s.RT.NoteFailure(result.node.ID)
+				report.Failed = append(report.Failed, result.node)
+				continue
+			}
+			s.RT.AddNode(result.node)
+			report.StoredRemotely++
+			report.Successful = append(report.Successful, result.node)
+		}
+	}
+
+	return report, nil
 }
 
 func (s *Server) prepareStoreValue(key, value string, now time.Time) (string, error) {
