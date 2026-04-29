@@ -45,6 +45,7 @@ type Config struct {
 	AdvertiseAddr   string
 	HideEndpoint    bool
 	DataDir         string
+	ReceiveDir      string
 	ConfigPath      string
 	RefreshServices ServiceRefresher
 	BootstrapAddrs  []string
@@ -67,28 +68,24 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Registry == nil {
 		return errors.New("registry cannot be nil")
 	}
+	cfg = refreshAdvertiseAddress(log, cfg)
 	if err := transfer.ValidateIPv6Address(cfg.ListenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data directory: %w", err)
 	}
+	if cfg.ReceiveDir == "" {
+		cfg.ReceiveDir = defaultReceiveDir(cfg.DataDir)
+	}
+	if err := os.MkdirAll(cfg.ReceiveDir, 0o755); err != nil {
+		return fmt.Errorf("create receive directory: %w", err)
+	}
 	if len(cfg.Services) == 0 && cfg.RefreshServices != nil {
 		cfg.Services = cfg.RefreshServices()
 	}
 	if cfg.Services == nil {
 		cfg.Services = map[string]string{}
-	}
-
-	if cfg.AdvertiseAddr == "" {
-		_, port, err := net.SplitHostPort(cfg.ListenAddr)
-		if err == nil {
-			addr, detectErr := netutil.DetectAdvertiseAddress(port)
-			if detectErr == nil {
-				cfg.AdvertiseAddr = addr
-				fmt.Fprintf(log, "auto-detected advertise address %s\n", cfg.AdvertiseAddr)
-			}
-		}
 	}
 
 	listener, err := net.Listen("tcp6", cfg.ListenAddr)
@@ -149,7 +146,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 					fmt.Fprintf(log, "secure receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
 				}
-				res, err := transfer.ReceiveFile(secureConn, cfg.DataDir)
+				res, err := transfer.ReceiveFile(secureConn, cfg.ReceiveDir)
 				if err != nil {
 					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
 					return
@@ -459,6 +456,9 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec record.Endpoin
 		addSyncTarget(targets, cfg.AdvertiseAddr, addr)
 	}
 	for _, nodeRec := range initialNodes {
+		if nodeRec.NodeID == cfg.NodeID {
+			continue
+		}
 		addSyncTarget(targets, cfg.AdvertiseAddr, nodeRec.Address)
 	}
 
@@ -479,12 +479,18 @@ func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec record.Endpoin
 			_ = cfg.Registry.Import(result.records, result.services)
 			seedDHTRouting(cfg.DHT, nil, result.records)
 			for _, nodeRec := range result.records {
+				if nodeRec.NodeID == cfg.NodeID {
+					continue
+				}
 				addSyncTarget(targets, cfg.AdvertiseAddr, nodeRec.Address)
 			}
 		}
 
 		nodes, _ := cfg.Registry.Snapshot()
 		for _, nodeRec := range nodes {
+			if nodeRec.NodeID == cfg.NodeID {
+				continue
+			}
 			addSyncTarget(targets, cfg.AdvertiseAddr, nodeRec.Address)
 		}
 	}
@@ -655,6 +661,9 @@ func runtimeConfig(base Config) Config {
 		if len(live.Services) == 0 && base.RefreshServices != nil {
 			live.Services = base.RefreshServices()
 		}
+		if updated, _, err := netutil.RefreshAdvertiseAddress(live.AdvertiseAddr, live.ListenAddr); err == nil {
+			live.AdvertiseAddr = updated
+		}
 		return live
 	}
 
@@ -679,6 +688,10 @@ func runtimeConfig(base Config) Config {
 	if len(live.Services) == 0 && base.RefreshServices != nil {
 		live.Services = base.RefreshServices()
 	}
+	live.ReceiveDir = cfgFile.Node.DownloadDir
+	if updated, _, err := netutil.RefreshAdvertiseAddress(live.AdvertiseAddr, live.ListenAddr); err == nil {
+		live.AdvertiseAddr = updated
+	}
 	return live
 }
 
@@ -692,4 +705,30 @@ func serviceTargets(entries map[string]config.ServiceEntry) map[string]string {
 		out[name] = entry.Target
 	}
 	return out
+}
+
+func refreshAdvertiseAddress(log io.Writer, cfg Config) Config {
+	updated, changed, err := netutil.RefreshAdvertiseAddress(cfg.AdvertiseAddr, cfg.ListenAddr)
+	if err != nil || updated == "" {
+		return cfg
+	}
+	if changed {
+		if cfg.AdvertiseAddr == "" {
+			fmt.Fprintf(log, "auto-detected advertise address %s\n", updated)
+		} else {
+			fmt.Fprintf(log, "advertise address updated from %s to %s\n", cfg.AdvertiseAddr, updated)
+		}
+	}
+	cfg.AdvertiseAddr = updated
+	return cfg
+}
+
+func defaultReceiveDir(dataDir string) string {
+	if path, err := config.DefaultDownloadDir(); err == nil {
+		return path
+	}
+	if dataDir != "" {
+		return dataDir
+	}
+	return filepath.Join(".", "Downloads")
 }

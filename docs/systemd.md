@@ -99,6 +99,8 @@ Default paths:
 ~/.config/vx6/config.json
 ~/.config/vx6/identity.json
 ~/.config/vx6/node.pid
+~/.local/share/vx6
+~/Downloads
 ```
 
 ## Notes

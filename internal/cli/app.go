@@ -87,7 +87,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--bootstrap [ipv6]:port] [--hidden-node]")
+	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
@@ -134,6 +134,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Storage:")
 	fmt.Fprintln(w, "  - Config: ~/.config/vx6/config.json")
 	fmt.Fprintln(w, "  - Identity: ~/.config/vx6/identity.json")
+	fmt.Fprintln(w, "  - Runtime state: ~/.local/share/vx6")
+	fmt.Fprintln(w, "  - Received files: ~/Downloads")
 }
 
 func prompt(label string) string {
@@ -153,7 +155,8 @@ func runInit(args []string) error {
 	listenAddr := fs.String("listen", "[::]:4242", "default IPv6 listen address in [addr]:port form")
 	advertiseAddr := fs.String("advertise", "", "public IPv6 address in [addr]:port form for discovery records")
 	hiddenNode := fs.Bool("hidden-node", false, "do not publish the node endpoint record; publish services only")
-	dataDir := fs.String("data-dir", "./data/inbox", "default directory for received files")
+	dataDir := fs.String("data-dir", defaultDataDirValue(), "directory for VX6 runtime state")
+	downloadDir := fs.String("downloads-dir", defaultDownloadDirValue(), "directory for received files")
 	var bootstraps stringListFlag
 	fs.Var(&bootstraps, "bootstrap", "bootstrap IPv6 address in [addr]:port form; repeatable")
 
@@ -196,6 +199,7 @@ func runInit(args []string) error {
 	cfg.Node.AdvertiseAddr = *advertiseAddr
 	cfg.Node.HideEndpoint = *hiddenNode
 	cfg.Node.DataDir = *dataDir
+	cfg.Node.DownloadDir = *downloadDir
 	if len(bootstraps) > 0 {
 		cfg.Node.BootstrapAddrs = append([]string(nil), bootstraps...)
 	}
@@ -282,7 +286,8 @@ func runNode(ctx context.Context, args []string) error {
 
 	nodeName := fs.String("name", "", "local human-readable node name")
 	listenAddr := fs.String("listen", "", "IPv6 listen address in [addr]:port form")
-	dataDir := fs.String("data-dir", "", "directory for received files")
+	dataDir := fs.String("data-dir", "", "directory for VX6 runtime state")
+	downloadDir := fs.String("downloads-dir", "", "directory for received files")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -311,6 +316,9 @@ func runNode(ctx context.Context, args []string) error {
 	}
 	if *dataDir == "" {
 		*dataDir = cfgFile.Node.DataDir
+	}
+	if *downloadDir == "" {
+		*downloadDir = cfgFile.Node.DownloadDir
 	}
 	pidPath, err := config.RuntimePIDPath(store.Path())
 	if err != nil {
@@ -352,7 +360,7 @@ func runNode(ctx context.Context, args []string) error {
 		Name: *nodeName, NodeID: id.NodeID, ListenAddr: *listenAddr,
 		AdvertiseAddr: cfgFile.Node.AdvertiseAddr,
 		HideEndpoint:  cfgFile.Node.HideEndpoint,
-		DataDir:       *dataDir, ConfigPath: store.Path(), Identity: id,
+		DataDir:       *dataDir, ReceiveDir: *downloadDir, ConfigPath: store.Path(), Identity: id,
 		DHT: dht.NewServer(id.NodeID), BootstrapAddrs: cfgFile.Node.BootstrapAddrs,
 		Services: services,
 		Registry: registry,
@@ -468,7 +476,11 @@ func runConnect(ctx context.Context, args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			return hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{SelfAddr: cfg.Node.AdvertiseAddr})
+			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{SelfAddr: cfg.Node.AdvertiseAddr})
+			if err != nil {
+				return nil, friendlyRelayPathError(err, "hidden-service mode")
+			}
+			return conn, nil
 		}
 		if *proxy {
 			fmt.Printf("[CIRCUIT] Building 5-hop circuit to %s\n", finalSvc)
@@ -477,7 +489,11 @@ func runConnect(ctx context.Context, args []string) error {
 				return nil, err
 			}
 			peers, _ := reg.Snapshot()
-			return onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
+			conn, err := onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
+			if err != nil {
+				return nil, friendlyRelayPathError(err, "proxy mode")
+			}
+			return conn, nil
 		}
 		var d net.Dialer
 		return d.DialContext(rctx, "tcp6", serviceRec.Address)
@@ -712,7 +728,11 @@ func runSend(ctx context.Context, args []string) error {
 				return nil, err
 			}
 			peers, _ := reg.Snapshot()
-			return onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers)
+			conn, err := onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers)
+			if err != nil {
+				return nil, friendlyRelayPathError(err, "proxy mode")
+			}
+			return conn, nil
 		}
 		var d net.Dialer
 		return d.DialContext(rctx, "tcp6", addr)
@@ -1016,9 +1036,43 @@ func runDebugEBPFDetach(ctx context.Context, args []string) error {
 
 func loadLocalRegistry(dataDir string) (*discovery.Registry, error) {
 	if dataDir == "" {
-		dataDir = "./data/inbox"
+		dataDir = defaultDataDirValue()
 	}
 	return discovery.NewRegistry(filepath.Join(dataDir, "registry.json"))
+}
+
+func defaultDataDirValue() string {
+	path, err := config.DefaultDataDir()
+	if err != nil {
+		return filepath.Join(".", "vx6-data")
+	}
+	return path
+}
+
+func defaultDownloadDirValue() string {
+	path, err := config.DefaultDownloadDir()
+	if err != nil {
+		return filepath.Join(".", "Downloads")
+	}
+	return path
+}
+
+func friendlyRelayPathError(err error, feature string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not enough peers in registry to build a"):
+		return fmt.Errorf("%s requires more reachable VX6 nodes. your local registry does not have enough peers to build the relay path; keep the node running so it can sync more peers, then try again", feature)
+	case strings.Contains(msg, "hidden service has no reachable introduction points"),
+		strings.Contains(msg, "no rendezvous candidates available"),
+		strings.Contains(msg, "failed to establish hidden-service circuit"),
+		strings.Contains(msg, "no reachable guard or owner for hidden service"):
+		return fmt.Errorf("%s requires more reachable VX6 nodes. your local registry does not currently have enough live intro, guard, or rendezvous peers; keep the node running so it can sync more peers, then try again", feature)
+	default:
+		return err
+	}
 }
 
 func resolvePeerForSend(ctx context.Context, store *config.Store, cfg config.File, name string) (string, error) {

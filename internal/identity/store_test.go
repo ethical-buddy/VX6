@@ -72,3 +72,15 @@ func TestNewStoreForConfigUsesDistinctIdentityFilesForCustomConfigs(t *testing.T
 		t.Fatalf("stat second identity path: %v", err)
 	}
 }
+
+func TestDefaultPathUsesHomeConfigDirectory(t *testing.T) {
+	t.Setenv("HOME", "/tmp/vx6-home")
+
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatalf("default path: %v", err)
+	}
+	if path != "/tmp/vx6-home/.config/vx6/identity.json" {
+		t.Fatalf("unexpected default identity path %q", path)
+	}
+}

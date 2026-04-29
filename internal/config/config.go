@@ -23,6 +23,7 @@ type NodeConfig struct {
 	AdvertiseAddr  string   `json:"advertise_addr"`
 	HideEndpoint   bool     `json:"hide_endpoint"`
 	DataDir        string   `json:"data_dir"`
+	DownloadDir    string   `json:"download_dir"`
 	BootstrapAddrs []string `json:"bootstrap_addrs"`
 }
 
@@ -59,12 +60,28 @@ func DefaultPath() (string, error) {
 	if p := os.Getenv("VX6_CONFIG_PATH"); p != "" {
 		return p, nil
 	}
-	base, err := os.UserConfigDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve user config directory: %w", err)
+		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 
-	return filepath.Join(base, "vx6", "config.json"), nil
+	return filepath.Join(home, ".config", "vx6", "config.json"), nil
+}
+
+func DefaultDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".local", "share", "vx6"), nil
+}
+
+func DefaultDownloadDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, "Downloads"), nil
 }
 
 func RuntimePIDPath(configPath string) (string, error) {
@@ -238,8 +255,9 @@ func (s *Store) ListServices() ([]string, map[string]ServiceEntry, error) {
 func defaultFile() File {
 	return File{
 		Node: NodeConfig{
-			ListenAddr: defaultListenAddress,
-			DataDir:    "./data/inbox",
+			ListenAddr:  defaultListenAddress,
+			DataDir:     defaultDataDirValue(),
+			DownloadDir: defaultDownloadDirValue(),
 		},
 		Peers:    map[string]PeerEntry{},
 		Services: map[string]ServiceEntry{},
@@ -250,8 +268,11 @@ func normalize(cfg *File) {
 	if cfg.Node.ListenAddr == "" {
 		cfg.Node.ListenAddr = defaultListenAddress
 	}
-	if cfg.Node.DataDir == "" {
-		cfg.Node.DataDir = "./data/inbox"
+	if cfg.Node.DataDir == "" || cfg.Node.DataDir == "./data/inbox" {
+		cfg.Node.DataDir = defaultDataDirValue()
+	}
+	if cfg.Node.DownloadDir == "" {
+		cfg.Node.DownloadDir = defaultDownloadDirValue()
 	}
 	if cfg.Node.BootstrapAddrs == nil {
 		cfg.Node.BootstrapAddrs = []string{}
@@ -280,4 +301,20 @@ func normalize(cfg *File) {
 		}
 		cfg.Services[name] = svc
 	}
+}
+
+func defaultDataDirValue() string {
+	path, err := DefaultDataDir()
+	if err != nil {
+		return filepath.Join(".", "vx6-data")
+	}
+	return path
+}
+
+func defaultDownloadDirValue() string {
+	path, err := DefaultDownloadDir()
+	if err != nil {
+		return filepath.Join(".", "Downloads")
+	}
+	return path
 }

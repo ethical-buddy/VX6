@@ -167,6 +167,52 @@ func TestRegistryPublishResolveService(t *testing.T) {
 	}
 }
 
+func TestRegistryImportReplacesOlderEndpointAddress(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	reg, err := NewRegistry("")
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	now := time.Now()
+	oldRec, err := record.NewEndpointRecord(id, "alpha", "[2001:db8::1]:4242", 10*time.Minute, now)
+	if err != nil {
+		t.Fatalf("new old endpoint record: %v", err)
+	}
+	newRec, err := record.NewEndpointRecord(id, "alpha", "[2001:db8::2]:4242", 10*time.Minute, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("new updated endpoint record: %v", err)
+	}
+
+	if err := reg.Import([]record.EndpointRecord{oldRec}, nil); err != nil {
+		t.Fatalf("import old record: %v", err)
+	}
+	if err := reg.Import([]record.EndpointRecord{newRec}, nil); err != nil {
+		t.Fatalf("import new record: %v", err)
+	}
+
+	got, err := reg.ResolveLocal("alpha", "")
+	if err != nil {
+		t.Fatalf("resolve local: %v", err)
+	}
+	if got.Address != "[2001:db8::2]:4242" {
+		t.Fatalf("unexpected resolved address %q", got.Address)
+	}
+
+	nodes, _ := reg.Snapshot()
+	if len(nodes) != 1 {
+		t.Fatalf("unexpected node count %d", len(nodes))
+	}
+	if nodes[0].Address != "[2001:db8::2]:4242" {
+		t.Fatalf("unexpected snapshot address %q", nodes[0].Address)
+	}
+}
+
 func roundTripWithConn(conn net.Conn, req request) (response, error) {
 	defer conn.Close()
 

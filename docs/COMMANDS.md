@@ -16,7 +16,7 @@ Examples:
 ### Initialize a Node
 
 ```bash
-vx6 init --name NAME [--listen '[::]:4242'] [--advertise '[ipv6]:port'] [--bootstrap '[ipv6]:port'] [--hidden-node]
+vx6 init --name NAME [--listen '[::]:4242'] [--advertise '[ipv6]:port'] [--bootstrap '[ipv6]:port'] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]
 ```
 
 Example:
@@ -24,6 +24,13 @@ Example:
 ```bash
 vx6 init --name alice --listen '[::]:4242' --advertise '[2001:db8::10]:4242' --bootstrap '[2001:db8::1]:4242'
 ```
+
+Default Linux paths:
+
+- config: `~/.config/vx6/config.json`
+- identity: `~/.config/vx6/identity.json`
+- runtime state: `~/.local/share/vx6`
+- received files: `~/Downloads`
 
 ### Start the Node
 

@@ -91,6 +91,13 @@ ssh -p 2222 user@127.0.0.1
 
 `--listen` is the local port on your own machine. If you choose `127.0.0.1:3333`, VX6 listens on `3333`.
 
+Default paths:
+
+- config: `~/.config/vx6/config.json`
+- identity: `~/.config/vx6/identity.json`
+- runtime state and registry cache: `~/.local/share/vx6`
+- received files: `~/Downloads`
+
 ## Common Use Cases
 
 ### 1. Direct IPv6 Service Share
@@ -172,6 +179,8 @@ On the client:
 ```bash
 ./vx6 send --file ./backup.tar --to bob
 ```
+
+By default, received files are written to `~/Downloads`.
 
 ## Background Operation
 

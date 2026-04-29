@@ -110,8 +110,7 @@ func (r *Registry) handlePublish(conn net.Conn, rec record.EndpointRecord) error
 		}
 	}
 
-	r.byName[rec.NodeName] = rec
-	r.byNode[rec.NodeID] = rec
+	r.upsertEndpointLocked(rec)
 	if err := r.saveLocked(); err != nil {
 		return writeResponse(conn, response{Error: err.Error()})
 	}
@@ -259,8 +258,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 				continue
 			}
 		}
-		r.byName[rec.NodeName] = rec
-		r.byNode[rec.NodeID] = rec
+		r.upsertEndpointLocked(rec)
 		changed = true
 	}
 
@@ -304,8 +302,7 @@ func (r *Registry) load() error {
 		if err := record.VerifyEndpointRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		r.byName[rec.NodeName] = rec
-		r.byNode[rec.NodeID] = rec
+		r.upsertEndpointLocked(rec)
 	}
 	for _, rec := range snapshot.ServiceRecords {
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
@@ -355,6 +352,14 @@ func (r *Registry) saveLocked() error {
 		return fmt.Errorf("write registry: %w", err)
 	}
 	return nil
+}
+
+func (r *Registry) upsertEndpointLocked(rec record.EndpointRecord) {
+	if existing, ok := r.byNode[rec.NodeID]; ok && existing.NodeName != "" && existing.NodeName != rec.NodeName {
+		delete(r.byName, existing.NodeName)
+	}
+	r.byName[rec.NodeName] = rec
+	r.byNode[rec.NodeID] = rec
 }
 
 func Publish(ctx context.Context, address string, rec record.EndpointRecord) (record.EndpointRecord, error) {
