@@ -12,6 +12,8 @@ data/
 # Nested or duplicate worktrees kept outside the top-level VX6 history.
 VX6WEB/
 main/
+apps/
+platform/
 
 # Content/editor scratch that should not block core VX6 development.
 website-content/
