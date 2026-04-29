@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/secure"
 )
 
 const maxHeaderSize = 4 * 1024
@@ -24,6 +26,7 @@ type SendRequest struct {
 	NodeName string
 	FilePath string
 	Address  string
+	Identity identity.Identity
 }
 
 type SendResult struct {
@@ -43,6 +46,9 @@ type ReceiveResult struct {
 func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	if req.NodeName == "" {
 		return SendResult{}, fmt.Errorf("node name cannot be empty")
+	}
+	if err := req.Identity.Validate(); err != nil {
+		return SendResult{}, err
 	}
 	if err := ValidateIPv6Address(req.Address); err != nil {
 		return SendResult{}, err
@@ -78,11 +84,15 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	if err := proto.WriteHeader(conn, proto.KindFileTransfer); err != nil {
 		return SendResult{}, err
 	}
-	if err := writeMetadata(conn, meta); err != nil {
+	secureConn, err := secure.Client(conn, proto.KindFileTransfer, req.Identity)
+	if err != nil {
+		return SendResult{}, err
+	}
+	if err := writeMetadata(secureConn, meta); err != nil {
 		return SendResult{}, err
 	}
 
-	written, err := io.Copy(conn, file)
+	written, err := io.Copy(secureConn, file)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("stream file to %s: %w", req.Address, err)
 	}
