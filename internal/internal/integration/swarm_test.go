@@ -675,7 +675,7 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		ConfigPath:     configPath,
 		BootstrapAddrs: append([]string(nil), opts.bootstraps...),
 		Services:       cloneServices(opts.services),
-		DHT:            dht.NewServer(id.NodeID),
+		DHT:            dht.NewServerWithIdentity(id),
 		Identity:       id,
 		Registry:       registry,
 		RefreshServices: func() map[string]string {
