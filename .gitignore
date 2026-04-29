@@ -1,0 +1,26 @@
+# Build outputs
+*.exe
+*.dll
+*.pdb
+*.lib
+*.a
+*.o
+*.obj
+
+# Go build cache / test artifacts
+*.test
+coverage.out
+*.out
+
+# Temporary performance test results
+cmd/perf-test-gui/results*.json
+cmd/perf-test-gui/results*.csv
+cmd/perf-test-gui/results*.txt
+
+# Local editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Keep generated Windows docs tracked; only ignore binaries and local outputs
