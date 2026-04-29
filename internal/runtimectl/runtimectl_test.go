@@ -18,14 +18,22 @@ func TestServerStatusAndReload(t *testing.T) {
 		return nil
 	}, func() Status {
 		return Status{
-			NodeName:         "alpha",
-			EndpointPublish:  "published",
-			TransportConfig:  "auto",
-			TransportActive:  "tcp",
-			RelayMode:        "on",
-			RelayPercent:     33,
-			RegistryNodes:    7,
-			RegistryServices: 3,
+			NodeName:                        "alpha",
+			EndpointPublish:                 "published",
+			TransportConfig:                 "auto",
+			TransportActive:                 "tcp",
+			RelayMode:                       "on",
+			RelayPercent:                    33,
+			RegistryNodes:                   7,
+			RegistryServices:                3,
+			DHTTrackedKeys:                  5,
+			DHTHealthyKeys:                  4,
+			DHTDegradedKeys:                 1,
+			HiddenDescriptorKeys:            2,
+			HiddenDescriptorHealthy:         2,
+			DHTRefreshIntervalSeconds:       10,
+			HiddenDescriptorRotationSeconds: 3600,
+			HiddenDescriptorOverlapKeys:     2,
 		}
 	})
 	if err != nil {
@@ -45,6 +53,9 @@ func TestServerStatusAndReload(t *testing.T) {
 	}
 	if status.RegistryNodes != 7 || status.RegistryServices != 3 {
 		t.Fatalf("unexpected registry counters %+v", status)
+	}
+	if status.DHTTrackedKeys != 5 || status.HiddenDescriptorKeys != 2 {
+		t.Fatalf("unexpected dht counters %+v", status)
 	}
 
 	if err := RequestReload(context.Background(), infoPath); err != nil {

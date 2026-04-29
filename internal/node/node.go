@@ -38,6 +38,7 @@ const (
 	syncProbeTimeout    = 1 * time.Second
 	syncMaxRounds       = 3
 	syncParallelTargets = 6
+	dhtRefreshLead      = 5 * time.Minute
 )
 
 type ServiceRefresher func() map[string]string
@@ -119,21 +120,33 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			liveCfg := runtimeConfig(cfg)
 			nodeCount := 0
 			serviceCount := 0
+			dhtSummary := dhtStatusSummary(liveCfg.DHT)
 			if cfg.Registry != nil {
 				nodes, services := cfg.Registry.Snapshot()
 				nodeCount = len(nodes)
 				serviceCount = len(services)
 			}
 			return runtimectl.Status{
-				NodeName:         liveCfg.Name,
-				EndpointPublish:  endpointPublishMode(liveCfg.HideEndpoint),
-				TransportConfig:  liveCfg.TransportMode,
-				TransportActive:  vxtransport.EffectiveMode(liveCfg.TransportMode),
-				RelayMode:        liveCfg.RelayMode,
-				RelayPercent:     liveCfg.RelayResourcePercent,
-				RegistryNodes:    nodeCount,
-				RegistryServices: serviceCount,
-				UptimeSeconds:    int64(time.Since(startedAt).Seconds()),
+				NodeName:                        liveCfg.Name,
+				EndpointPublish:                 endpointPublishMode(liveCfg.HideEndpoint),
+				TransportConfig:                 liveCfg.TransportMode,
+				TransportActive:                 vxtransport.EffectiveMode(liveCfg.TransportMode),
+				RelayMode:                       liveCfg.RelayMode,
+				RelayPercent:                    liveCfg.RelayResourcePercent,
+				RegistryNodes:                   nodeCount,
+				RegistryServices:                serviceCount,
+				UptimeSeconds:                   int64(time.Since(startedAt).Seconds()),
+				DHTTrackedKeys:                  dhtSummary.Tracked,
+				DHTHealthyKeys:                  dhtSummary.Healthy,
+				DHTDegradedKeys:                 dhtSummary.Degraded,
+				DHTStaleKeys:                    dhtSummary.Stale,
+				HiddenDescriptorKeys:            dhtSummary.HiddenDescriptors,
+				HiddenDescriptorHealthy:         dhtSummary.HiddenHealthy,
+				HiddenDescriptorDegraded:        dhtSummary.HiddenDegraded,
+				HiddenDescriptorStale:           dhtSummary.HiddenStale,
+				DHTRefreshIntervalSeconds:       int64(dhtSummary.RefreshInterval.Seconds()),
+				HiddenDescriptorRotationSeconds: int64(dhtSummary.HiddenRotation.Seconds()),
+				HiddenDescriptorOverlapKeys:     dhtSummary.HiddenPublishOverlapKey,
 			}
 		})
 		if err != nil {
@@ -485,31 +498,94 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, endpoint record.
 	if server == nil {
 		return
 	}
+	now := time.Now()
 
 	if !hideEndpoint {
 		if data, err := json.Marshal(endpoint); err == nil {
 			payload := string(data)
-			_ = server.Store(ctx, dht.NodeNameKey(endpoint.NodeName), payload)
-			_ = server.Store(ctx, dht.NodeIDKey(endpoint.NodeID), payload)
+			publishDHTRecord(ctx, server, dht.NodeNameKey(endpoint.NodeName), payload, dht.ReplicaKindNodeName, endpoint.NodeName, now, endpoint.ExpiresAt)
+			publishDHTRecord(ctx, server, dht.NodeIDKey(endpoint.NodeID), payload, dht.ReplicaKindNodeID, endpoint.NodeID, now, endpoint.ExpiresAt)
 		}
 	}
 
 	for _, svc := range services {
 		if svc.IsHidden && svc.Alias != "" {
-			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, time.Now()) {
+			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, now) {
 				payload, err := dht.EncodeHiddenServiceDescriptor(svc, key)
 				if err != nil {
 					continue
 				}
-				_ = server.Store(ctx, key, payload)
+				publishDHTRecord(ctx, server, key, payload, dht.ReplicaKindHiddenDescriptor, svc.Alias, now, svc.ExpiresAt)
 			}
 			continue
 		}
 		if data, err := json.Marshal(svc); err == nil {
 			payload := string(data)
-			_ = server.Store(ctx, dht.ServiceKey(record.FullServiceName(svc.NodeName, svc.ServiceName)), payload)
+			publishDHTRecord(ctx, server, dht.ServiceKey(record.FullServiceName(svc.NodeName, svc.ServiceName)), payload, dht.ReplicaKindPublicService, record.FullServiceName(svc.NodeName, svc.ServiceName), now, svc.ExpiresAt)
 		}
 	}
+}
+
+func publishDHTRecord(ctx context.Context, server *dht.Server, key, payload string, kind dht.ReplicaKind, subject string, publishedAt time.Time, expiresAtRaw string) {
+	if server == nil {
+		return
+	}
+	report, err := server.MaintainReplicas(ctx, key, payload)
+	observation := dht.ReplicaObservation{
+		Key:            key,
+		Kind:           kind,
+		Subject:        subject,
+		Desired:        report.Desired,
+		Attempted:      report.Attempted,
+		StoredRemotely: report.StoredRemotely,
+		LocalStored:    report.LocalStored,
+		PublishedAt:    publishedAt,
+		RefreshBy:      dhtRefreshDeadline(publishedAt, expiresAtRaw),
+		LastError:      errString(err),
+	}
+	if epoch, ok := dht.HiddenDescriptorEpochFromKey(key); ok {
+		observation.Epoch = epoch
+	}
+	if expiresAtRaw != "" {
+		if expiresAt, err := time.Parse(time.RFC3339, expiresAtRaw); err == nil {
+			observation.ExpiresAt = expiresAt
+		}
+	}
+	server.RecordReplicaObservation(observation)
+}
+
+func dhtRefreshDeadline(publishedAt time.Time, expiresAtRaw string) time.Time {
+	refreshBy := publishedAt.Add(syncCycleInterval)
+	if expiresAtRaw == "" {
+		return refreshBy
+	}
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtRaw)
+	if err != nil {
+		return refreshBy
+	}
+	lead := expiresAt.Add(-dhtRefreshLead)
+	if lead.Before(refreshBy) {
+		return lead
+	}
+	return refreshBy
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func dhtStatusSummary(server *dht.Server) dht.ReplicaSummary {
+	if server == nil {
+		return dht.ReplicaSummary{
+			RefreshInterval:         syncCycleInterval,
+			HiddenRotation:          dht.HiddenDescriptorRotationInterval(),
+			HiddenPublishOverlapKey: dht.HiddenDescriptorPublishOverlap(),
+		}
+	}
+	return server.ReplicaSummary(time.Now(), syncCycleInterval)
 }
 
 func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.EndpointRecord) ([]record.ServiceRecord, map[string]hidden.Topology) {

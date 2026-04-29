@@ -257,6 +257,60 @@ func TestMaintainReplicasSeedsNewPreferredHoldersAfterRoutingChange(t *testing.T
 	}
 }
 
+func TestReplicaSummaryTracksRefreshHealth(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer("self")
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+
+	server.RecordReplicaObservation(ReplicaObservation{
+		Key:            "service/public-ok",
+		Kind:           ReplicaKindPublicService,
+		Subject:        "owner.web",
+		Desired:        5,
+		StoredRemotely: 5,
+		LocalStored:    true,
+		PublishedAt:    now,
+		RefreshBy:      now.Add(10 * time.Second),
+		ExpiresAt:      now.Add(20 * time.Minute),
+	})
+	server.RecordReplicaObservation(ReplicaObservation{
+		Key:            "hidden-desc/v1/1/a",
+		Kind:           ReplicaKindHiddenDescriptor,
+		Subject:        "ghost",
+		Epoch:          1,
+		Desired:        5,
+		StoredRemotely: 4,
+		LocalStored:    true,
+		PublishedAt:    now,
+		RefreshBy:      now.Add(10 * time.Second),
+		ExpiresAt:      now.Add(20 * time.Minute),
+	})
+	server.RecordReplicaObservation(ReplicaObservation{
+		Key:            "hidden-desc/v1/0/b",
+		Kind:           ReplicaKindHiddenDescriptor,
+		Subject:        "ghost",
+		Epoch:          0,
+		Desired:        5,
+		StoredRemotely: 5,
+		LocalStored:    true,
+		PublishedAt:    now.Add(-20 * time.Second),
+		RefreshBy:      now.Add(-5 * time.Second),
+		ExpiresAt:      now.Add(20 * time.Minute),
+	})
+
+	summary := server.ReplicaSummary(now, 10*time.Second)
+	if summary.Tracked != 3 || summary.Healthy != 1 || summary.Degraded != 1 || summary.Stale != 1 {
+		t.Fatalf("unexpected summary counts %+v", summary)
+	}
+	if summary.HiddenDescriptors != 2 || summary.HiddenDegraded != 1 || summary.HiddenStale != 1 {
+		t.Fatalf("unexpected hidden summary counts %+v", summary)
+	}
+	if summary.HiddenPublishOverlapKey != 2 || summary.HiddenRotation != hiddenDescriptorRotation {
+		t.Fatalf("unexpected hidden descriptor policy %+v", summary)
+	}
+}
+
 func TestRecursiveFindValueFiltersPoisonedValueAndUsesConfirmedRecord(t *testing.T) {
 	t.Parallel()
 

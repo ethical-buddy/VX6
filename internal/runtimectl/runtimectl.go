@@ -27,16 +27,27 @@ type Info struct {
 }
 
 type Status struct {
-	PID              int    `json:"pid"`
-	NodeName         string `json:"node_name,omitempty"`
-	EndpointPublish  string `json:"endpoint_publish,omitempty"`
-	TransportConfig  string `json:"transport_config"`
-	TransportActive  string `json:"transport_active"`
-	RelayMode        string `json:"relay_mode"`
-	RelayPercent     int    `json:"relay_percent"`
-	RegistryNodes    int    `json:"registry_nodes"`
-	RegistryServices int    `json:"registry_services"`
-	UptimeSeconds    int64  `json:"uptime_seconds,omitempty"`
+	PID                             int    `json:"pid"`
+	NodeName                        string `json:"node_name,omitempty"`
+	EndpointPublish                 string `json:"endpoint_publish,omitempty"`
+	TransportConfig                 string `json:"transport_config"`
+	TransportActive                 string `json:"transport_active"`
+	RelayMode                       string `json:"relay_mode"`
+	RelayPercent                    int    `json:"relay_percent"`
+	RegistryNodes                   int    `json:"registry_nodes"`
+	RegistryServices                int    `json:"registry_services"`
+	UptimeSeconds                   int64  `json:"uptime_seconds,omitempty"`
+	DHTTrackedKeys                  int    `json:"dht_tracked_keys,omitempty"`
+	DHTHealthyKeys                  int    `json:"dht_healthy_keys,omitempty"`
+	DHTDegradedKeys                 int    `json:"dht_degraded_keys,omitempty"`
+	DHTStaleKeys                    int    `json:"dht_stale_keys,omitempty"`
+	HiddenDescriptorKeys            int    `json:"hidden_descriptor_keys,omitempty"`
+	HiddenDescriptorHealthy         int    `json:"hidden_descriptor_healthy,omitempty"`
+	HiddenDescriptorDegraded        int    `json:"hidden_descriptor_degraded,omitempty"`
+	HiddenDescriptorStale           int    `json:"hidden_descriptor_stale,omitempty"`
+	DHTRefreshIntervalSeconds       int64  `json:"dht_refresh_interval_seconds,omitempty"`
+	HiddenDescriptorRotationSeconds int64  `json:"hidden_descriptor_rotation_seconds,omitempty"`
+	HiddenDescriptorOverlapKeys     int    `json:"hidden_descriptor_overlap_keys,omitempty"`
 }
 
 type Request struct {

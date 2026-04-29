@@ -171,14 +171,22 @@ func TestRunPeerRedactsStoredPeerAddresses(t *testing.T) {
 func TestPrintRuntimeStatusOmitsAddresses(t *testing.T) {
 	output := captureStdout(t, func() {
 		printRuntimeStatus("ONLINE", runtimectl.Status{
-			NodeName:         "alpha",
-			EndpointPublish:  "hidden",
-			TransportConfig:  "auto",
-			TransportActive:  "tcp",
-			RelayMode:        "on",
-			RelayPercent:     33,
-			RegistryNodes:    4,
-			RegistryServices: 2,
+			NodeName:                        "alpha",
+			EndpointPublish:                 "hidden",
+			TransportConfig:                 "auto",
+			TransportActive:                 "tcp",
+			RelayMode:                       "on",
+			RelayPercent:                    33,
+			RegistryNodes:                   4,
+			RegistryServices:                2,
+			DHTTrackedKeys:                  6,
+			DHTHealthyKeys:                  5,
+			DHTDegradedKeys:                 1,
+			HiddenDescriptorKeys:            2,
+			HiddenDescriptorHealthy:         2,
+			DHTRefreshIntervalSeconds:       10,
+			HiddenDescriptorRotationSeconds: 3600,
+			HiddenDescriptorOverlapKeys:     2,
 		})
 	})
 	if strings.Contains(output, "listen_addr") || strings.Contains(output, "advertise_addr") || strings.Contains(output, "probe_addr") {
@@ -186,6 +194,9 @@ func TestPrintRuntimeStatusOmitsAddresses(t *testing.T) {
 	}
 	if !strings.Contains(output, "endpoint_publish\thidden") {
 		t.Fatalf("runtime status missing endpoint publish mode: %q", output)
+	}
+	if !strings.Contains(output, "dht_refresh_interval_seconds\t10") || !strings.Contains(output, "hidden_descriptor_keys\t2") {
+		t.Fatalf("runtime status missing dht summary: %q", output)
 	}
 }
 

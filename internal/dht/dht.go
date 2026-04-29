@@ -21,6 +21,7 @@ type Server struct {
 	Values    map[string]string // The decentralized database
 	publisher identity.Identity
 	versions  map[string]StoredValueState
+	replicas  map[string]ReplicaObservation
 	mu        sync.RWMutex
 }
 
@@ -105,6 +106,7 @@ func NewServer(selfID string) *Server {
 		RT:       NewRoutingTable(selfID),
 		Values:   make(map[string]string),
 		versions: make(map[string]StoredValueState),
+		replicas: make(map[string]ReplicaObservation),
 	}
 }
 

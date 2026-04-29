@@ -110,6 +110,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 status")
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
+	fmt.Fprintln(w, "  vx6 debug dht-status")
 	fmt.Fprintln(w, "  vx6 debug ebpf-status")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
 	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
@@ -1130,6 +1131,23 @@ func printRuntimeStatus(label string, status runtimectl.Status) {
 	}
 	fmt.Printf("registry_nodes\t%d\n", status.RegistryNodes)
 	fmt.Printf("registry_services\t%d\n", status.RegistryServices)
+	if status.DHTRefreshIntervalSeconds > 0 {
+		fmt.Printf("dht_refresh_interval_seconds\t%d\n", status.DHTRefreshIntervalSeconds)
+	}
+	if status.HiddenDescriptorRotationSeconds > 0 {
+		fmt.Printf("hidden_descriptor_rotation_seconds\t%d\n", status.HiddenDescriptorRotationSeconds)
+	}
+	if status.HiddenDescriptorOverlapKeys > 0 {
+		fmt.Printf("hidden_descriptor_overlap_keys\t%d\n", status.HiddenDescriptorOverlapKeys)
+	}
+	fmt.Printf("dht_tracked_keys\t%d\n", status.DHTTrackedKeys)
+	fmt.Printf("dht_healthy_keys\t%d\n", status.DHTHealthyKeys)
+	fmt.Printf("dht_degraded_keys\t%d\n", status.DHTDegradedKeys)
+	fmt.Printf("dht_stale_keys\t%d\n", status.DHTStaleKeys)
+	fmt.Printf("hidden_descriptor_keys\t%d\n", status.HiddenDescriptorKeys)
+	fmt.Printf("hidden_descriptor_healthy\t%d\n", status.HiddenDescriptorHealthy)
+	fmt.Printf("hidden_descriptor_degraded\t%d\n", status.HiddenDescriptorDegraded)
+	fmt.Printf("hidden_descriptor_stale\t%d\n", status.HiddenDescriptorStale)
 }
 
 func statusProbeAddr(cfg config.File) string {
@@ -1193,6 +1211,8 @@ func runDebug(ctx context.Context, args []string) error {
 		return runDebugRegistry(args[1:])
 	case "dht-get":
 		return runDebugDHTGet(ctx, args[1:])
+	case "dht-status":
+		return runDebugDHTStatus(ctx, args[1:])
 	case "ebpf-status":
 		return runDebugEBPFStatus(args[1:]...)
 	case "ebpf-attach":
@@ -1209,6 +1229,7 @@ func printDebugUsage(w io.Writer) {
 	fmt.Fprintln(w, "Debug commands:")
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
+	fmt.Fprintln(w, "  vx6 debug dht-status")
 	fmt.Fprintln(w, "  vx6 debug ebpf-status [--iface IFACE]")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
 	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
@@ -1342,6 +1363,29 @@ func runDebugDHTGet(ctx context.Context, args []string) error {
 	}
 
 	fmt.Println(value)
+	return nil
+}
+
+func runDebugDHTStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("debug dht-status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	status, err := runtimectl.RequestStatus(ctx, controlPath)
+	if err != nil {
+		return err
+	}
+	printRuntimeStatus("ONLINE", status)
 	return nil
 }
 
