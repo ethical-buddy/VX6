@@ -166,6 +166,11 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			return
 		}
 
+		// Always ensure our own record is in our local registry
+		if err := cfg.Registry.Import([]record.EndpointRecord{rec}, nil); err != nil {
+			fmt.Fprintf(log, "local registry update failed: %v\n", err)
+		}
+
 		targets := map[string]struct{}{}
 		for _, addr := range cfg.BootstrapAddrs {
 			targets[addr] = struct{}{}
@@ -190,6 +195,10 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 					fmt.Fprintf(log, "service publish skipped for %s: %v\n", serviceName, err)
 					continue
 				}
+
+				// Ensure our own service record is in our local registry
+				_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
+
 				if _, err := discovery.PublishService(ctx, addr, serviceRec); err != nil {
 					fmt.Fprintf(log, "service publish to %s for %s failed: %v\n", addr, serviceName, err)
 				}
@@ -205,6 +214,16 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 				continue
 			}
 			fmt.Fprintf(log, "synced %d node records and %d service records from %s\n", len(records), len(services), addr)
+		}
+
+		// If we have no targets, we still want to register our own services locally
+		if len(targets) == 0 {
+			for serviceName := range cfg.Services {
+				serviceRec, err := record.NewServiceRecord(cfg.Identity, cfg.Name, serviceName, cfg.AdvertiseAddr, 20*time.Minute, time.Now())
+				if err == nil {
+					_ = cfg.Registry.Import(nil, []record.ServiceRecord{serviceRec})
+				}
+			}
 		}
 	}
 
