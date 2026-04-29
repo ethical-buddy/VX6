@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,18 +11,25 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/vx6/vx6/internal/discovery"
+	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/transfer"
 )
 
 type Config struct {
 	Name       string
+	NodeID     string
 	ListenAddr string
 	DataDir    string
+	Registry   *discovery.Registry
 }
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Name == "" {
 		return errors.New("node name cannot be empty")
+	}
+	if cfg.NodeID == "" {
+		return errors.New("node id cannot be empty")
 	}
 	if err := transfer.ValidateIPv6Address(cfg.ListenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
@@ -36,7 +44,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	}
 	defer listener.Close()
 
-	fmt.Fprintf(log, "vx6 node %q listening on %s\n", cfg.Name, listener.Addr().String())
+	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
 	go func() {
 		<-ctx.Done()
@@ -67,25 +75,57 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			defer wg.Done()
 			defer conn.Close()
 
-			result, err := transfer.ReceiveFile(conn, cfg.DataDir)
+			reader := bufio.NewReader(conn)
+
+			kind, err := proto.ReadHeader(reader)
 			if err != nil {
-				fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
+				fmt.Fprintf(log, "session error from %s: %v\n", conn.RemoteAddr().String(), err)
 				return
 			}
 
-			absPath, pathErr := filepath.Abs(result.StoredPath)
-			if pathErr != nil {
-				absPath = result.StoredPath
-			}
+			switch kind {
+			case proto.KindFileTransfer:
+				result, err := transfer.ReceiveFile(reader, cfg.DataDir)
+				if err != nil {
+					fmt.Fprintf(log, "receive error from %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
 
-			fmt.Fprintf(
-				log,
-				"received %q (%d bytes) from node %q into %s\n",
-				result.FileName,
-				result.BytesReceived,
-				result.SenderNode,
-				absPath,
-			)
+				absPath, pathErr := filepath.Abs(result.StoredPath)
+				if pathErr != nil {
+					absPath = result.StoredPath
+				}
+
+				fmt.Fprintf(
+					log,
+					"received %q (%d bytes) from node %q into %s\n",
+					result.FileName,
+					result.BytesReceived,
+					result.SenderNode,
+					absPath,
+				)
+			case proto.KindDiscoveryReq:
+				if cfg.Registry == nil {
+					fmt.Fprintf(log, "discovery request from %s rejected: registry disabled\n", conn.RemoteAddr().String())
+					return
+				}
+				if err := cfg.Registry.HandleConn(&bufferedConn{Conn: conn, reader: reader}); err != nil {
+					fmt.Fprintf(log, "discovery error from %s: %v\n", conn.RemoteAddr().String(), err)
+					return
+				}
+				fmt.Fprintf(log, "processed discovery request from %s\n", conn.RemoteAddr().String())
+			default:
+				fmt.Fprintf(log, "session error from %s: unsupported kind %d\n", conn.RemoteAddr().String(), kind)
+			}
 		}()
 	}
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	return c.reader.Read(p)
 }

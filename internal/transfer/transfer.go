@@ -2,13 +2,14 @@ package transfer
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/vx6/vx6/internal/proto"
 )
 
 const maxHeaderSize = 4 * 1024
@@ -74,6 +75,9 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	}
 	defer conn.Close()
 
+	if err := proto.WriteHeader(conn, proto.KindFileTransfer); err != nil {
+		return SendResult{}, err
+	}
 	if err := writeMetadata(conn, meta); err != nil {
 		return SendResult{}, err
 	}
@@ -91,8 +95,8 @@ func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
 	}, nil
 }
 
-func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
-	meta, err := readMetadata(conn)
+func ReceiveFile(r io.Reader, dataDir string) (ReceiveResult, error) {
+	meta, err := readMetadata(r)
 	if err != nil {
 		return ReceiveResult{}, err
 	}
@@ -108,7 +112,7 @@ func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
 	}
 	defer outFile.Close()
 
-	written, err := io.CopyN(outFile, conn, meta.FileSize)
+	written, err := io.CopyN(outFile, r, meta.FileSize)
 	if err != nil {
 		return ReceiveResult{}, fmt.Errorf("read payload: %w", err)
 	}
@@ -143,34 +147,13 @@ func writeMetadata(w io.Writer, meta metadata) error {
 	if len(header) > maxHeaderSize {
 		return fmt.Errorf("metadata too large")
 	}
-
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len(header)))
-
-	if _, err := w.Write(size[:]); err != nil {
-		return fmt.Errorf("write metadata size: %w", err)
-	}
-	if _, err := w.Write(header); err != nil {
-		return fmt.Errorf("write metadata: %w", err)
-	}
-
-	return nil
+	return proto.WriteLengthPrefixed(w, header)
 }
 
 func readMetadata(r io.Reader) (metadata, error) {
-	var size [4]byte
-	if _, err := io.ReadFull(r, size[:]); err != nil {
-		return metadata{}, fmt.Errorf("read metadata size: %w", err)
-	}
-
-	headerSize := binary.BigEndian.Uint32(size[:])
-	if headerSize == 0 || headerSize > maxHeaderSize {
-		return metadata{}, fmt.Errorf("invalid metadata size %d", headerSize)
-	}
-
-	header := make([]byte, headerSize)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return metadata{}, fmt.Errorf("read metadata: %w", err)
+	header, err := proto.ReadLengthPrefixed(r, maxHeaderSize)
+	if err != nil {
+		return metadata{}, err
 	}
 
 	var meta metadata

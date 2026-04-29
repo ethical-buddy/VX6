@@ -1,0 +1,12 @@
+{
+  "node": {
+    "name": "codex-local",
+    "listen_addr": "[::]:4242",
+    "data_dir": "./tmp/inbox"
+  },
+  "peers": {
+    "surya": {
+      "address": "[2401:4900:a68a:dd2b:4833:84ec:6c4d:2449]:4242"
+    }
+  }
+}

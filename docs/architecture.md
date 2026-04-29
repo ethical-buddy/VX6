@@ -8,6 +8,8 @@ The repository starts with one executable, `vx6`, and a narrow set of responsibi
 2. Accept inbound file transfers into a local data directory.
 3. Open outbound `tcp6` connections to other nodes.
 4. Send files using a small framed protocol with node metadata.
+5. Maintain a persistent Ed25519 identity and sign endpoint records.
+6. Publish and resolve endpoint records through a known bootstrap node.
 
 This is intentionally narrow. VX6 should earn complexity rather than declare it.
 
@@ -18,6 +20,8 @@ The node and transfer primitives in this repository are expected to evolve into 
 - stable node naming
 - endpoint handling
 - node identity
+- signed endpoint records
+- bootstrap discovery
 - service publication
 - discovery
 - forwarding and routing
@@ -31,3 +35,4 @@ Each layer should remain independently testable. Direct connectivity is the defa
 - Keep package boundaries small and responsibility-driven.
 - Add protocol surface gradually and document it as it appears.
 - Keep the single-binary operational model intact as features are added.
+- Treat node identity and endpoint claims as signed data, not trusted local strings.

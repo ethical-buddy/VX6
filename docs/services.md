@@ -35,4 +35,4 @@ To hide changing IPv6 addresses cleanly, VX6 needs:
 - a way to publish and refresh those records
 - a way for other peers to look them up
 
-Until those pieces exist, the project can only offer local aliases over manually supplied endpoints.
+VX6 now has the first three pieces in bootstrap form: persistent identity, signed endpoint records, and publish/lookup through a known VX6 node. It still lacks decentralized replication, automatic refresh, and service-level routing.
