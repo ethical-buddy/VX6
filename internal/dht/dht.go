@@ -9,6 +9,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,12 @@ type Server struct {
 	versions  map[string]StoredValueState
 	replicas  map[string]ReplicaObservation
 	mu        sync.RWMutex
+}
+
+type lookupBranch struct {
+	id         int
+	rootNodeID string
+	queue      []proto.NodeInfo
 }
 
 const (
@@ -67,6 +74,14 @@ func NodeIDKey(nodeID string) string {
 
 func ServiceKey(fullName string) string {
 	return "service/" + fullName
+}
+
+func isTrustedLookupKey(key string) bool {
+	return strings.HasPrefix(key, "node/name/") ||
+		strings.HasPrefix(key, "node/id/") ||
+		strings.HasPrefix(key, "service/") ||
+		strings.HasPrefix(key, "hidden-desc/v1/") ||
+		strings.HasPrefix(key, "private-catalog/")
 }
 
 func HiddenServiceKey(alias string) string {
@@ -161,6 +176,11 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 			resp.Value = val
 		}
 	case "store":
+		if err := s.admitStoreValue(req.Target, req.Data, time.Now()); err != nil {
+			// Invalid or conflicting writes are ignored to keep the DHT conservative
+			// under poisoning attempts.
+			break
+		}
 		if _, _, err := s.storeValidated(req.Target, req.Data, time.Now()); err != nil {
 			// Invalid or conflicting writes are ignored to keep the DHT conservative
 			// under poisoning attempts.
@@ -181,6 +201,30 @@ func (s *Server) StoreLocal(key, value string) {
 	if validated, err := validateLookupValue(key, value, time.Now()); err == nil {
 		s.versions[key] = StoredValueState{Current: storedVersionFromValidated(validated)}
 	}
+}
+
+func (s *Server) admitStoreValue(key, value string, now time.Time) error {
+	if !isTrustedLookupKey(key) {
+		return nil
+	}
+	env, ok, err := maybeDecodeEnvelope(value)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("trusted key %q requires a signed DHT envelope", key)
+	}
+	validated, err := validateLookupValue(key, value, now)
+	if err != nil {
+		return err
+	}
+	if !validated.verified {
+		return fmt.Errorf("trusted key %q requires a verified value", key)
+	}
+	if validated.originNodeID == "" || env.PublisherNodeID != validated.originNodeID {
+		return fmt.Errorf("trusted key %q requires authoritative publisher %q", key, validated.originNodeID)
+	}
+	return nil
 }
 
 // RecursiveFindNode searches the network for a specific NodeID.
@@ -373,33 +417,56 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 
 	s.mu.RLock()
 	if local, ok := s.Values[key]; ok && local != "" {
-		collector.Observe(sourceObservation{nodeID: "local:" + s.RT.SelfID, trust: 3}, local)
+		collector.Observe(sourceObservation{nodeID: "local:" + s.RT.SelfID, trust: 3, branch: 0}, local)
 	}
 	s.mu.RUnlock()
 
-	for len(candidates) > 0 && queried < lookupQueryBudget {
-		batch := nextCandidateBatch(candidates, visited, lookupAlpha)
+	branches, spares, nextBranchID := buildLookupBranches(candidates, lookupAlpha)
+	for len(branches) > 0 && queried < lookupQueryBudget {
+		type branchQuery struct {
+			branchID int
+			node     proto.NodeInfo
+		}
+		batch := make([]branchQuery, 0, len(branches))
+		active := make([]lookupBranch, 0, len(branches))
+		for _, branch := range branches {
+			node, ok := nextBranchCandidate(branch.queue, visited)
+			if !ok {
+				if len(spares) > 0 {
+					branch.id = nextBranchID
+					nextBranchID++
+					branch.rootNodeID = spares[0].ID
+					branch.queue = []proto.NodeInfo{spares[0]}
+					spares = spares[1:]
+					node, ok = nextBranchCandidate(branch.queue, visited)
+				}
+			}
+			if !ok {
+				continue
+			}
+			visited[node.ID] = true
+			batch = append(batch, branchQuery{branchID: branch.id, node: node})
+			active = append(active, branch)
+		}
+		branches = active
 		if len(batch) == 0 {
 			break
 		}
 
-		for _, node := range batch {
-			visited[node.ID] = true
-		}
-
 		type queryResult struct {
-			node  proto.NodeInfo
-			value string
-			next  []proto.NodeInfo
-			err   error
+			branchID int
+			node     proto.NodeInfo
+			value    string
+			next     []proto.NodeInfo
+			err      error
 		}
 
 		resultsCh := make(chan queryResult, len(batch))
-		for _, node := range batch {
-			node := node
+		for _, item := range batch {
+			item := item
 			go func() {
-				val, nextNodes, err := s.QueryValue(ctx, node.Addr, key)
-				resultsCh <- queryResult{node: node, value: val, next: nextNodes, err: err}
+				val, nextNodes, err := s.QueryValue(ctx, item.node.Addr, key)
+				resultsCh <- queryResult{branchID: item.branchID, node: item.node, value: val, next: nextNodes, err: err}
 			}()
 		}
 
@@ -412,9 +479,15 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 			}
 			s.RT.AddNode(result.node)
 			if result.value != "" {
-				collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1}, result.value)
+				collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1, branch: result.branchID}, result.value)
 			}
-			candidates = mergeCandidateNodes(candidates, result.next, visited, key, s.RT)
+			for idx := range branches {
+				if branches[idx].id != result.branchID {
+					continue
+				}
+				branches[idx].queue = mergeBranchCandidates(branches[idx].queue, result.next, visited, key, s.RT)
+				break
+			}
 		}
 
 		if collector.IsConfirmed() {
@@ -509,6 +582,49 @@ func nextCandidateBatch(candidates []proto.NodeInfo, visited map[string]bool, ma
 		if len(out) == max {
 			break
 		}
+	}
+	return out
+}
+
+func buildLookupBranches(candidates []proto.NodeInfo, limit int) ([]lookupBranch, []proto.NodeInfo, int) {
+	if limit <= 0 || len(candidates) == 0 {
+		return nil, nil, 1
+	}
+	roots := selectReplicationNodes(candidates, limit)
+	branches := make([]lookupBranch, 0, len(roots))
+	used := make(map[string]struct{}, len(roots))
+	for i, node := range roots {
+		branches = append(branches, lookupBranch{id: i + 1, rootNodeID: node.ID, queue: []proto.NodeInfo{node}})
+		used[node.ID] = struct{}{}
+	}
+	spares := make([]proto.NodeInfo, 0, len(candidates))
+	for _, node := range candidates {
+		if _, ok := used[node.ID]; ok {
+			continue
+		}
+		spares = append(spares, node)
+	}
+	return branches, spares, len(roots) + 1
+}
+
+func nextBranchCandidate(queue []proto.NodeInfo, visited map[string]bool) (proto.NodeInfo, bool) {
+	for _, node := range queue {
+		if visited[node.ID] {
+			continue
+		}
+		return node, true
+	}
+	return proto.NodeInfo{}, false
+}
+
+func mergeBranchCandidates(existing, incoming []proto.NodeInfo, visited map[string]bool, target string, rt *RoutingTable) []proto.NodeInfo {
+	merged := mergeCandidateNodes(existing, incoming, map[string]bool{}, target, rt)
+	out := make([]proto.NodeInfo, 0, len(merged))
+	for _, node := range merged {
+		if visited[node.ID] {
+			continue
+		}
+		out = append(out, node)
 	}
 	return out
 }

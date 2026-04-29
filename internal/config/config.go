@@ -53,6 +53,7 @@ type PeerEntry struct {
 type ServiceEntry struct {
 	Target        string   `json:"target"`
 	IsHidden      bool     `json:"is_hidden"`
+	IsPrivate     bool     `json:"is_private,omitempty"`
 	Alias         string   `json:"alias,omitempty"`
 	HiddenProfile string   `json:"hidden_profile,omitempty"`
 	IntroMode     string   `json:"intro_mode,omitempty"`
@@ -356,6 +357,9 @@ func normalize(cfg *File) {
 		if svc.IntroNodes == nil {
 			svc.IntroNodes = []string{}
 		}
+		if svc.IsHidden && svc.IsPrivate {
+			svc.IsPrivate = false
+		}
 		if svc.IsHidden {
 			if svc.HiddenProfile == "" {
 				svc.HiddenProfile = "fast"
@@ -367,6 +371,12 @@ func normalize(cfg *File) {
 					svc.IntroMode = "random"
 				}
 			}
+		}
+		if svc.IsPrivate {
+			svc.Alias = ""
+			svc.HiddenProfile = ""
+			svc.IntroMode = ""
+			svc.IntroNodes = nil
 		}
 		cfg.Services[name] = svc
 	}

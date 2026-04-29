@@ -412,7 +412,7 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 
 		publishRecordsToTargets(ctx, liveCfg, log, targets, rec, serviceRecords)
 
-		publishDHTRecords(ctx, liveCfg.DHT, rec, serviceRecords, liveCfg.HideEndpoint)
+		publishDHTRecords(ctx, liveCfg.DHT, liveCfg.Identity, rec, serviceRecords, liveCfg.HideEndpoint)
 	}
 
 	publishAndSync()
@@ -494,7 +494,7 @@ func seedDHTRouting(server *dht.Server, seedAddrs []string, records []record.End
 	}
 }
 
-func publishDHTRecords(ctx context.Context, server *dht.Server, endpoint record.EndpointRecord, services []record.ServiceRecord, hideEndpoint bool) {
+func publishDHTRecords(ctx context.Context, server *dht.Server, signer identity.Identity, endpoint record.EndpointRecord, services []record.ServiceRecord, hideEndpoint bool) {
 	if server == nil {
 		return
 	}
@@ -509,6 +509,9 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, endpoint record.
 	}
 
 	for _, svc := range services {
+		if svc.IsPrivate {
+			continue
+		}
 		if svc.IsHidden && svc.Alias != "" {
 			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, now) {
 				payload, err := dht.EncodeHiddenServiceDescriptor(svc, key)
@@ -524,6 +527,26 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, endpoint record.
 			publishDHTRecord(ctx, server, dht.ServiceKey(record.FullServiceName(svc.NodeName, svc.ServiceName)), payload, dht.ReplicaKindPublicService, record.FullServiceName(svc.NodeName, svc.ServiceName), now, svc.ExpiresAt)
 		}
 	}
+
+	privateServices := privateCatalogServices(services)
+	if len(privateServices) > 0 {
+		catalog, err := dht.NewPrivateServiceCatalog(signer, endpoint.NodeName, privateServices, 20*time.Minute, now)
+		if err == nil {
+			if data, err := json.Marshal(catalog); err == nil {
+				publishDHTRecord(ctx, server, dht.PrivateCatalogKey(endpoint.NodeName), string(data), dht.ReplicaKindPrivateCatalog, "private:"+endpoint.NodeName, now, catalog.ExpiresAt)
+			}
+		}
+	}
+}
+
+func privateCatalogServices(services []record.ServiceRecord) []record.ServiceRecord {
+	out := make([]record.ServiceRecord, 0, len(services))
+	for _, svc := range services {
+		if svc.IsPrivate && !svc.IsHidden {
+			out = append(out, svc)
+		}
+	}
+	return out
 }
 
 func publishDHTRecord(ctx context.Context, server *dht.Server, key, payload string, kind dht.ReplicaKind, subject string, publishedAt time.Time, expiresAtRaw string) {
@@ -606,6 +629,7 @@ func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.Endpoin
 		}
 
 		srec.IsHidden = isHidden
+		srec.IsPrivate = entry.IsPrivate
 		if isHidden {
 			topology := hidden.SelectTopology(ctx, cfg.AdvertiseAddr, nodes, entry.IntroNodes, entry.IntroMode, entry.HiddenProfile)
 			srec.Alias = entry.Alias
@@ -618,7 +642,9 @@ func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.Endpoin
 			topologies[record.ServiceLookupKey(srec)] = topology
 		}
 		_ = record.SignServiceRecord(cfg.Identity, &srec)
-		_ = cfg.Registry.Import(nil, []record.ServiceRecord{srec})
+		if !srec.IsPrivate {
+			_ = cfg.Registry.Import(nil, []record.ServiceRecord{srec})
+		}
 		serviceRecords = append(serviceRecords, srec)
 	}
 
@@ -773,6 +799,9 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec record.Endpo
 func publishServicesToTargets(ctx context.Context, cfg Config, log io.Writer, targets map[string]struct{}, serviceRecords []record.ServiceRecord) {
 	for _, addr := range pendingSyncTargets(targets, nil) {
 		for _, srec := range serviceRecords {
+			if srec.IsPrivate {
+				continue
+			}
 			publishCtx, cancel := withSyncTimeout(ctx)
 			_, err := discovery.PublishService(publishCtx, addr, srec)
 			cancel()
@@ -794,6 +823,9 @@ func publishRecordsToTargets(ctx context.Context, cfg Config, log io.Writer, tar
 			}
 		}
 		for _, srec := range serviceRecords {
+			if srec.IsPrivate {
+				continue
+			}
 			publishCtx, cancel := withSyncTimeout(ctx)
 			_, err := discovery.PublishService(publishCtx, addr, srec)
 			cancel()

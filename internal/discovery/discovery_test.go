@@ -167,6 +167,60 @@ func TestRegistryPublishResolveService(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsPrivateServicePublish(t *testing.T) {
+	t.Parallel()
+
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	reg, err := NewRegistry("")
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+
+	rec, err := record.NewServiceRecord(id, "surya", "admin", "[2001:db8::1]:4242", 10*time.Minute, time.Now())
+	if err != nil {
+		t.Fatalf("new service record: %v", err)
+	}
+	rec.IsPrivate = true
+	if err := record.SignServiceRecord(id, &rec); err != nil {
+		t.Fatalf("sign private service record: %v", err)
+	}
+
+	server, client := net.Pipe()
+	done := make(chan error, 2)
+	go func() {
+		kind, err := proto.ReadHeader(server)
+		if err != nil {
+			done <- err
+			return
+		}
+		if kind != proto.KindDiscoveryReq {
+			done <- testErr("unexpected request kind")
+			return
+		}
+		done <- reg.HandleConn(server)
+	}()
+	go func() {
+		resp, err := roundTripWithConn(client, request{Action: "publish_service", ServiceRecord: rec})
+		if err != nil {
+			done <- err
+			return
+		}
+		if resp.OK || resp.Error == "" {
+			done <- testErr("expected private service publish to be rejected")
+			return
+		}
+		done <- nil
+	}()
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("private publish flow failed: %v", err)
+		}
+	}
+}
+
 func TestRegistryImportReplacesOlderEndpointAddress(t *testing.T) {
 	t.Parallel()
 

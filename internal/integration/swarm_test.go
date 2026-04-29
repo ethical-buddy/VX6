@@ -425,6 +425,79 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	}
 }
 
+func TestPrivateServiceCatalogLookup(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	root := t.TempDir()
+	echoAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	startEchoServer(t, ctx, echoAddr)
+
+	bootstrap := startVX6Node(t, ctx, filepath.Join(root, "bootstrap"), "bootstrap", nil, nil)
+	owner := startVX6NodeWithOptions(t, ctx, nodeOptions{
+		dir:             filepath.Join(root, "owner"),
+		name:            "owner",
+		bootstraps:      []string{bootstrap.listenAddr},
+		services:        map[string]string{"web": echoAddr, "admin": echoAddr},
+		privateServices: map[string]bool{"admin": true},
+	})
+	client := startVX6Node(t, ctx, filepath.Join(root, "client"), "client", []string{bootstrap.listenAddr}, nil)
+
+	waitForCondition(t, 10*time.Second, func() bool {
+		nodes, services := client.registry.Snapshot()
+		if len(nodes) == 0 {
+			return false
+		}
+		publicSeen := false
+		privateSeen := false
+		for _, svc := range services {
+			switch record.FullServiceName(svc.NodeName, svc.ServiceName) {
+			case "owner.web":
+				publicSeen = true
+			case "owner.admin":
+				privateSeen = true
+			}
+		}
+		return publicSeen && !privateSeen
+	}, "public registry without private service leak")
+
+	observer := dht.NewServer("observer")
+	observer.RT.AddNode(proto.NodeInfo{ID: bootstrap.id.NodeID, Addr: bootstrap.listenAddr})
+	nodes, _ := client.registry.Snapshot()
+	for _, rec := range nodes {
+		if rec.NodeID != "" && rec.Address != "" {
+			observer.RT.AddNode(proto.NodeInfo{ID: rec.NodeID, Addr: rec.Address})
+		}
+	}
+
+	var value string
+	waitForCondition(t, 10*time.Second, func() bool {
+		v, err := observer.RecursiveFindValue(ctx, dht.PrivateCatalogKey(owner.name))
+		if err != nil || v == "" {
+			return false
+		}
+		value = v
+		return true
+	}, "private catalog dht lookup")
+
+	catalog, err := dht.DecodePrivateServiceCatalog(value, time.Now())
+	if err != nil {
+		t.Fatalf("decode private catalog: %v", err)
+	}
+	if len(catalog.Services) != 1 {
+		t.Fatalf("expected one private service, got %+v", catalog)
+	}
+	if catalog.Services[0].ServiceName != "admin" || !catalog.Services[0].IsPrivate {
+		t.Fatalf("unexpected private catalog service %+v", catalog.Services[0])
+	}
+
+	if _, err := observer.RecursiveFindValue(ctx, dht.ServiceKey("owner.admin")); err == nil {
+		t.Fatal("expected private service to be absent from public service keyspace")
+	}
+}
+
 func TestOnionRelayInspectVisibility(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping onion relay inspection integration test in short mode")
@@ -623,14 +696,15 @@ func startVX6Node(t *testing.T, parent context.Context, dir, name string, bootst
 }
 
 type nodeOptions struct {
-	dir            string
-	name           string
-	bootstraps     []string
-	services       map[string]string
-	hiddenServices map[string]bool
-	hideEndpoint   bool
-	identity       identity.Identity
-	reuseIdentity  bool
+	dir             string
+	name            string
+	bootstraps      []string
+	services        map[string]string
+	hiddenServices  map[string]bool
+	privateServices map[string]bool
+	hideEndpoint    bool
+	identity        identity.Identity
+	reuseIdentity   bool
 }
 
 func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOptions) runningNode {
@@ -671,8 +745,9 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 	}
 	for serviceName, target := range opts.services {
 		cfgFile.Services[serviceName] = config.ServiceEntry{
-			Target:   target,
-			IsHidden: opts.hiddenServices[serviceName],
+			Target:    target,
+			IsHidden:  opts.hiddenServices[serviceName],
+			IsPrivate: opts.privateServices[serviceName],
 		}
 	}
 	if err := store.Save(cfgFile); err != nil {

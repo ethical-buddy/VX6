@@ -311,6 +311,116 @@ func TestReplicaSummaryTracksRefreshHealth(t *testing.T) {
 	}
 }
 
+func TestAdmitStoreValueRejectsUnsignedTrustedKey(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	server := NewServerWithIdentity(id)
+	rec := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::61]:4242", false, "", now)
+	if err := server.admitStoreValue(ServiceKey("owner.api"), mustJSON(t, rec), now); err == nil {
+		t.Fatal("expected unsigned trusted store to be rejected")
+	}
+}
+
+func TestAdmitStoreValueRejectsNonAuthoritativePublisher(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	ownerID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate owner identity: %v", err)
+	}
+	republisherID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate republisher identity: %v", err)
+	}
+	server := NewServerWithIdentity(ownerID)
+	rec := mustServiceRecordForIdentity(t, ownerID, "owner", "api", "[2001:db8::61]:4242", false, "", now)
+	payload := mustJSON(t, rec)
+
+	info, err := validateInnerLookupValue(ServiceKey("owner.api"), payload, now)
+	if err != nil {
+		t.Fatalf("validate payload: %v", err)
+	}
+	wrapped, err := wrapSignedEnvelope(republisherID, ServiceKey("owner.api"), payload, info, now)
+	if err != nil {
+		t.Fatalf("wrap signed envelope: %v", err)
+	}
+	if err := server.admitStoreValue(ServiceKey("owner.api"), wrapped, now); err == nil {
+		t.Fatal("expected non-authoritative publisher to be rejected")
+	}
+}
+
+func TestPrivateCatalogRoundTripAndLookup(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	private := mustServiceRecordForIdentity(t, id, "owner", "admin", "[2001:db8::77]:4242", false, "", now)
+	private.IsPrivate = true
+	if err := record.SignServiceRecord(id, &private); err != nil {
+		t.Fatalf("sign private service: %v", err)
+	}
+	catalog, err := NewPrivateServiceCatalog(id, "owner", []record.ServiceRecord{private}, 10*time.Minute, now)
+	if err != nil {
+		t.Fatalf("new private catalog: %v", err)
+	}
+	data, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatalf("marshal private catalog: %v", err)
+	}
+
+	decoded, err := DecodePrivateServiceCatalog(string(data), now)
+	if err != nil {
+		t.Fatalf("decode private catalog: %v", err)
+	}
+	if len(decoded.Services) != 1 || decoded.Services[0].ServiceName != "admin" {
+		t.Fatalf("unexpected private catalog contents %+v", decoded)
+	}
+
+	server := NewServerWithIdentity(id)
+	wrapped := mustSignedValue(t, id, PrivateCatalogKey("owner"), string(data), now)
+	if err := server.Store(context.Background(), PrivateCatalogKey("owner"), string(data)); err != nil {
+		t.Fatalf("store private catalog: %v", err)
+	}
+	if _, err := validateLookupValue(PrivateCatalogKey("owner"), wrapped, now); err != nil {
+		t.Fatalf("validate wrapped private catalog: %v", err)
+	}
+}
+
+func TestLookupCollectorRequiresBranchDiversityForNonLoopbackSources(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	rec := mustEndpointRecordForIdentity(t, id, "owner", "[2001:db8::88]:4242", now)
+	payload := mustSignedValue(t, id, NodeNameKey("owner"), mustJSON(t, rec), now)
+
+	collector := newLookupCollector(NodeNameKey("owner"), now)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "[2001:db8:1::1]:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "[2001:db8:2::1]:4242", trust: 1, branch: 1}, payload)
+	if _, err := collector.Resolve(2); err == nil || !errors.Is(err, ErrInsufficientConfirmation) {
+		t.Fatalf("expected insufficient confirmation without branch diversity, got %v", err)
+	}
+
+	collector = newLookupCollector(NodeNameKey("owner"), now)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "[2001:db8:1::1]:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "[2001:db8:2::1]:4242", trust: 1, branch: 2}, payload)
+	if _, err := collector.Resolve(2); err != nil {
+		t.Fatalf("expected branch-diverse confirmation to succeed, got %v", err)
+	}
+}
+
 func TestRecursiveFindValueFiltersPoisonedValueAndUsesConfirmedRecord(t *testing.T) {
 	t.Parallel()
 

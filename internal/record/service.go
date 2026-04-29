@@ -18,6 +18,7 @@ type ServiceRecord struct {
 	Alias              string   `json:"alias,omitempty"`
 	Address            string   `json:"address,omitempty"` // Empty if hidden
 	IsHidden           bool     `json:"is_hidden"`         // If true, IP is masked
+	IsPrivate          bool     `json:"is_private,omitempty"`
 	HiddenProfile      string   `json:"hidden_profile,omitempty"`
 	IntroPoints        []string `json:"intro_points,omitempty"`         // Active intro points
 	StandbyIntroPoints []string `json:"standby_intro_points,omitempty"` // Spare intro points
@@ -85,6 +86,9 @@ func VerifyServiceRecord(rec ServiceRecord, now time.Time) error {
 		if err := transfer.ValidateIPv6Address(rec.Address); err != nil {
 			return err
 		}
+	}
+	if rec.IsHidden && rec.IsPrivate {
+		return fmt.Errorf("service cannot be both hidden and private")
 	}
 	if rec.IsHidden {
 		if rec.Alias == "" {
@@ -185,6 +189,10 @@ func serviceSigningPayload(rec ServiceRecord) []byte {
 	if rec.IsHidden {
 		hiddenStr = "true"
 	}
+	privateStr := "false"
+	if rec.IsPrivate {
+		privateStr = "true"
+	}
 
 	return []byte(
 		rec.NodeID + "\n" +
@@ -193,6 +201,7 @@ func serviceSigningPayload(rec ServiceRecord) []byte {
 			rec.Alias + "\n" +
 			rec.Address + "\n" +
 			hiddenStr + "\n" +
+			privateStr + "\n" +
 			rec.HiddenProfile + "\n" +
 			intros + "\n" +
 			standbys + "\n" +

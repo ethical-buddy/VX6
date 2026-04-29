@@ -11,6 +11,7 @@ const (
 	ReplicaKindNodeName         ReplicaKind = "node_name"
 	ReplicaKindNodeID           ReplicaKind = "node_id"
 	ReplicaKindPublicService    ReplicaKind = "public_service"
+	ReplicaKindPrivateCatalog   ReplicaKind = "private_catalog"
 	ReplicaKindHiddenDescriptor ReplicaKind = "hidden_descriptor"
 )
 

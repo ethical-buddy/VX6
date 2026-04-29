@@ -93,7 +93,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp|quic] [--relay on|off] [--relay-percent N] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
-	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
+	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
 	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 send --file PATH (--to PEER | --addr [ipv6]:port) [--proxy]")
 	fmt.Fprintln(w, "  vx6 receive status")
@@ -283,9 +283,12 @@ func runList(ctx context.Context, args []string) error {
 	}
 	localPublicCount := 0
 	localHiddenCount := 0
+	localPrivateCount := 0
 	for _, name := range serviceNames {
 		if localServices[name].IsHidden {
 			localHiddenCount++
+		} else if localServices[name].IsPrivate {
+			localPrivateCount++
 		} else {
 			localPublicCount++
 		}
@@ -323,6 +326,21 @@ func runList(ctx context.Context, args []string) error {
 	if printedHidden == 0 {
 		fmt.Println("  (none)")
 	}
+	if !*hiddenOnly {
+		printSectionHeader("LOCAL PRIVATE SERVICES", localPrivateCount)
+		printedPrivate := 0
+		for _, name := range serviceNames {
+			svc := localServices[name]
+			if !svc.IsPrivate || svc.IsHidden {
+				continue
+			}
+			fmt.Printf("  %-15s target=%s\n", name, svc.Target)
+			printedPrivate++
+		}
+		if printedPrivate == 0 {
+			fmt.Println("  (none)")
+		}
+	}
 
 	reg, err := loadLocalRegistry(cfg.Node.DataDir)
 	if err != nil {
@@ -339,9 +357,13 @@ func runList(ctx context.Context, args []string) error {
 
 	publicPrinted := 0
 	hiddenPrinted := 0
+	privateServices := []record.ServiceRecord(nil)
+	if *userFilter != "" && !*hiddenOnly {
+		privateServices, _ = lookupPrivateServicesForUser(ctx, cfg, *userFilter)
+	}
 	if !*hiddenOnly {
 		for _, s := range svcs {
-			if s.IsHidden {
+			if s.IsHidden || s.IsPrivate {
 				continue
 			}
 			if *userFilter != "" && s.NodeName != *userFilter {
@@ -351,7 +373,7 @@ func runList(ctx context.Context, args []string) error {
 		}
 		printSectionHeader("DISCOVERED PUBLIC SERVICES", publicPrinted)
 		for _, s := range svcs {
-			if s.IsHidden {
+			if s.IsHidden || s.IsPrivate {
 				continue
 			}
 			if *userFilter != "" && s.NodeName != *userFilter {
@@ -361,6 +383,15 @@ func runList(ctx context.Context, args []string) error {
 		}
 		if publicPrinted == 0 {
 			fmt.Println("  (none)")
+		}
+		if *userFilter != "" {
+			printSectionHeader("DISCOVERED PRIVATE SERVICES", len(privateServices))
+			for _, s := range privateServices {
+				fmt.Printf("  %-15s node=%s\n", record.FullServiceName(s.NodeName, s.ServiceName), s.NodeName)
+			}
+			if len(privateServices) == 0 {
+				fmt.Println("  (none)")
+			}
 		}
 	}
 
@@ -649,6 +680,7 @@ func runService(args []string) error {
 		fs.SetOutput(io.Discard)
 		name := fs.String("name", "", "local service name")
 		target := fs.String("target", "", "local TCP target")
+		private := fs.Bool("private", false, "publish only through per-user private catalog")
 		h := fs.Bool("hidden", false, "hidden")
 		alias := fs.String("alias", "", "hidden alias; defaults to the local service name")
 		profile := fs.String("profile", "fast", "hidden routing profile: fast or balanced")
@@ -670,11 +702,15 @@ func runService(args []string) error {
 		}
 		entry := config.ServiceEntry{
 			Target:        *target,
+			IsPrivate:     *private,
 			IsHidden:      *h,
 			Alias:         *alias,
 			HiddenProfile: record.NormalizeHiddenProfile(*profile),
 			IntroMode:     "",
 			IntroNodes:    append([]string(nil), intros...),
+		}
+		if entry.IsPrivate && entry.IsHidden {
+			return errors.New("service cannot be both hidden and private")
 		}
 		if entry.IsHidden {
 			if entry.Alias == "" {
@@ -706,6 +742,8 @@ func runService(args []string) error {
 		}
 		if entry.IsHidden {
 			fmt.Printf("hidden_alias\t%s\nhidden_profile\t%s\nintro_mode\t%s\n", entry.Alias, entry.HiddenProfile, entry.IntroMode)
+		} else if entry.IsPrivate {
+			fmt.Println("visibility\tPRIVATE")
 		}
 		return nil
 	}
@@ -725,6 +763,8 @@ func runService(args []string) error {
 			if s.Alias != "" {
 				label = s.Alias
 			}
+		} else if s.IsPrivate {
+			mode = "PRIVATE"
 		}
 		fmt.Printf("%s\t%s\t%s\n", label, s.Target, mode)
 	}
@@ -1583,6 +1623,9 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 					}
 				}
 			}
+			if rec, err := resolvePrivateServiceFromCatalog(ctx, d, service); err == nil {
+				return rec, nil
+			}
 		} else {
 			for _, key := range dht.HiddenServiceLookupKeys(service, time.Now()) {
 				if val, err := d.RecursiveFindValue(ctx, key); err == nil && val != "" {
@@ -1603,6 +1646,23 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 	return record.ServiceRecord{}, errors.New("not found")
 }
 
+func resolvePrivateServiceFromCatalog(ctx context.Context, client *dht.Server, service string) (record.ServiceRecord, error) {
+	parts := strings.SplitN(service, ".", 2)
+	if len(parts) != 2 {
+		return record.ServiceRecord{}, errors.New("not a private catalog lookup")
+	}
+	services, err := lookupPrivateServicesByNode(ctx, client, parts[0])
+	if err != nil {
+		return record.ServiceRecord{}, err
+	}
+	for _, svc := range services {
+		if svc.ServiceName == parts[1] {
+			return svc, nil
+		}
+	}
+	return record.ServiceRecord{}, errors.New("not found")
+}
+
 func requestedServiceName(input string) string {
 	if !strings.Contains(input, ".") {
 		return input
@@ -1616,6 +1676,26 @@ func serviceLookupKeys(service string) []string {
 		return []string{dht.ServiceKey(service)}
 	}
 	return dht.HiddenServiceLookupKeys(service, time.Now())
+}
+
+func lookupPrivateServicesForUser(ctx context.Context, cfg config.File, nodeName string) ([]record.ServiceRecord, error) {
+	client := newDHTClient(cfg)
+	if client == nil {
+		return nil, errors.New("dht unavailable")
+	}
+	return lookupPrivateServicesByNode(ctx, client, nodeName)
+}
+
+func lookupPrivateServicesByNode(ctx context.Context, client *dht.Server, nodeName string) ([]record.ServiceRecord, error) {
+	value, err := client.RecursiveFindValue(ctx, dht.PrivateCatalogKey(nodeName))
+	if err != nil || value == "" {
+		return nil, err
+	}
+	catalog, err := dht.DecodePrivateServiceCatalog(value, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	return append([]record.ServiceRecord(nil), catalog.Services...), nil
 }
 
 func discoveryCandidates(cfg config.File) []string {

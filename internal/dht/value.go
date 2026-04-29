@@ -24,6 +24,7 @@ const (
 	minTrustedSupportingSources = 2
 	minTrustedNetworkGroups     = 2
 	minTrustedConfirmationScore = 4
+	minTrustedLookupBranches    = 2
 )
 
 type LookupResult struct {
@@ -36,6 +37,7 @@ type LookupResult struct {
 	ConflictCount    int
 	PublisherCount   int
 	NetworkDiversity int
+	BranchDiversity  int
 	TrustWeight      int
 	Version          uint64
 }
@@ -59,6 +61,7 @@ type sourceObservation struct {
 	nodeID string
 	addr   string
 	trust  int
+	branch int
 }
 
 type candidateObservation struct {
@@ -67,6 +70,8 @@ type candidateObservation struct {
 	exactSources  map[string]sourceObservation
 	networks      map[string]struct{}
 	exactNetworks map[string]struct{}
+	branches      map[int]struct{}
+	exactBranches map[int]struct{}
 	publishers    map[string]struct{}
 	exactWeight   int
 }
@@ -163,7 +168,7 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		for _, candidate := range c.verified {
 			result := candidate.lookupResult(queried, c.rejected)
 			if !candidate.confirmed() {
-				return result, fmt.Errorf("%w: exact=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactNetworks), candidate.exactWeight)
+				return result, fmt.Errorf("%w: exact=%d branches=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactBranches), len(candidate.exactNetworks), candidate.exactWeight)
 			}
 			return result, nil
 		}
@@ -216,6 +221,8 @@ func newCandidateObservation(value validatedValue) *candidateObservation {
 		exactSources:  map[string]sourceObservation{},
 		networks:      map[string]struct{}{},
 		exactNetworks: map[string]struct{}{},
+		branches:      map[int]struct{}{},
+		exactBranches: map[int]struct{}{},
 		publishers:    map[string]struct{}{},
 	}
 }
@@ -227,6 +234,9 @@ func (c *candidateObservation) addSource(source sourceObservation) {
 	if network := source.networkKey(); network != "" {
 		c.networks[network] = struct{}{}
 	}
+	if source.branch >= 0 {
+		c.branches[source.branch] = struct{}{}
+	}
 }
 
 func (c *candidateObservation) addExactSource(source sourceObservation, value validatedValue) {
@@ -236,6 +246,9 @@ func (c *candidateObservation) addExactSource(source sourceObservation, value va
 	}
 	if network := source.networkKey(); network != "" {
 		c.exactNetworks[network] = struct{}{}
+	}
+	if source.branch >= 0 {
+		c.exactBranches[source.branch] = struct{}{}
 	}
 	if value.publisherNodeID != "" {
 		c.publishers[value.publisherNodeID] = struct{}{}
@@ -250,6 +263,9 @@ func (c *candidateObservation) confirmed() bool {
 		return false
 	}
 	if c.exactWeight < minTrustedConfirmationScore {
+		return false
+	}
+	if !c.onlyLoopbackNetworks() && len(c.exactBranches) < minTrustedLookupBranches {
 		return false
 	}
 	if len(c.exactNetworks) >= minTrustedNetworkGroups {
@@ -280,6 +296,7 @@ func (c *candidateObservation) lookupResult(queried, rejected int) LookupResult 
 		RejectedValues:   rejected,
 		PublisherCount:   len(c.publishers),
 		NetworkDiversity: len(c.exactNetworks),
+		BranchDiversity:  len(c.exactBranches),
 		TrustWeight:      c.exactWeight,
 		Version:          c.value.version,
 	}
@@ -416,6 +433,9 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 		if err := record.VerifyServiceRecord(rec, now); err != nil {
 			return validatedValue{}, err
 		}
+		if rec.IsPrivate {
+			return validatedValue{}, fmt.Errorf("private service %q cannot be stored in public service keyspace", want)
+		}
 		if record.FullServiceName(rec.NodeName, rec.ServiceName) != want {
 			return validatedValue{}, fmt.Errorf("service record name %q does not match key %q", record.FullServiceName(rec.NodeName, rec.ServiceName), want)
 		}
@@ -433,6 +453,30 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 			expiresAt:    expiresAt,
 			version:      version,
 			originNodeID: rec.NodeID,
+		}, nil
+	case strings.HasPrefix(key, "private-catalog/"):
+		want := strings.TrimPrefix(key, "private-catalog/")
+		catalog, err := DecodePrivateServiceCatalog(raw, now)
+		if err != nil {
+			return validatedValue{}, err
+		}
+		if catalog.NodeName != want {
+			return validatedValue{}, fmt.Errorf("private catalog name %q does not match key %q", catalog.NodeName, want)
+		}
+		issuedAt, expiresAt, version, err := recordTimes(catalog.IssuedAt, catalog.ExpiresAt)
+		if err != nil {
+			return validatedValue{}, err
+		}
+		return validatedValue{
+			storedRaw:    raw,
+			raw:          raw,
+			verified:     true,
+			family:       "private-catalog:" + catalog.NodeID + ":" + want,
+			fingerprint:  rawFingerprint(catalog.Signature + "\n" + catalog.IssuedAt + "\n" + catalog.ExpiresAt),
+			issuedAt:     issuedAt,
+			expiresAt:    expiresAt,
+			version:      version,
+			originNodeID: catalog.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "hidden/"):
 		want := strings.TrimPrefix(key, "hidden/")
