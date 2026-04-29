@@ -302,7 +302,7 @@ func serviceLookupKeys(service string) []string {
 	if strings.Contains(service, ".") {
 		return []string{dht.ServiceKey(service)}
 	}
-	return []string{dht.HiddenServiceKey(service), dht.ServiceKey(service)}
+	return append(dht.HiddenServiceLookupKeys(service, time.Now()), dht.ServiceKey(service))
 }
 
 func newDHTClient(cfg config.File, registry *discovery.Registry) *dht.Server {

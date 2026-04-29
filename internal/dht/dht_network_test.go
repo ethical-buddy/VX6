@@ -302,6 +302,55 @@ func TestSelectReplicationNodesPrefersDistinctNetworks(t *testing.T) {
 	}
 }
 
+func TestHiddenServiceLookupKeysRotateByEpoch(t *testing.T) {
+	t.Parallel()
+
+	base := time.Unix(1_700_000_000, 0).UTC()
+	current := HiddenServiceKeyAt("ghost", base)
+	sameEpoch := HiddenServiceKeyAt("ghost", base.Add(20*time.Minute))
+	nextEpoch := HiddenServiceKeyAt("ghost", base.Add(hiddenDescriptorRotation))
+
+	if current != sameEpoch {
+		t.Fatalf("expected key to stay stable within one epoch: %q != %q", current, sameEpoch)
+	}
+	if current == nextEpoch {
+		t.Fatalf("expected key rotation across epochs: %q == %q", current, nextEpoch)
+	}
+	if current == "hidden/ghost" || nextEpoch == "hidden/ghost" {
+		t.Fatalf("expected blinded descriptor keys, got %q and %q", current, nextEpoch)
+	}
+
+	keys := HiddenServiceLookupKeys("ghost", base.Add(hiddenDescriptorRotation))
+	if len(keys) != 2 {
+		t.Fatalf("expected current+previous lookup keys, got %d", len(keys))
+	}
+	if keys[0] != nextEpoch || keys[1] != current {
+		t.Fatalf("unexpected rotated lookup keys: %+v", keys)
+	}
+}
+
+func TestHiddenServiceDescriptorKeyValidatesWrappedRecord(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	rec := mustServiceRecordForIdentity(t, id, "owner", "admin", "", true, "ghost", now)
+	payload := mustJSON(t, rec)
+	key := HiddenServiceKeyAt("ghost", now)
+	signed := mustSignedValue(t, id, key, payload, now)
+
+	value, err := validateLookupValue(key, signed, now)
+	if err != nil {
+		t.Fatalf("validate hidden descriptor: %v", err)
+	}
+	if !value.verified || value.family != "hidden:"+id.NodeID+":ghost" {
+		t.Fatalf("unexpected validated hidden descriptor: %+v", value)
+	}
+}
+
 func startDHTListener(t *testing.T, ctx context.Context, srv *Server) string {
 	t.Helper()
 

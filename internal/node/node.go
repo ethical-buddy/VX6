@@ -489,7 +489,10 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, endpoint record.
 		if data, err := json.Marshal(svc); err == nil {
 			payload := string(data)
 			if svc.IsHidden && svc.Alias != "" {
-				_ = server.Store(ctx, dht.HiddenServiceKey(svc.Alias), payload)
+				for _, key := range dht.HiddenServicePublishKeys(svc.Alias, time.Now()) {
+					_ = server.Store(ctx, key, payload)
+				}
+				continue
 			}
 			_ = server.Store(ctx, dht.ServiceKey(record.FullServiceName(svc.NodeName, svc.ServiceName)), payload)
 		}

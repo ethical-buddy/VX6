@@ -2,10 +2,13 @@ package dht
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,9 +25,10 @@ type Server struct {
 }
 
 const (
-	lookupAlpha       = 3
-	lookupQueryBudget = 12
-	replicationFactor = 5
+	lookupAlpha              = 3
+	lookupQueryBudget        = 12
+	replicationFactor        = 5
+	hiddenDescriptorRotation = time.Hour
 )
 
 type StoredVersion struct {
@@ -55,7 +59,35 @@ func ServiceKey(fullName string) string {
 }
 
 func HiddenServiceKey(alias string) string {
-	return "hidden/" + alias
+	return HiddenServiceKeyAt(alias, time.Now())
+}
+
+func HiddenServiceKeyAt(alias string, now time.Time) string {
+	return hiddenServiceKeyForEpoch(alias, hiddenDescriptorEpoch(now))
+}
+
+func HiddenServiceLookupKeys(alias string, now time.Time) []string {
+	current := hiddenDescriptorEpoch(now)
+	keys := []string{hiddenServiceKeyForEpoch(alias, current)}
+	previous := current - 1
+	if previous >= 0 {
+		keys = append(keys, hiddenServiceKeyForEpoch(alias, previous))
+	}
+	return keys
+}
+
+func HiddenServicePublishKeys(alias string, now time.Time) []string {
+	keys := HiddenServiceLookupKeys(alias, now)
+	out := make([]string, 0, len(keys))
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
 }
 
 func NewServer(selfID string) *Server {
@@ -64,6 +96,18 @@ func NewServer(selfID string) *Server {
 		Values:   make(map[string]string),
 		versions: make(map[string]StoredValueState),
 	}
+}
+
+func hiddenDescriptorEpoch(now time.Time) int64 {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.UTC().Unix() / int64(hiddenDescriptorRotation/time.Second)
+}
+
+func hiddenServiceKeyForEpoch(alias string, epoch int64) string {
+	sum := sha256.Sum256([]byte("vx6-hidden-desc-v1\n" + alias + "\n" + strconv.FormatInt(epoch, 10)))
+	return "hidden-desc/v1/" + strconv.FormatInt(epoch, 10) + "/" + base64.RawURLEncoding.EncodeToString(sum[:20])
 }
 
 func NewServerWithIdentity(id identity.Identity) *Server {

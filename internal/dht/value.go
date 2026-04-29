@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -460,6 +461,39 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 			version:      version,
 			originNodeID: rec.NodeID,
 		}, nil
+	case strings.HasPrefix(key, "hidden-desc/v1/"):
+		epoch, err := parseHiddenDescriptorEpoch(key)
+		if err != nil {
+			return validatedValue{}, err
+		}
+		var rec record.ServiceRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			return validatedValue{}, fmt.Errorf("decode hidden service descriptor: %w", err)
+		}
+		if err := record.VerifyServiceRecord(rec, now); err != nil {
+			return validatedValue{}, err
+		}
+		if !rec.IsHidden || rec.Alias == "" {
+			return validatedValue{}, fmt.Errorf("hidden descriptor must wrap a hidden service with alias")
+		}
+		if expected := hiddenServiceKeyForEpoch(rec.Alias, epoch); expected != key {
+			return validatedValue{}, fmt.Errorf("hidden descriptor key %q does not match alias-derived blinded key %q", key, expected)
+		}
+		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)
+		if err != nil {
+			return validatedValue{}, err
+		}
+		return validatedValue{
+			storedRaw:    raw,
+			raw:          raw,
+			verified:     true,
+			family:       "hidden:" + rec.NodeID + ":" + rec.Alias,
+			fingerprint:  serviceFingerprint(rec),
+			issuedAt:     issuedAt,
+			expiresAt:    expiresAt,
+			version:      version,
+			originNodeID: rec.NodeID,
+		}, nil
 	default:
 		return validatedValue{
 			storedRaw:   raw,
@@ -566,4 +600,16 @@ func rawFingerprint(raw string) string {
 func serviceFingerprint(rec record.ServiceRecord) string {
 	sum := sha256.Sum256([]byte(rec.Signature + "\n" + rec.IssuedAt + "\n" + rec.ExpiresAt))
 	return base64.RawURLEncoding.EncodeToString(sum[:12])
+}
+
+func parseHiddenDescriptorEpoch(key string) (int64, error) {
+	parts := strings.Split(key, "/")
+	if len(parts) != 4 || parts[0] != "hidden-desc" || parts[1] != "v1" || parts[2] == "" || parts[3] == "" {
+		return 0, fmt.Errorf("invalid hidden descriptor key %q", key)
+	}
+	epoch, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || epoch < 0 {
+		return 0, fmt.Errorf("invalid hidden descriptor epoch in key %q", key)
+	}
+	return epoch, nil
 }

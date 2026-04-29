@@ -352,6 +352,10 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 		return json.Unmarshal([]byte(value), &rec) == nil && rec.IsHidden && len(rec.IntroPoints) == 3 && len(rec.StandbyIntroPoints) == 2 && rec.Address == ""
 	}, "hidden service descriptor in DHT")
 
+	if _, err := dhtClient.RecursiveFindValue(rootCtx, dht.ServiceKey(record.FullServiceName(owner.name, serviceRec.ServiceName))); err == nil {
+		t.Fatalf("hidden service should not be published under public service DHT key")
+	}
+
 	hiddenAddr := reserveTCPAddr(t, "127.0.0.1:0")
 	hiddenCtx, hiddenCancel := context.WithCancel(rootCtx)
 	hiddenDone := make(chan error, 1)
