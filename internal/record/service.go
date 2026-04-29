@@ -28,8 +28,8 @@ type ServiceRecord struct {
 }
 
 func NewServiceRecord(id identity.Identity, nodeName, serviceName, address string, ttl time.Duration, now time.Time) (ServiceRecord, error) {
-	if nodeName == "" {
-		return ServiceRecord{}, fmt.Errorf("node name cannot be empty")
+	if err := ValidateNodeName(nodeName); err != nil {
+		return ServiceRecord{}, err
 	}
 	if err := ValidateServiceName(serviceName); err != nil {
 		return ServiceRecord{}, err
@@ -69,6 +69,9 @@ func SignServiceRecord(id identity.Identity, rec *ServiceRecord) error {
 func VerifyServiceRecord(rec ServiceRecord, now time.Time) error {
 	if rec.NodeID == "" || rec.NodeName == "" || rec.ServiceName == "" {
 		return fmt.Errorf("service record missing required fields")
+	}
+	if err := ValidateNodeName(rec.NodeName); err != nil {
+		return err
 	}
 	if rec.Alias != "" {
 		if err := ValidateHiddenAlias(rec.Alias); err != nil {

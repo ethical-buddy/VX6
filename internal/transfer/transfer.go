@@ -12,6 +12,7 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/secure"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const maxHeaderSize = 4 * 1024
@@ -37,9 +38,19 @@ type ReceiveResult struct {
 	StoredPath    string
 }
 
+type ReceivePolicy struct {
+	Mode           string
+	AllowedSenders map[string]struct{}
+}
+
+const (
+	ReceiveModeOff     = "off"
+	ReceiveModeTrusted = "trusted"
+	ReceiveModeOpen    = "open"
+)
+
 func SendFile(ctx context.Context, req SendRequest) (SendResult, error) {
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp6", req.Address)
+	conn, err := vxtransport.DialContext(ctx, vxtransport.ModeAuto, req.Address)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("dial: %w", err)
 	}
@@ -120,8 +131,16 @@ func SendFileWithConn(ctx context.Context, conn net.Conn, req SendRequest) (Send
 }
 
 func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
+	return ReceiveFileWithPolicy(conn, dataDir, ReceivePolicy{Mode: ReceiveModeOpen})
+}
+
+func ReceiveFileWithPolicy(conn net.Conn, dataDir string, policy ReceivePolicy) (ReceiveResult, error) {
 	meta, err := readMetadata(conn)
 	if err != nil {
+		return ReceiveResult{}, err
+	}
+	if err := policy.authorize(meta.NodeName); err != nil {
+		_ = writeResumeState(conn, resumeState{Denied: err.Error()})
 		return ReceiveResult{}, err
 	}
 
@@ -174,6 +193,20 @@ func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
 	}, nil
 }
 
+func (p ReceivePolicy) authorize(sender string) error {
+	switch p.Mode {
+	case ReceiveModeOpen:
+		return nil
+	case ReceiveModeTrusted:
+		if _, ok := p.AllowedSenders[sender]; ok {
+			return nil
+		}
+		return fmt.Errorf("file transfer from %q is not allowed", sender)
+	default:
+		return fmt.Errorf("file receiving is disabled")
+	}
+}
+
 type metadata struct {
 	NodeName string `json:"node_name"`
 	FileName string `json:"file_name"`
@@ -181,7 +214,8 @@ type metadata struct {
 }
 
 type resumeState struct {
-	Offset int64 `json:"offset"`
+	Offset int64  `json:"offset"`
+	Denied string `json:"denied,omitempty"`
 }
 
 func writeMetadata(w io.Writer, meta metadata) error {
@@ -232,6 +266,9 @@ func readResumeState(r io.Reader) (resumeState, error) {
 	var state resumeState
 	if err := json.Unmarshal(payload, &state); err != nil {
 		return resumeState{}, err
+	}
+	if state.Denied != "" {
+		return resumeState{}, fmt.Errorf("transfer rejected: %s", state.Denied)
 	}
 	if state.Offset < 0 {
 		return resumeState{}, fmt.Errorf("resume state contains invalid offset")

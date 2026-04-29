@@ -23,8 +23,8 @@ type EndpointRecord struct {
 }
 
 func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.Duration, now time.Time) (EndpointRecord, error) {
-	if nodeName == "" {
-		return EndpointRecord{}, fmt.Errorf("node name cannot be empty")
+	if err := ValidateNodeName(nodeName); err != nil {
+		return EndpointRecord{}, err
 	}
 	if err := transfer.ValidateIPv6Address(address); err != nil {
 		return EndpointRecord{}, err
@@ -53,6 +53,9 @@ func NewEndpointRecord(id identity.Identity, nodeName, address string, ttl time.
 func VerifyEndpointRecord(record EndpointRecord, now time.Time) error {
 	if record.NodeID == "" || record.NodeName == "" || record.Address == "" {
 		return fmt.Errorf("record missing required fields")
+	}
+	if err := ValidateNodeName(record.NodeName); err != nil {
+		return err
 	}
 	if err := transfer.ValidateIPv6Address(record.Address); err != nil {
 		return err

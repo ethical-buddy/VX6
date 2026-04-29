@@ -7,9 +7,23 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+
+	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const defaultListenAddress = "[::]:4242"
+
+const (
+	FileReceiveOff     = "off"
+	FileReceiveTrusted = "trusted"
+	FileReceiveOpen    = "open"
+
+	RelayModeOn  = "on"
+	RelayModeOff = "off"
+)
 
 type File struct {
 	Node     NodeConfig              `json:"node"`
@@ -18,13 +32,18 @@ type File struct {
 }
 
 type NodeConfig struct {
-	Name           string   `json:"name"`
-	ListenAddr     string   `json:"listen_addr"`
-	AdvertiseAddr  string   `json:"advertise_addr"`
-	HideEndpoint   bool     `json:"hide_endpoint"`
-	DataDir        string   `json:"data_dir"`
-	DownloadDir    string   `json:"download_dir"`
-	BootstrapAddrs []string `json:"bootstrap_addrs"`
+	Name                 string   `json:"name"`
+	ListenAddr           string   `json:"listen_addr"`
+	AdvertiseAddr        string   `json:"advertise_addr"`
+	TransportMode        string   `json:"transport_mode,omitempty"`
+	HideEndpoint         bool     `json:"hide_endpoint"`
+	RelayMode            string   `json:"relay_mode,omitempty"`
+	RelayResourcePercent int      `json:"relay_resource_percent,omitempty"`
+	DataDir              string   `json:"data_dir"`
+	DownloadDir          string   `json:"download_dir"`
+	BootstrapAddrs       []string `json:"bootstrap_addrs"`
+	FileReceiveMode      string   `json:"file_receive_mode,omitempty"`
+	AllowedFileSenders   []string `json:"allowed_file_senders,omitempty"`
 }
 
 type PeerEntry struct {
@@ -95,6 +114,28 @@ func RuntimePIDPath(configPath string) (string, error) {
 	return filepath.Join(filepath.Dir(configPath), "node.pid"), nil
 }
 
+func RuntimeLockPath(configPath string) (string, error) {
+	if configPath == "" {
+		var err error
+		configPath, err = DefaultPath()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(filepath.Dir(configPath), "node.lock"), nil
+}
+
+func RuntimeControlPath(configPath string) (string, error) {
+	if configPath == "" {
+		var err error
+		configPath, err = DefaultPath()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(filepath.Dir(configPath), "node.control.json"), nil
+}
+
 func (s *Store) Path() string {
 	return s.path
 }
@@ -141,6 +182,12 @@ func (s *Store) AddPeer(name, address string) error {
 	if err != nil {
 		return err
 	}
+	if err := record.ValidateNodeName(name); err != nil {
+		return err
+	}
+	if err := transfer.ValidateIPv6Address(address); err != nil {
+		return err
+	}
 
 	cfg.Peers[name] = PeerEntry{Address: address}
 	return s.Save(cfg)
@@ -178,6 +225,9 @@ func (s *Store) ListPeers() ([]string, map[string]PeerEntry, error) {
 func (s *Store) AddBootstrap(address string) error {
 	cfg, err := s.Load()
 	if err != nil {
+		return err
+	}
+	if err := transfer.ValidateIPv6Address(address); err != nil {
 		return err
 	}
 
@@ -255,9 +305,12 @@ func (s *Store) ListServices() ([]string, map[string]ServiceEntry, error) {
 func defaultFile() File {
 	return File{
 		Node: NodeConfig{
-			ListenAddr:  defaultListenAddress,
-			DataDir:     defaultDataDirValue(),
-			DownloadDir: defaultDownloadDirValue(),
+			ListenAddr:           defaultListenAddress,
+			TransportMode:        vxtransport.ModeAuto,
+			RelayMode:            RelayModeOn,
+			RelayResourcePercent: 33,
+			DataDir:              defaultDataDirValue(),
+			DownloadDir:          defaultDownloadDirValue(),
 		},
 		Peers:    map[string]PeerEntry{},
 		Services: map[string]ServiceEntry{},
@@ -268,6 +321,17 @@ func normalize(cfg *File) {
 	if cfg.Node.ListenAddr == "" {
 		cfg.Node.ListenAddr = defaultListenAddress
 	}
+	if normalized := vxtransport.NormalizeMode(cfg.Node.TransportMode); normalized != "" {
+		cfg.Node.TransportMode = normalized
+	} else {
+		cfg.Node.TransportMode = vxtransport.ModeAuto
+	}
+	if normalized := NormalizeRelayMode(cfg.Node.RelayMode); normalized != "" {
+		cfg.Node.RelayMode = normalized
+	} else {
+		cfg.Node.RelayMode = RelayModeOn
+	}
+	cfg.Node.RelayResourcePercent = NormalizeRelayResourcePercent(cfg.Node.RelayResourcePercent)
 	if cfg.Node.DataDir == "" || cfg.Node.DataDir == "./data/inbox" {
 		cfg.Node.DataDir = defaultDataDirValue()
 	}
@@ -276,6 +340,11 @@ func normalize(cfg *File) {
 	}
 	if cfg.Node.BootstrapAddrs == nil {
 		cfg.Node.BootstrapAddrs = []string{}
+	}
+	cfg.Node.FileReceiveMode = NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
+	cfg.Node.AllowedFileSenders = uniqueSortedStrings(cfg.Node.AllowedFileSenders)
+	if cfg.Node.FileReceiveMode != FileReceiveTrusted {
+		cfg.Node.AllowedFileSenders = nil
 	}
 	if cfg.Peers == nil {
 		cfg.Peers = map[string]PeerEntry{}
@@ -301,6 +370,67 @@ func normalize(cfg *File) {
 		}
 		cfg.Services[name] = svc
 	}
+}
+
+func NormalizeFileReceiveMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", FileReceiveOff:
+		return FileReceiveOff
+	case FileReceiveTrusted:
+		return FileReceiveTrusted
+	case FileReceiveOpen:
+		return FileReceiveOpen
+	default:
+		return FileReceiveOff
+	}
+}
+
+func NormalizeRelayMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", RelayModeOn:
+		return RelayModeOn
+	case RelayModeOff:
+		return RelayModeOff
+	default:
+		return ""
+	}
+}
+
+func NormalizeRelayResourcePercent(percent int) int {
+	switch {
+	case percent <= 0:
+		return 33
+	case percent < 5:
+		return 5
+	case percent > 90:
+		return 90
+	default:
+		return percent
+	}
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func defaultDataDirValue() string {

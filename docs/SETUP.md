@@ -30,6 +30,40 @@ Build:
 go build -o ./vx6 ./cmd/vx6
 ```
 
+Or install system-wide:
+
+```bash
+make build
+sudo make install
+```
+
+`make install` only installs the existing `./vx6` binary and the user systemd unit.
+It does not rebuild VX6.
+
+Run `make build` as your normal user. Use `sudo` only for `make install`.
+
+If `./vx6` is already present in the repo root, `sudo make install` will install that binary directly and will not touch `clang`, eBPF headers, or Go.
+
+If you want to rebuild the eBPF object too, use:
+
+```bash
+make build-ebpf
+sudo make install
+```
+
+Common `clang` install commands:
+
+```bash
+# Debian / Ubuntu
+sudo apt install clang llvm
+
+# Fedora
+sudo dnf install clang llvm
+
+# Arch
+sudo pacman -S clang llvm
+```
+
 Initialize:
 
 ```bash

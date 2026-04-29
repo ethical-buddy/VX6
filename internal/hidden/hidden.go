@@ -3,7 +3,11 @@ package hidden
 import (
 	"bufio"
 	"context"
+	crand "crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -18,7 +22,9 @@ import (
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const (
@@ -31,19 +37,33 @@ const (
 	IntroModeHybrid = "hybrid"
 )
 
+var (
+	hiddenControlEpochDuration = 30 * time.Second
+	hiddenControlPingInterval  = 10 * time.Second
+	hiddenControlReadTimeout   = 25 * time.Second
+	hiddenControlLeaseDuration = 30 * time.Second
+
+	errHiddenControlLeaseExpired = errors.New("hidden control lease expired")
+)
+
 type Message struct {
 	Action               string   `json:"action"`
 	Service              string   `json:"service,omitempty"`
-	OwnerAddr            string   `json:"owner_addr,omitempty"`
 	NotifyAddrs          []string `json:"notify_addrs,omitempty"`
 	RendezvousID         string   `json:"rendezvous_id,omitempty"`
 	RendezvousCandidates []string `json:"rendezvous_candidates,omitempty"`
 	HopCount             int      `json:"hop_count,omitempty"`
 	RelayExcludes        []string `json:"relay_excludes,omitempty"`
+	CallbackID           string   `json:"callback_id,omitempty"`
+	SenderNodeID         string   `json:"sender_node_id,omitempty"`
+	Epoch                int64    `json:"epoch,omitempty"`
+	Nonce                string   `json:"nonce,omitempty"`
 }
 
 type HandlerConfig struct {
 	Identity      identity.Identity
+	AdvertiseAddr string
+	TransportMode string
 	Services      map[string]string
 	HiddenAliases map[string]string
 	Registry      *discovery.Registry
@@ -56,7 +76,19 @@ type Topology struct {
 }
 
 type DialOptions struct {
-	SelfAddr string
+	SelfAddr      string
+	Identity      identity.Identity
+	TransportMode string
+}
+
+type ControlOptions struct {
+	Identity      identity.Identity
+	Registry      *discovery.Registry
+	SelfAddr      string
+	TransportMode string
+	RelayHopCount int
+	RelayExcludes []string
+	RequireRelay  bool
 }
 
 type rendezvousWait struct {
@@ -66,10 +98,24 @@ type rendezvousWait struct {
 
 type introRegistration struct {
 	NotifyAddrs []string
+	Conn        net.Conn
 }
 
 type guardRegistration struct {
-	OwnerAddr string
+	CallbackID string
+	Conn       net.Conn
+	writeMu    sync.Mutex
+}
+
+type registrationLease struct {
+	Fingerprint string
+	Cancel      context.CancelFunc
+}
+
+type OwnerRegistrationTarget struct {
+	LookupKey  string
+	GuardAddrs []string
+	IntroAddrs []string
 }
 
 type peerScore struct {
@@ -94,7 +140,7 @@ var (
 	introServices = map[string]introRegistration{}
 
 	guardMu       sync.RWMutex
-	guardServices = map[string]guardRegistration{}
+	guardServices = map[string]*guardRegistration{}
 
 	rendezvousMu sync.Mutex
 	rendezvouses = map[string]*rendezvousWait{}
@@ -104,24 +150,109 @@ var (
 
 	trackerMu    sync.Mutex
 	trackersByIP = map[string]struct{}{}
+
+	introClientMu sync.Mutex
+	introClients  = map[string]registrationLease{}
+
+	guardClientMu sync.Mutex
+	guardClients  = map[string]registrationLease{}
+
+	controlReplayMu sync.Mutex
+	controlReplays  = map[string]time.Time{}
 )
 
-func RegisterIntro(ctx context.Context, introAddr, lookupKey string, notifyAddrs []string) error {
+func RegisterIntro(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
 	msg := Message{
 		Action:      "intro_register",
 		Service:     lookupKey,
 		NotifyAddrs: append([]string(nil), notifyAddrs...),
 	}
-	return sendControl(ctx, introAddr, msg)
+	return sendControl(ctx, introAddr, msg, opts)
 }
 
-func RegisterGuard(ctx context.Context, guardAddr, lookupKey, ownerAddr string) error {
-	msg := Message{
-		Action:    "guard_register",
-		Service:   lookupKey,
-		OwnerAddr: ownerAddr,
+func EnsureIntroRegistration(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) {
+	key := introClientKey(opts.Identity.NodeID, introAddr, lookupKey)
+	fingerprint := addressFingerprint(notifyAddrs)
+
+	introClientMu.Lock()
+	if existing, ok := introClients[key]; ok {
+		if existing.Fingerprint == fingerprint {
+			introClientMu.Unlock()
+			return
+		}
+		existing.Cancel()
+		delete(introClients, key)
 	}
-	return sendControl(ctx, guardAddr, msg)
+	runCtx, cancel := context.WithCancel(ctx)
+	introClients[key] = registrationLease{
+		Fingerprint: fingerprint,
+		Cancel:      cancel,
+	}
+	introClientMu.Unlock()
+
+	go func() {
+		defer func() {
+			introClientMu.Lock()
+			current, ok := introClients[key]
+			if ok && current.Fingerprint == fingerprint {
+				delete(introClients, key)
+			}
+			introClientMu.Unlock()
+		}()
+
+		backoff := 150 * time.Millisecond
+		for {
+			err := maintainIntroRegistration(runCtx, opts, introAddr, lookupKey, notifyAddrs)
+			if runCtx.Err() != nil {
+				return
+			}
+			backoff = nextRegistrationBackoff(err, backoff)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
+
+func EnsureGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr, lookupKey string, cfgFn func() HandlerConfig) {
+	key := guardClientKey(opts.Identity.NodeID, guardAddr, lookupKey)
+
+	guardClientMu.Lock()
+	if _, ok := guardClients[key]; ok {
+		guardClientMu.Unlock()
+		return
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	guardClients[key] = registrationLease{Cancel: cancel}
+	guardClientMu.Unlock()
+
+	go func() {
+		defer func() {
+			guardClientMu.Lock()
+			delete(guardClients, key)
+			guardClientMu.Unlock()
+		}()
+
+		backoff := 150 * time.Millisecond
+		for {
+			err := maintainGuardRegistration(runCtx, opts, guardAddr, lookupKey, cfgFn)
+			if runCtx.Err() != nil {
+				return
+			}
+			backoff = nextRegistrationBackoff(err, backoff)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
 }
 
 func DialHiddenService(ctx context.Context, service record.ServiceRecord, registry *discovery.Registry) (net.Conn, error) {
@@ -168,6 +299,7 @@ func DialHiddenServiceWithOptions(ctx context.Context, service record.ServiceRec
 				lastErr = err
 				continue
 			}
+			plan.Purpose = "hidden-rendezvous"
 			candidateOrder := preferAddressFirst(rendezvousCandidates, rendezvousAddr)
 
 			relayExcludes := append([]string(nil), excluded...)
@@ -182,25 +314,42 @@ func DialHiddenServiceWithOptions(ctx context.Context, service record.ServiceRec
 				RendezvousCandidates: candidateOrder,
 				HopCount:             hopCount,
 				RelayExcludes:        relayExcludes,
+			}, ControlOptions{
+				Identity:      opts.Identity,
+				Registry:      registry,
+				SelfAddr:      opts.SelfAddr,
+				TransportMode: opts.TransportMode,
+				RelayHopCount: ControlHopCountForProfile(service.HiddenProfile),
+				RelayExcludes: relayExcludes,
+				RequireRelay:  true,
 			}); err != nil {
 				lastErr = err
 				continue
 			}
 
-			conn, err := onion.DialPlannedCircuit(ctx, plan)
+			conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
+				Identity:      opts.Identity,
+				TransportMode: opts.TransportMode,
+			})
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			if err := writeControl(conn, Message{
-				Action:       "rv_join",
-				RendezvousID: rendezvousID,
-			}); err != nil {
+			controlConn, err := openControlClient(conn, opts.Identity)
+			if err != nil {
 				_ = conn.Close()
 				lastErr = err
 				continue
 			}
-			return conn, nil
+			if err := writeControl(controlConn, Message{
+				Action:       "rv_join",
+				RendezvousID: rendezvousID,
+			}); err != nil {
+				_ = controlConn.Close()
+				lastErr = err
+				continue
+			}
+			return controlConn, nil
 		}
 	}
 
@@ -211,25 +360,23 @@ func DialHiddenServiceWithOptions(ctx context.Context, service record.ServiceRec
 }
 
 func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
-	msg, err := readControl(conn)
+	controlConn, err := secure.Server(conn, proto.KindRendezvous, cfg.Identity)
+	if err != nil {
+		return err
+	}
+	msg, err := readValidatedControl(controlConn)
 	if err != nil {
 		return err
 	}
 
 	switch msg.Action {
 	case "intro_register":
-		introMu.Lock()
-		introServices[msg.Service] = introRegistration{NotifyAddrs: sanitizeAddressList(msg.NotifyAddrs)}
-		introMu.Unlock()
-		return nil
+		return holdIntroRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), sanitizeAddressList(msg.NotifyAddrs))
 	case "guard_register":
-		guardMu.Lock()
-		guardServices[msg.Service] = guardRegistration{OwnerAddr: msg.OwnerAddr}
-		guardMu.Unlock()
-		return nil
+		return holdGuardRegistration(controlConn, nodeScopedService(cfg.Identity.NodeID, msg.Service), msg.CallbackID)
 	case "intro_request":
 		introMu.RLock()
-		reg := introServices[msg.Service]
+		reg := introServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)]
 		introMu.RUnlock()
 		if len(reg.NotifyAddrs) == 0 {
 			return fmt.Errorf("hidden service %q is not registered on this intro point", msg.Service)
@@ -243,6 +390,14 @@ func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
 				RendezvousCandidates: append([]string(nil), msg.RendezvousCandidates...),
 				HopCount:             msg.HopCount,
 				RelayExcludes:        append([]string(nil), msg.RelayExcludes...),
+			}, ControlOptions{
+				Identity:      cfg.Identity,
+				Registry:      cfg.Registry,
+				SelfAddr:      cfg.AdvertiseAddr,
+				TransportMode: cfg.TransportMode,
+				RelayHopCount: controlHopCountFromData(msg.HopCount),
+				RelayExcludes: msg.RelayExcludes,
+				RequireRelay:  true,
 			}); err == nil {
 				return nil
 			}
@@ -250,23 +405,26 @@ func HandleConn(ctx context.Context, conn net.Conn, cfg HandlerConfig) error {
 		return fmt.Errorf("no reachable guard or owner for hidden service %q", msg.Service)
 	case "guard_notify":
 		guardMu.RLock()
-		reg := guardServices[msg.Service]
+		_, ok := guardServices[nodeScopedService(cfg.Identity.NodeID, msg.Service)]
 		guardMu.RUnlock()
-		if reg.OwnerAddr == "" {
+		if !ok {
 			return handleIntroNotify(ctx, msg, cfg)
 		}
-		return sendControl(ctx, reg.OwnerAddr, Message{
+		if err := sendGuardCallback(nodeScopedService(cfg.Identity.NodeID, msg.Service), Message{
 			Action:               "intro_notify",
 			Service:              msg.Service,
 			RendezvousID:         msg.RendezvousID,
 			RendezvousCandidates: append([]string(nil), msg.RendezvousCandidates...),
 			HopCount:             msg.HopCount,
 			RelayExcludes:        append([]string(nil), msg.RelayExcludes...),
-		})
+		}); err != nil {
+			return err
+		}
+		return nil
 	case "intro_notify":
 		return handleIntroNotify(ctx, msg, cfg)
 	case "rv_join", "rv_register":
-		return joinRendezvous(conn, msg.RendezvousID)
+		return joinRendezvous(controlConn, msg.RendezvousID)
 	default:
 		return fmt.Errorf("unknown hidden action %q", msg.Action)
 	}
@@ -296,32 +454,42 @@ func handleIntroNotify(ctx context.Context, msg Message, cfg HandlerConfig) erro
 			lastErr = err
 			continue
 		}
+		plan.Purpose = "hidden-rendezvous"
 
-		conn, err := onion.DialPlannedCircuit(ctx, plan)
+		conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
+			Identity:      cfg.Identity,
+			TransportMode: cfg.TransportMode,
+		})
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if err := writeControl(conn, Message{
+		controlConn, err := openControlClient(conn, cfg.Identity)
+		if err != nil {
+			_ = conn.Close()
+			lastErr = err
+			continue
+		}
+		if err := writeControl(controlConn, Message{
 			Action:       "rv_register",
 			RendezvousID: msg.RendezvousID,
 		}); err != nil {
-			_ = conn.Close()
+			_ = controlConn.Close()
 			lastErr = err
 			continue
 		}
 
-		reader := bufio.NewReader(conn)
+		reader := bufio.NewReader(controlConn)
 		kind, err := proto.ReadHeader(reader)
 		if err != nil {
-			_ = conn.Close()
+			_ = controlConn.Close()
 			return err
 		}
 		if kind != proto.KindServiceConn {
-			_ = conn.Close()
+			_ = controlConn.Close()
 			return fmt.Errorf("unexpected hidden-service follow-up kind %d", kind)
 		}
-		return serviceproxy.HandleInbound(&bufferedConn{Conn: conn, reader: reader}, cfg.Identity, cfg.Services)
+		return serviceproxy.HandleInbound(&bufferedConn{Conn: controlConn, reader: reader}, cfg.Identity, cfg.Services)
 	}
 
 	if lastErr == nil {
@@ -367,22 +535,21 @@ func SelectTopology(ctx context.Context, selfAddr string, nodes []record.Endpoin
 	}
 
 	preferredAddrs := resolvePreferredAddressesOrdered(candidates, preferred)
-	scored := scoreCandidates(ctx, candidates, nil, nil)
-	scored = prioritizeScores(scored, preferredAddrs, introMode, activeIntroCount+standbyIntroCount)
-
 	used := map[string]struct{}{}
-	intros := pickAddresses(scored, activeIntroCount+standbyIntroCount, used)
+	guardCandidates := scoreCandidates(ctx, candidates, nil, nil)
+	guardCandidates = stabilizeScores(guardCandidates, selfAddr, guardCount)
 	topology := Topology{}
+	topology.Guards = pickAddresses(guardCandidates, guardCount, used)
+
+	scored := scoreCandidates(ctx, candidates, nil, used)
+	scored = prioritizeScores(scored, preferredAddrs, introMode, activeIntroCount+standbyIntroCount)
+	intros := pickAddresses(scored, activeIntroCount+standbyIntroCount, used)
 	if len(intros) > activeIntroCount {
 		topology.ActiveIntros = append([]string(nil), intros[:activeIntroCount]...)
 		topology.StandbyIntros = append([]string(nil), intros[activeIntroCount:]...)
 	} else {
 		topology.ActiveIntros = append([]string(nil), intros...)
 	}
-
-	guardCandidates := scoreCandidates(ctx, candidates, nil, used)
-	guardCandidates = randomizeTopScores(guardCandidates, guardCount)
-	topology.Guards = pickAddresses(guardCandidates, guardCount, used)
 	return topology
 }
 
@@ -456,6 +623,42 @@ func hopCountForProfile(profile string) int {
 		return 5
 	}
 	return 3
+}
+
+func ControlHopCountForProfile(profile string) int {
+	if record.NormalizeHiddenProfile(profile) == "balanced" {
+		return 3
+	}
+	return 2
+}
+
+func controlHopCountFromData(hopCount int) int {
+	switch {
+	case hopCount >= 5:
+		return 3
+	case hopCount >= 3:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func nodeScopedService(nodeID, service string) string {
+	return nodeID + "\n" + service
+}
+
+func introClientKey(nodeID, introAddr, lookupKey string) string {
+	return "intro\n" + nodeID + "\n" + lookupKey + "\n" + introAddr
+}
+
+func guardClientKey(nodeID, guardAddr, lookupKey string) string {
+	return "guard\n" + nodeID + "\n" + lookupKey + "\n" + guardAddr
+}
+
+func addressFingerprint(addrs []string) string {
+	normalized := append([]string(nil), sanitizeAddressList(addrs)...)
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\n")
 }
 
 func resolveHostedService(lookup string, cfg HandlerConfig) string {
@@ -632,6 +835,30 @@ func randomizeTopScores(scored []peerScore, count int) []peerScore {
 	return out
 }
 
+func stabilizeScores(scored []peerScore, seed string, count int) []peerScore {
+	if len(scored) <= 1 {
+		return scored
+	}
+	limit := count * 4
+	if limit <= 0 || limit > len(scored) {
+		limit = len(scored)
+	}
+	head := append([]peerScore(nil), scored[:limit]...)
+	sort.SliceStable(head, func(i, j int) bool {
+		hi := stableScoreSeed(seed, head[i].Addr)
+		hj := stableScoreSeed(seed, head[j].Addr)
+		return hi < hj
+	})
+	out := append([]peerScore(nil), head...)
+	out = append(out, scored[limit:]...)
+	return out
+}
+
+func stableScoreSeed(seed, addr string) string {
+	sum := sha256.Sum256([]byte(seed + "\n" + addr))
+	return fmt.Sprintf("%x", sum[:])
+}
+
 func pickAddresses(scored []peerScore, count int, used map[string]struct{}) []string {
 	if count <= 0 {
 		return nil
@@ -738,8 +965,7 @@ func measureHealth(ctx context.Context, addr string) (bool, time.Duration, int) 
 	defer cancel()
 
 	start := time.Now()
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
+	conn, err := vxtransport.DialContext(dialCtx, vxtransport.ModeTCP, addr)
 	healthy := err == nil
 	rtt := timeout
 	failures := entry.Failures
@@ -762,9 +988,204 @@ func measureHealth(ctx context.Context, addr string) (bool, time.Duration, int) 
 	return healthy, rtt, failures
 }
 
-func sendControl(ctx context.Context, addr string, msg Message) error {
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp6", addr)
+func maintainGuardRegistration(ctx context.Context, opts ControlOptions, guardAddr, lookupKey string, cfgFn func() HandlerConfig) error {
+	conn, err := openControlConn(ctx, guardAddr, opts)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	callbackID := fmt.Sprintf("cb_%d", time.Now().UnixNano())
+	if err := writeControl(conn, Message{
+		Action:     "guard_register",
+		Service:    lookupKey,
+		CallbackID: callbackID,
+	}); err != nil {
+		return err
+	}
+	return sustainControlRegistration(ctx, conn, func(msg Message) error {
+		if msg.Action != "intro_notify" {
+			return nil
+		}
+		go func(msg Message) {
+			_ = handleIntroNotify(ctx, msg, cfgFn())
+		}(msg)
+		return nil
+	})
+}
+
+func maintainIntroRegistration(ctx context.Context, opts ControlOptions, introAddr, lookupKey string, notifyAddrs []string) error {
+	conn, err := openControlConn(ctx, introAddr, opts)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if err := writeControl(conn, Message{
+		Action:      "intro_register",
+		Service:     lookupKey,
+		NotifyAddrs: append([]string(nil), notifyAddrs...),
+	}); err != nil {
+		return err
+	}
+	return sustainControlRegistration(ctx, conn, func(Message) error { return nil })
+}
+
+func holdIntroRegistration(conn net.Conn, scopedService string, notifyAddrs []string) error {
+	reg := introRegistration{
+		NotifyAddrs: append([]string(nil), notifyAddrs...),
+		Conn:        conn,
+	}
+
+	introMu.Lock()
+	if existing, ok := introServices[scopedService]; ok && existing.Conn != nil {
+		_ = existing.Conn.Close()
+	}
+	introServices[scopedService] = reg
+	introMu.Unlock()
+
+	defer func() {
+		introMu.Lock()
+		current, ok := introServices[scopedService]
+		if ok && current.Conn == conn {
+			delete(introServices, scopedService)
+		}
+		introMu.Unlock()
+	}()
+
+	for {
+		msg, err := readValidatedControl(conn)
+		if err != nil {
+			if isControlCloseError(err) {
+				return nil
+			}
+			return err
+		}
+		if msg.Action == "control_ping" {
+			if err := writeControl(conn, Message{Action: "control_pong"}); err != nil {
+				if isControlCloseError(err) {
+					return nil
+				}
+				return err
+			}
+		}
+	}
+}
+
+func holdGuardRegistration(conn net.Conn, scopedService, callbackID string) error {
+	reg := &guardRegistration{
+		CallbackID: callbackID,
+		Conn:       conn,
+	}
+
+	guardMu.Lock()
+	if existing, ok := guardServices[scopedService]; ok && existing.Conn != nil {
+		_ = existing.Conn.Close()
+	}
+	guardServices[scopedService] = reg
+	guardMu.Unlock()
+
+	defer func() {
+		guardMu.Lock()
+		current, ok := guardServices[scopedService]
+		if ok && current != nil && current.CallbackID == callbackID {
+			delete(guardServices, scopedService)
+		}
+		guardMu.Unlock()
+	}()
+
+	for {
+		msg, err := readValidatedControl(conn)
+		if err != nil {
+			if isControlCloseError(err) {
+				return nil
+			}
+			return err
+		}
+		if msg.Action == "control_ping" {
+			reg.writeMu.Lock()
+			err := writeControl(conn, Message{Action: "control_pong"})
+			reg.writeMu.Unlock()
+			if err != nil {
+				if isControlCloseError(err) {
+					return nil
+				}
+				return err
+			}
+		}
+	}
+}
+
+func sendGuardCallback(scopedService string, msg Message) error {
+	guardMu.RLock()
+	reg, ok := guardServices[scopedService]
+	guardMu.RUnlock()
+	if !ok || reg.Conn == nil {
+		return fmt.Errorf("no active guard callback registered for %s", scopedService)
+	}
+
+	reg.writeMu.Lock()
+	defer reg.writeMu.Unlock()
+	if err := writeControl(reg.Conn, msg); err != nil {
+		_ = reg.Conn.Close()
+		guardMu.Lock()
+		current, ok := guardServices[scopedService]
+		if ok && current.CallbackID == reg.CallbackID {
+			delete(guardServices, scopedService)
+		}
+		guardMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func PruneOwnerRegistrations(nodeID string, targets []OwnerRegistrationTarget) {
+	desiredIntro := map[string]struct{}{}
+	desiredGuard := map[string]struct{}{}
+	for _, target := range targets {
+		for _, introAddr := range sanitizeAddressList(target.IntroAddrs) {
+			desiredIntro[introClientKey(nodeID, introAddr, target.LookupKey)] = struct{}{}
+		}
+		for _, guardAddr := range sanitizeAddressList(target.GuardAddrs) {
+			desiredGuard[guardClientKey(nodeID, guardAddr, target.LookupKey)] = struct{}{}
+		}
+	}
+
+	introPrefix := "intro\n" + nodeID + "\n"
+	introClientMu.Lock()
+	for key, lease := range introClients {
+		if !strings.HasPrefix(key, introPrefix) {
+			continue
+		}
+		if _, ok := desiredIntro[key]; ok {
+			continue
+		}
+		lease.Cancel()
+		delete(introClients, key)
+	}
+	introClientMu.Unlock()
+
+	guardPrefix := "guard\n" + nodeID + "\n"
+	guardClientMu.Lock()
+	for key, lease := range guardClients {
+		if !strings.HasPrefix(key, guardPrefix) {
+			continue
+		}
+		if _, ok := desiredGuard[key]; ok {
+			continue
+		}
+		lease.Cancel()
+		delete(guardClients, key)
+	}
+	guardClientMu.Unlock()
+}
+
+func sendControl(ctx context.Context, addr string, msg Message, opts ControlOptions) error {
+	if opts.Identity.NodeID == "" {
+		return fmt.Errorf("hidden control requires a local identity")
+	}
+
+	conn, err := openControlConn(ctx, addr, opts)
 	if err != nil {
 		return err
 	}
@@ -772,11 +1193,58 @@ func sendControl(ctx context.Context, addr string, msg Message) error {
 	return writeControl(conn, msg)
 }
 
-func writeControl(conn net.Conn, msg Message) error {
+func openControlConn(ctx context.Context, addr string, opts ControlOptions) (net.Conn, error) {
+	if opts.Registry != nil && opts.RelayHopCount > 0 {
+		nodes, _ := opts.Registry.Snapshot()
+		excludeAddrs := append([]string(nil), opts.RelayExcludes...)
+		if opts.SelfAddr != "" {
+			excludeAddrs = append(excludeAddrs, opts.SelfAddr)
+		}
+		plan, err := onion.PlanAutomatedCircuit(record.ServiceRecord{Address: addr}, nodes, opts.RelayHopCount, sanitizeAddressList(excludeAddrs))
+		if err == nil {
+			plan.Purpose = "hidden-control"
+			conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
+				Identity:      opts.Identity,
+				TransportMode: opts.TransportMode,
+			})
+			if err == nil {
+				return openControlClient(conn, opts.Identity)
+			}
+		}
+		if opts.RequireRelay {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("unable to open relay-backed hidden control path to %s", addr)
+		}
+	}
+
+	conn, err := vxtransport.DialContext(ctx, opts.TransportMode, addr)
+	if err != nil {
+		return nil, err
+	}
+	return openControlClient(conn, opts.Identity)
+}
+
+func openControlClient(conn net.Conn, id identity.Identity) (net.Conn, error) {
 	if err := proto.WriteHeader(conn, proto.KindRendezvous); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	secureConn, err := secure.Client(conn, proto.KindRendezvous, id)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return secureConn, nil
+}
+
+func writeControl(conn net.Conn, msg Message) error {
+	stamped, err := stampControlMessage(conn, msg)
+	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(msg)
+	payload, err := json.Marshal(stamped)
 	if err != nil {
 		return err
 	}
@@ -793,6 +1261,209 @@ func readControl(conn net.Conn) (Message, error) {
 		return Message{}, err
 	}
 	return msg, nil
+}
+
+func readValidatedControl(conn net.Conn) (Message, error) {
+	msg, err := readControl(conn)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := validateControlMessage(conn, msg); err != nil {
+		return Message{}, err
+	}
+	return msg, nil
+}
+
+func sustainControlRegistration(ctx context.Context, conn net.Conn, handle func(Message) error) error {
+	var writeMu sync.Mutex
+	errCh := make(chan error, 1)
+
+	go func() {
+		for {
+			if hiddenControlReadTimeout > 0 {
+				if err := conn.SetReadDeadline(time.Now().Add(hiddenControlReadTimeout)); err != nil {
+					errCh <- err
+					return
+				}
+			}
+
+			msg, err := readValidatedControl(conn)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			switch msg.Action {
+			case "control_ping":
+				writeMu.Lock()
+				err = writeControl(conn, Message{Action: "control_pong"})
+				writeMu.Unlock()
+				if err != nil {
+					errCh <- err
+					return
+				}
+			case "control_pong":
+				continue
+			default:
+				if err := handle(msg); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}
+	}()
+
+	pingTicker := time.NewTicker(hiddenControlPingInterval)
+	defer pingTicker.Stop()
+
+	leaseTimer := time.NewTimer(hiddenControlLeaseDuration)
+	defer leaseTimer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-errCh:
+			return err
+		case <-leaseTimer.C:
+			return errHiddenControlLeaseExpired
+		case <-pingTicker.C:
+			writeMu.Lock()
+			err := writeControl(conn, Message{Action: "control_ping"})
+			writeMu.Unlock()
+			if err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func stampControlMessage(conn net.Conn, msg Message) (Message, error) {
+	if msg.SenderNodeID != "" && msg.Epoch != 0 && msg.Nonce != "" {
+		return msg, nil
+	}
+
+	localID, ok := controlLocalNodeID(conn)
+	if !ok || localID == "" {
+		return msg, nil
+	}
+
+	nonce, err := newControlNonce()
+	if err != nil {
+		return Message{}, err
+	}
+
+	msg.SenderNodeID = localID
+	msg.Epoch = controlEpoch(time.Now())
+	msg.Nonce = nonce
+	return msg, nil
+}
+
+func validateControlMessage(conn net.Conn, msg Message) error {
+	peerID, ok := controlPeerNodeID(conn)
+	if !ok || peerID == "" {
+		return nil
+	}
+	if msg.Action == "" {
+		return fmt.Errorf("hidden control message missing action")
+	}
+	if msg.SenderNodeID == "" || msg.Epoch == 0 || msg.Nonce == "" {
+		return fmt.Errorf("hidden control message missing envelope")
+	}
+	if msg.SenderNodeID != peerID {
+		return fmt.Errorf("hidden control sender mismatch: got %s want %s", msg.SenderNodeID, peerID)
+	}
+
+	currentEpoch := controlEpoch(time.Now())
+	if delta := currentEpoch - msg.Epoch; delta < -1 || delta > 1 {
+		return fmt.Errorf("hidden control epoch outside replay window")
+	}
+
+	if err := rememberControlReplay(msg.SenderNodeID, msg.Epoch, msg.Nonce, time.Now()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func newControlNonce() (string, error) {
+	var raw [16]byte
+	if _, err := io.ReadFull(crand.Reader, raw[:]); err != nil {
+		return "", fmt.Errorf("generate hidden control nonce: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func controlEpoch(now time.Time) int64 {
+	duration := hiddenControlEpochDuration
+	if duration <= 0 {
+		duration = 30 * time.Second
+	}
+	return now.UnixNano() / duration.Nanoseconds()
+}
+
+func rememberControlReplay(senderNodeID string, epoch int64, nonce string, now time.Time) error {
+	expiry := now.Add(hiddenControlEpochDuration * 2)
+	key := fmt.Sprintf("%s\n%d\n%s", senderNodeID, epoch, nonce)
+
+	controlReplayMu.Lock()
+	defer controlReplayMu.Unlock()
+
+	for key, expiresAt := range controlReplays {
+		if !expiresAt.After(now) {
+			delete(controlReplays, key)
+		}
+	}
+	if expiresAt, ok := controlReplays[key]; ok && expiresAt.After(now) {
+		return fmt.Errorf("hidden control replay detected")
+	}
+	controlReplays[key] = expiry
+	return nil
+}
+
+func controlLocalNodeID(conn net.Conn) (string, bool) {
+	type localNoder interface {
+		LocalNodeID() string
+	}
+	withID, ok := conn.(localNoder)
+	if !ok {
+		return "", false
+	}
+	return withID.LocalNodeID(), true
+}
+
+func controlPeerNodeID(conn net.Conn) (string, bool) {
+	type peerNoder interface {
+		PeerNodeID() string
+	}
+	withID, ok := conn.(peerNoder)
+	if !ok {
+		return "", false
+	}
+	return withID.PeerNodeID(), true
+}
+
+func isControlCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func nextRegistrationBackoff(err error, current time.Duration) time.Duration {
+	if errors.Is(err, errHiddenControlLeaseExpired) {
+		return 25 * time.Millisecond
+	}
+	if current <= 0 {
+		current = 150 * time.Millisecond
+	}
+	next := current * 2
+	if next > time.Second {
+		next = time.Second
+	}
+	return next
 }
 
 func proxyDuplex(a, b net.Conn) error {

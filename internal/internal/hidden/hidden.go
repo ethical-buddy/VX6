@@ -327,7 +327,10 @@ func DialHiddenServiceWithOptions(ctx context.Context, service record.ServiceRec
 				continue
 			}
 
-			conn, err := onion.DialPlannedCircuit(ctx, plan)
+			conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
+				Identity:      opts.Identity,
+				TransportMode: opts.TransportMode,
+			})
 			if err != nil {
 				lastErr = err
 				continue
@@ -453,7 +456,10 @@ func handleIntroNotify(ctx context.Context, msg Message, cfg HandlerConfig) erro
 		}
 		plan.Purpose = "hidden-rendezvous"
 
-		conn, err := onion.DialPlannedCircuit(ctx, plan)
+		conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
+			Identity:      cfg.Identity,
+			TransportMode: cfg.TransportMode,
+		})
 		if err != nil {
 			lastErr = err
 			continue
@@ -1197,7 +1203,10 @@ func openControlConn(ctx context.Context, addr string, opts ControlOptions) (net
 		plan, err := onion.PlanAutomatedCircuit(record.ServiceRecord{Address: addr}, nodes, opts.RelayHopCount, sanitizeAddressList(excludeAddrs))
 		if err == nil {
 			plan.Purpose = "hidden-control"
-			conn, err := onion.DialPlannedCircuit(ctx, plan)
+			conn, err := onion.DialPlannedCircuit(ctx, plan, onion.ClientOptions{
+				Identity:      opts.Identity,
+				TransportMode: opts.TransportMode,
+			})
 			if err == nil {
 				return openControlClient(conn, opts.Identity)
 			}

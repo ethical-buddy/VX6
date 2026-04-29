@@ -27,8 +27,10 @@ import (
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/runtimectl"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 type stringListFlag []string
@@ -53,6 +55,8 @@ func Run(ctx context.Context, args []string) error {
 		return runList(ctx, args[1:])
 	case "send":
 		return runSend(ctx, args[1:])
+	case "receive":
+		return runReceive(args[1:])
 	case "connect":
 		return runConnect(ctx, args[1:])
 	case "status":
@@ -87,12 +91,16 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
+	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp|quic] [--relay on|off] [--relay-percent N] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
 	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 send --file PATH (--to PEER | --addr [ipv6]:port) [--proxy]")
+	fmt.Fprintln(w, "  vx6 receive status")
+	fmt.Fprintln(w, "  vx6 receive allow --all | --node NAME")
+	fmt.Fprintln(w, "  vx6 receive deny --node NAME")
+	fmt.Fprintln(w, "  vx6 receive disable")
 	fmt.Fprintln(w, "  vx6 service")
 	fmt.Fprintln(w, "  vx6 peer")
 	fmt.Fprintln(w, "  vx6 bootstrap")
@@ -110,7 +118,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Working features:")
 	fmt.Fprintln(w, "  - Signed endpoint and service discovery via bootstrap registry")
 	fmt.Fprintln(w, "  - DHT-backed endpoint/service key lookup")
-	fmt.Fprintln(w, "  - Encrypted file transfer")
+	fmt.Fprintln(w, "  - Encrypted file transfer with local receive permissions")
 	fmt.Fprintln(w, "  - Direct TCP service sharing")
 	fmt.Fprintln(w, "  - 5-hop proxy forwarding for direct services and files")
 	fmt.Fprintln(w, "  - Plain-TCP hidden services via 3 active intros, 2 standby intros, guards, and rendezvous relay")
@@ -154,7 +162,10 @@ func runInit(args []string) error {
 	name := fs.String("name", "", "local human-readable node name")
 	listenAddr := fs.String("listen", "[::]:4242", "default IPv6 listen address in [addr]:port form")
 	advertiseAddr := fs.String("advertise", "", "public IPv6 address in [addr]:port form for discovery records")
+	transportMode := fs.String("transport", vxtransport.ModeAuto, "neighbor transport mode: auto, tcp, or quic")
 	hiddenNode := fs.Bool("hidden-node", false, "do not publish the node endpoint record; publish services only")
+	relayMode := fs.String("relay", config.RelayModeOn, "relay participation: on or off")
+	relayPercent := fs.Int("relay-percent", 33, "maximum share of local relay capacity reserved for transit work")
 	dataDir := fs.String("data-dir", defaultDataDirValue(), "directory for VX6 runtime state")
 	downloadDir := fs.String("downloads-dir", defaultDownloadDirValue(), "directory for received files")
 	var bootstraps stringListFlag
@@ -172,6 +183,9 @@ func runInit(args []string) error {
 	if *name == "" {
 		return errors.New("init requires --name")
 	}
+	if err := record.ValidateNodeName(*name); err != nil {
+		return err
+	}
 	if err := transfer.ValidateIPv6Address(*listenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
 	}
@@ -179,6 +193,14 @@ func runInit(args []string) error {
 		if err := transfer.ValidateIPv6Address(*advertiseAddr); err != nil {
 			return fmt.Errorf("invalid advertise address: %w", err)
 		}
+	}
+	normalizedTransport := vxtransport.NormalizeMode(*transportMode)
+	if normalizedTransport == "" {
+		return fmt.Errorf("invalid transport mode %q", *transportMode)
+	}
+	normalizedRelayMode := config.NormalizeRelayMode(*relayMode)
+	if normalizedRelayMode == "" {
+		return fmt.Errorf("invalid relay mode %q", *relayMode)
 	}
 	for _, addr := range bootstraps {
 		if err := transfer.ValidateIPv6Address(addr); err != nil {
@@ -197,9 +219,13 @@ func runInit(args []string) error {
 	cfg.Node.Name = *name
 	cfg.Node.ListenAddr = *listenAddr
 	cfg.Node.AdvertiseAddr = *advertiseAddr
+	cfg.Node.TransportMode = normalizedTransport
 	cfg.Node.HideEndpoint = *hiddenNode
+	cfg.Node.RelayMode = normalizedRelayMode
+	cfg.Node.RelayResourcePercent = config.NormalizeRelayResourcePercent(*relayPercent)
 	cfg.Node.DataDir = *dataDir
 	cfg.Node.DownloadDir = *downloadDir
+	cfg.Node.FileReceiveMode = config.NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
 	if len(bootstraps) > 0 {
 		cfg.Node.BootstrapAddrs = append([]string(nil), bootstraps...)
 	}
@@ -239,45 +265,126 @@ func runList(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("\n[ PEERS ]")
 	names, _, err := store.ListPeers()
 	if err != nil {
 		return err
 	}
+	printSectionHeader("PEERS", len(names))
 	for _, n := range names {
 		fmt.Printf("  %-15s configured\n", n)
 	}
-	fmt.Println("\n[ LOCAL SERVICES ]")
-	for name, svc := range cfg.Services {
-		mode := "DIRECT"
-		if svc.IsHidden {
-			mode = "HIDDEN"
-		}
-		label := name
-		if svc.IsHidden && svc.Alias != "" {
-			label = svc.Alias
-		}
-		fmt.Printf("  %-15s %s\n", label, mode)
+	if len(names) == 0 {
+		fmt.Println("  (none)")
 	}
 
-	fmt.Println("\n[ DISCOVERY ]")
+	serviceNames, localServices, err := store.ListServices()
+	if err != nil {
+		return err
+	}
+	localPublicCount := 0
+	localHiddenCount := 0
+	for _, name := range serviceNames {
+		if localServices[name].IsHidden {
+			localHiddenCount++
+		} else {
+			localPublicCount++
+		}
+	}
+	if !*hiddenOnly {
+		printSectionHeader("LOCAL PUBLIC SERVICES", localPublicCount)
+		printed := 0
+		for _, name := range serviceNames {
+			svc := localServices[name]
+			if svc.IsHidden {
+				continue
+			}
+			fmt.Printf("  %-15s target=%s\n", name, svc.Target)
+			printed++
+		}
+		if printed == 0 {
+			fmt.Println("  (none)")
+		}
+	}
+
+	printSectionHeader("LOCAL HIDDEN SERVICES", localHiddenCount)
+	printedHidden := 0
+	for _, name := range serviceNames {
+		svc := localServices[name]
+		if !svc.IsHidden {
+			continue
+		}
+		label := svc.Alias
+		if label == "" {
+			label = name
+		}
+		fmt.Printf("  %-15s alias=%s profile=%s\n", name, label, record.NormalizeHiddenProfile(svc.HiddenProfile))
+		printedHidden++
+	}
+	if printedHidden == 0 {
+		fmt.Println("  (none)")
+	}
+
 	reg, err := loadLocalRegistry(cfg.Node.DataDir)
 	if err != nil {
 		return err
 	}
 	recs, svcs := reg.Snapshot()
+	printSectionHeader("DISCOVERED NODES", len(recs))
 	for _, r := range recs {
 		fmt.Printf("  %-15s discovered\n", r.NodeName)
 	}
-	for _, s := range svcs {
-		switch {
-		case s.IsHidden && *hiddenOnly:
-			fmt.Printf("  hidden %-15s profile=%s\n", record.ServiceLookupKey(s), record.NormalizeHiddenProfile(s.HiddenProfile))
-		case !s.IsHidden && *userFilter != "" && s.NodeName == *userFilter:
-			fmt.Printf("  user=%-12s service=%-12s DIRECT\n", s.NodeName, s.ServiceName)
+	if len(recs) == 0 {
+		fmt.Println("  (none)")
+	}
+
+	publicPrinted := 0
+	hiddenPrinted := 0
+	if !*hiddenOnly {
+		for _, s := range svcs {
+			if s.IsHidden {
+				continue
+			}
+			if *userFilter != "" && s.NodeName != *userFilter {
+				continue
+			}
+			publicPrinted++
+		}
+		printSectionHeader("DISCOVERED PUBLIC SERVICES", publicPrinted)
+		for _, s := range svcs {
+			if s.IsHidden {
+				continue
+			}
+			if *userFilter != "" && s.NodeName != *userFilter {
+				continue
+			}
+			fmt.Printf("  %-15s node=%s\n", record.FullServiceName(s.NodeName, s.ServiceName), s.NodeName)
+		}
+		if publicPrinted == 0 {
+			fmt.Println("  (none)")
 		}
 	}
+
+	for _, s := range svcs {
+		if !s.IsHidden {
+			continue
+		}
+		hiddenPrinted++
+	}
+	printSectionHeader("DISCOVERED HIDDEN ALIASES", hiddenPrinted)
+	for _, s := range svcs {
+		if !s.IsHidden {
+			continue
+		}
+		fmt.Printf("  %-15s profile=%s\n", record.ServiceLookupKey(s), record.NormalizeHiddenProfile(s.HiddenProfile))
+	}
+	if hiddenPrinted == 0 {
+		fmt.Println("  (none)")
+	}
 	return nil
+}
+
+func printSectionHeader(title string, count int) {
+	fmt.Printf("\n== %s (%d) ==\n", title, count)
 }
 
 func runNode(ctx context.Context, args []string) error {
@@ -320,14 +427,11 @@ func runNode(ctx context.Context, args []string) error {
 	if *downloadDir == "" {
 		*downloadDir = cfgFile.Node.DownloadDir
 	}
-	pidPath, err := config.RuntimePIDPath(store.Path())
+	lock, err := acquireNodeLock(store.Path())
 	if err != nil {
 		return err
 	}
-	if err := writePIDFile(pidPath, os.Getpid()); err != nil {
-		return err
-	}
-	defer os.Remove(pidPath)
+	defer lock.Close()
 
 	reloadCh := make(chan struct{}, 1)
 	sigCh := make(chan os.Signal, 1)
@@ -355,16 +459,32 @@ func runNode(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	controlInfoPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
 
 	cfg := node.Config{
-		Name: *nodeName, NodeID: id.NodeID, ListenAddr: *listenAddr,
-		AdvertiseAddr: cfgFile.Node.AdvertiseAddr,
-		HideEndpoint:  cfgFile.Node.HideEndpoint,
-		DataDir:       *dataDir, ReceiveDir: *downloadDir, ConfigPath: store.Path(), Identity: id,
-		DHT: dht.NewServer(id.NodeID), BootstrapAddrs: cfgFile.Node.BootstrapAddrs,
-		Services: services,
-		Registry: registry,
-		Reload:   reloadCh,
+		Name:                 *nodeName,
+		NodeID:               id.NodeID,
+		ListenAddr:           *listenAddr,
+		AdvertiseAddr:        cfgFile.Node.AdvertiseAddr,
+		TransportMode:        cfgFile.Node.TransportMode,
+		HideEndpoint:         cfgFile.Node.HideEndpoint,
+		RelayMode:            cfgFile.Node.RelayMode,
+		RelayResourcePercent: cfgFile.Node.RelayResourcePercent,
+		DataDir:              *dataDir,
+		ReceiveDir:           *downloadDir,
+		ConfigPath:           store.Path(),
+		ControlInfoPath:      controlInfoPath,
+		Identity:             id,
+		FileReceiveMode:      cfgFile.Node.FileReceiveMode,
+		AllowedFileSenders:   append([]string(nil), cfgFile.Node.AllowedFileSenders...),
+		DHT:                  dht.NewServer(id.NodeID),
+		BootstrapAddrs:       cfgFile.Node.BootstrapAddrs,
+		Services:             services,
+		Registry:             registry,
+		Reload:               reloadCh,
 		RefreshServices: func() map[string]string {
 			c, err := store.Load()
 			if err != nil {
@@ -391,17 +511,22 @@ func runReload(args []string) error {
 	if err != nil {
 		return err
 	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	if err := runtimectl.RequestReload(context.Background(), controlPath); err == nil {
+		fmt.Println("reload_sent\tmode=control")
+		return nil
+	}
+
 	pidPath, err := config.RuntimePIDPath(store.Path())
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(pidPath)
+	pid, err := readNodePID(pidPath)
 	if err != nil {
 		return fmt.Errorf("read node pid file: %w", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return fmt.Errorf("parse node pid: %w", err)
 	}
 	if err := syscall.Kill(pid, 0); err != nil {
 		return fmt.Errorf("check node process: %w", err)
@@ -409,7 +534,7 @@ func runReload(args []string) error {
 	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
 		return fmt.Errorf("signal node reload: %w", err)
 	}
-	fmt.Printf("reload_sent\tpid=%d\n", pid)
+	fmt.Printf("reload_sent\tmode=signal\tpid=%d\n", pid)
 	return nil
 }
 
@@ -476,7 +601,11 @@ func runConnect(ctx context.Context, args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{SelfAddr: cfg.Node.AdvertiseAddr})
+			conn, err := hidden.DialHiddenServiceWithOptions(rctx, serviceRec, reg, hidden.DialOptions{
+				SelfAddr:      cfg.Node.AdvertiseAddr,
+				Identity:      id,
+				TransportMode: cfg.Node.TransportMode,
+			})
 			if err != nil {
 				return nil, friendlyRelayPathError(err, "hidden-service mode")
 			}
@@ -489,14 +618,16 @@ func runConnect(ctx context.Context, args []string) error {
 				return nil, err
 			}
 			peers, _ := reg.Snapshot()
-			conn, err := onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
+			conn, err := onion.BuildAutomatedCircuit(rctx, serviceRec, peers, onion.ClientOptions{
+				Identity:      id,
+				TransportMode: cfg.Node.TransportMode,
+			})
 			if err != nil {
 				return nil, friendlyRelayPathError(err, "proxy mode")
 			}
 			return conn, nil
 		}
-		var d net.Dialer
-		return d.DialContext(rctx, "tcp6", serviceRec.Address)
+		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, serviceRec.Address)
 	}
 	fmt.Printf("tunnel_active\t%s\t%s\n", *localListen, finalSvc)
 	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, dialer)
@@ -612,6 +743,9 @@ func runPeer(args []string) error {
 		if *name == "" {
 			*name = prompt("Peer Name")
 		}
+		if err := record.ValidateNodeName(*name); err != nil {
+			return err
+		}
 		if *addr == "" {
 			*addr = prompt("Peer Address")
 		}
@@ -621,6 +755,11 @@ func runPeer(args []string) error {
 		}
 		return store.AddPeer(*name, *addr)
 	}
+	fs := flag.NewFlagSet("peer", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	store, err := config.NewStore("")
 	if err != nil {
 		return err
@@ -629,8 +768,12 @@ func runPeer(args []string) error {
 	if err != nil {
 		return err
 	}
+	printSectionHeader("PEER DIRECTORY", len(names))
 	for _, n := range names {
-		fmt.Printf("%s\t%s\n", n, peers[n].Address)
+		fmt.Printf("  %-15s %s\n", n, peerDirectoryState(peers[n].Address))
+	}
+	if len(names) == 0 {
+		fmt.Println("  (none)")
 	}
 	return nil
 }
@@ -712,6 +855,9 @@ func runSend(ctx context.Context, args []string) error {
 	if *nodeName == "" {
 		*nodeName = cfg.Node.Name
 	}
+	if err := record.ValidateNodeName(*nodeName); err != nil {
+		return err
+	}
 
 	addr := *addrFlag
 	if addr == "" {
@@ -728,14 +874,16 @@ func runSend(ctx context.Context, args []string) error {
 				return nil, err
 			}
 			peers, _ := reg.Snapshot()
-			conn, err := onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers)
+			conn, err := onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers, onion.ClientOptions{
+				Identity:      id,
+				TransportMode: cfg.Node.TransportMode,
+			})
 			if err != nil {
 				return nil, friendlyRelayPathError(err, "proxy mode")
 			}
 			return conn, nil
 		}
-		var d net.Dialer
-		return d.DialContext(rctx, "tcp6", addr)
+		return vxtransport.DialContext(rctx, cfg.Node.TransportMode, addr)
 	}
 	conn, err := dialer(ctx)
 	if err != nil {
@@ -748,6 +896,158 @@ func runSend(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("sent\t%s\n", res.FileName)
+	return nil
+}
+
+func runReceive(args []string) error {
+	if len(args) == 0 {
+		return runReceiveStatus(nil)
+	}
+	if args[0] == "status" {
+		return runReceiveStatus(args[1:])
+	}
+
+	switch args[0] {
+	case "allow":
+		return runReceiveAllow(args[1:])
+	case "deny":
+		return runReceiveDeny(args[1:])
+	case "disable":
+		return runReceiveDisable(args[1:])
+	default:
+		return fmt.Errorf("unknown receive subcommand %q", args[0])
+	}
+}
+
+func runReceiveStatus(args []string) error {
+	fs := flag.NewFlagSet("receive status", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("file_receive_mode\t%s\n", strings.ToUpper(cfg.Node.FileReceiveMode))
+	fmt.Printf("allowed_senders\t%d\n", len(cfg.Node.AllowedFileSenders))
+	for _, sender := range cfg.Node.AllowedFileSenders {
+		fmt.Printf("allow\t%s\n", sender)
+	}
+	return nil
+}
+
+func runReceiveAllow(args []string) error {
+	fs := flag.NewFlagSet("receive allow", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	all := fs.Bool("all", false, "allow files from any sender")
+	nodeName := fs.String("node", "", "allow files from one node name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *all == (*nodeName != "") {
+		return errors.New("receive allow requires exactly one of --all or --node")
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	if *all {
+		cfg.Node.FileReceiveMode = config.FileReceiveOpen
+		cfg.Node.AllowedFileSenders = nil
+		if err := store.Save(cfg); err != nil {
+			return err
+		}
+		fmt.Println("file_receive\tOPEN")
+		return nil
+	}
+
+	if err := record.ValidateNodeName(*nodeName); err != nil {
+		return err
+	}
+	cfg.Node.FileReceiveMode = config.FileReceiveTrusted
+	cfg.Node.AllowedFileSenders = append(cfg.Node.AllowedFileSenders, *nodeName)
+	if err := store.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("file_receive\tTRUSTED\nallow\t%s\n", *nodeName)
+	return nil
+}
+
+func runReceiveDeny(args []string) error {
+	fs := flag.NewFlagSet("receive deny", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	nodeName := fs.String("node", "", "deny files from one node name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *nodeName == "" {
+		return errors.New("receive deny requires --node")
+	}
+	if err := record.ValidateNodeName(*nodeName); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	filtered := cfg.Node.AllowedFileSenders[:0]
+	for _, sender := range cfg.Node.AllowedFileSenders {
+		if sender == *nodeName {
+			continue
+		}
+		filtered = append(filtered, sender)
+	}
+	cfg.Node.AllowedFileSenders = filtered
+	if len(cfg.Node.AllowedFileSenders) == 0 {
+		cfg.Node.FileReceiveMode = config.FileReceiveOff
+	}
+	if err := store.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("file_receive\t%s\ndeny\t%s\n", strings.ToUpper(cfg.Node.FileReceiveMode), *nodeName)
+	return nil
+}
+
+func runReceiveDisable(args []string) error {
+	fs := flag.NewFlagSet("receive disable", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Node.FileReceiveMode = config.FileReceiveOff
+	cfg.Node.AllowedFileSenders = nil
+	if err := store.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Println("file_receive\tOFF")
 	return nil
 }
 
@@ -766,11 +1066,26 @@ func runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	controlPath, err := config.RuntimeControlPath(store.Path())
+	if err != nil {
+		return err
+	}
+	if status, err := runtimectl.RequestStatus(ctx, controlPath); err == nil {
+		printRuntimeStatus("ONLINE", status)
+		return nil
+	}
 
 	probeAddr := statusProbeAddr(cfg)
-	conn, err := net.DialTimeout("tcp6", probeAddr, 500*time.Millisecond)
+	conn, err := vxtransport.DialTimeout(cfg.Node.TransportMode, probeAddr, 500*time.Millisecond)
 	if err != nil {
-		fmt.Printf("status\tOFFLINE\nlisten_addr\t%s\nprobe_addr\t%s\n", cfg.Node.ListenAddr, probeAddr)
+		printRuntimeStatus("OFFLINE", runtimectl.Status{
+			NodeName:        cfg.Node.Name,
+			EndpointPublish: endpointPublishMode(cfg.Node.HideEndpoint),
+			TransportConfig: cfg.Node.TransportMode,
+			TransportActive: vxtransport.EffectiveMode(cfg.Node.TransportMode),
+			RelayMode:       cfg.Node.RelayMode,
+			RelayPercent:    cfg.Node.RelayResourcePercent,
+		})
 		return nil
 	}
 	_ = conn.Close()
@@ -783,8 +1098,39 @@ func runStatus(ctx context.Context, args []string) error {
 		nodeCount = len(nodes)
 		serviceCount = len(services)
 	}
-	fmt.Printf("status\tONLINE\nlisten_addr\t%s\nprobe_addr\t%s\nregistry_nodes\t%d\nregistry_services\t%d\n", cfg.Node.ListenAddr, probeAddr, nodeCount, serviceCount)
+	printRuntimeStatus("ONLINE", runtimectl.Status{
+		NodeName:         cfg.Node.Name,
+		EndpointPublish:  endpointPublishMode(cfg.Node.HideEndpoint),
+		TransportConfig:  cfg.Node.TransportMode,
+		TransportActive:  vxtransport.EffectiveMode(cfg.Node.TransportMode),
+		RelayMode:        cfg.Node.RelayMode,
+		RelayPercent:     cfg.Node.RelayResourcePercent,
+		RegistryNodes:    nodeCount,
+		RegistryServices: serviceCount,
+	})
 	return nil
+}
+
+func printRuntimeStatus(label string, status runtimectl.Status) {
+	fmt.Printf("status\t%s\n", label)
+	if status.NodeName != "" {
+		fmt.Printf("node_name\t%s\n", status.NodeName)
+	}
+	if status.EndpointPublish != "" {
+		fmt.Printf("endpoint_publish\t%s\n", status.EndpointPublish)
+	}
+	fmt.Printf("transport_config\t%s\n", status.TransportConfig)
+	fmt.Printf("transport_active\t%s\n", status.TransportActive)
+	fmt.Printf("relay_mode\t%s\n", status.RelayMode)
+	fmt.Printf("relay_percent\t%d\n", status.RelayPercent)
+	if status.PID > 0 {
+		fmt.Printf("pid\t%d\n", status.PID)
+	}
+	if status.UptimeSeconds > 0 {
+		fmt.Printf("uptime_seconds\t%d\n", status.UptimeSeconds)
+	}
+	fmt.Printf("registry_nodes\t%d\n", status.RegistryNodes)
+	fmt.Printf("registry_services\t%d\n", status.RegistryServices)
 }
 
 func statusProbeAddr(cfg config.File) string {
@@ -828,8 +1174,11 @@ func runIdentity(args []string) error {
 	}
 	fmt.Printf("node_name\t%s\n", cfg.Node.Name)
 	fmt.Printf("node_id\t%s\n", id.NodeID)
-	fmt.Printf("listen_addr\t%s\n", cfg.Node.ListenAddr)
-	fmt.Printf("advertise_addr\t%s\n", cfg.Node.AdvertiseAddr)
+	fmt.Printf("endpoint_publish\t%s\n", endpointPublishMode(cfg.Node.HideEndpoint))
+	fmt.Printf("transport_config\t%s\n", cfg.Node.TransportMode)
+	fmt.Printf("transport_active\t%s\n", vxtransport.EffectiveMode(cfg.Node.TransportMode))
+	fmt.Printf("relay_mode\t%s\n", cfg.Node.RelayMode)
+	fmt.Printf("relay_percent\t%d\n", cfg.Node.RelayResourcePercent)
 	fmt.Printf("config_path\t%s\n", store.Path())
 	return nil
 }
@@ -891,12 +1240,37 @@ func runDebugRegistry(args []string) error {
 	fmt.Printf("node_records\t%d\n", len(nodes))
 	fmt.Printf("service_records\t%d\n", len(services))
 	for _, rec := range nodes {
-		fmt.Printf("node\t%s\t%s\t%s\n", rec.NodeName, rec.NodeID, rec.Address)
+		fmt.Printf("node\t%s\t%s\tendpoint=%s\n", rec.NodeName, rec.NodeID, endpointVisibilitySummary(rec.Address, false))
 	}
 	for _, svc := range services {
-		fmt.Printf("service\tkey=%s\tnode=%s\tservice=%s\taddr=%s\thidden=%v\n", record.ServiceLookupKey(svc), svc.NodeName, svc.ServiceName, svc.Address, svc.IsHidden)
+		fmt.Printf("service\tkey=%s\tnode=%s\tservice=%s\tendpoint=%s\thidden=%v\n", record.ServiceLookupKey(svc), svc.NodeName, svc.ServiceName, endpointVisibilitySummary(svc.Address, svc.IsHidden), svc.IsHidden)
 	}
 	return nil
+}
+
+func endpointPublishMode(hidden bool) string {
+	if hidden {
+		return "hidden"
+	}
+	return "published"
+}
+
+func peerDirectoryState(address string) string {
+	if address == "" {
+		return "missing"
+	}
+	return "configured"
+}
+
+func endpointVisibilitySummary(address string, isHidden bool) string {
+	switch {
+	case isHidden:
+		return "hidden"
+	case address != "":
+		return "sealed"
+	default:
+		return "missing"
+	}
 }
 
 func runDebugDHTGet(ctx context.Context, args []string) error {
@@ -1225,4 +1599,102 @@ func writePIDFile(path string, pid int) error {
 		return fmt.Errorf("create runtime directory: %w", err)
 	}
 	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", pid)), 0o644)
+}
+
+type nodeRuntimeLock struct {
+	file        *os.File
+	lockPath    string
+	pidPath     string
+	controlPath string
+}
+
+func acquireNodeLock(configPath string) (*nodeRuntimeLock, error) {
+	lockPath, err := config.RuntimeLockPath(configPath)
+	if err != nil {
+		return nil, err
+	}
+	pidPath, err := config.RuntimePIDPath(configPath)
+	if err != nil {
+		return nil, err
+	}
+	controlPath, err := config.RuntimeControlPath(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, fmt.Errorf("create runtime directory: %w", err)
+	}
+
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open runtime lock: %w", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, runningNodeError(pidPath)
+		}
+		return nil, fmt.Errorf("lock runtime state: %w", err)
+	}
+	if err := lockFile.Truncate(0); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("reset runtime lock: %w", err)
+	}
+	if _, err := lockFile.Seek(0, 0); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("seek runtime lock: %w", err)
+	}
+	if _, err := fmt.Fprintf(lockFile, "%d\n", os.Getpid()); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("write runtime lock: %w", err)
+	}
+	if err := lockFile.Sync(); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("sync runtime lock: %w", err)
+	}
+	if err := writePIDFile(pidPath, os.Getpid()); err != nil {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, err
+	}
+
+	return &nodeRuntimeLock{file: lockFile, lockPath: lockPath, pidPath: pidPath, controlPath: controlPath}, nil
+}
+
+func (l *nodeRuntimeLock) Close() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	_ = os.Remove(l.pidPath)
+	_ = os.Remove(l.controlPath)
+	_ = l.file.Truncate(0)
+	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	err := l.file.Close()
+	l.file = nil
+	_ = os.Remove(l.lockPath)
+	return err
+}
+
+func runningNodeError(pidPath string) error {
+	pid, err := readNodePID(pidPath)
+	if err == nil && pid > 0 {
+		return fmt.Errorf("vx6 node is already running in the background (pid %d). use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'", pid)
+	}
+	return errors.New("vx6 node is already running in the background. use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'")
+}
+
+func readNodePID(pidPath string) (int, error) {
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, err
+	}
+	return pid, nil
 }

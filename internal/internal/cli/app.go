@@ -618,7 +618,10 @@ func runConnect(ctx context.Context, args []string) error {
 				return nil, err
 			}
 			peers, _ := reg.Snapshot()
-			conn, err := onion.BuildAutomatedCircuit(rctx, serviceRec, peers)
+			conn, err := onion.BuildAutomatedCircuit(rctx, serviceRec, peers, onion.ClientOptions{
+				Identity:      id,
+				TransportMode: cfg.Node.TransportMode,
+			})
 			if err != nil {
 				return nil, friendlyRelayPathError(err, "proxy mode")
 			}
@@ -871,7 +874,10 @@ func runSend(ctx context.Context, args []string) error {
 				return nil, err
 			}
 			peers, _ := reg.Snapshot()
-			conn, err := onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers)
+			conn, err := onion.BuildAutomatedCircuit(rctx, record.ServiceRecord{Address: addr}, peers, onion.ClientOptions{
+				Identity:      id,
+				TransportMode: cfg.Node.TransportMode,
+			})
 			if err != nil {
 				return nil, friendlyRelayPathError(err, "proxy mode")
 			}
