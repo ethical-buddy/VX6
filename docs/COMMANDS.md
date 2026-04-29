@@ -108,6 +108,14 @@ Example:
 vx6 connect --service alice.ssh --listen 127.0.0.1:2222
 ```
 
+You can also put the service name first:
+
+```bash
+vx6 connect alice.ssh --listen 127.0.0.1:3333
+```
+
+`--listen` is the local port on your own machine. VX6 uses exactly the port you give here. `127.0.0.1:2222` is only the default when `--listen` is omitted.
+
 ### Connect to a Hidden Service
 
 ```bash

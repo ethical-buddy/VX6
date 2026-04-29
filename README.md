@@ -85,6 +85,8 @@ Connect from another node:
 ssh -p 2222 user@127.0.0.1
 ```
 
+`--listen` is the local port on your own machine. If you choose `127.0.0.1:3333`, VX6 listens on `3333`.
+
 ## Common Use Cases
 
 ### 1. Direct IPv6 Service Share
@@ -179,6 +181,7 @@ For systemd setup, see [docs/systemd.md](./docs/systemd.md).
 
 ## Documentation
 
+- [docs/USAGE.md](./docs/USAGE.md): plain-language usage guide
 - [docs/SETUP.md](./docs/SETUP.md): operator setup guide
 - [docs/COMMANDS.md](./docs/COMMANDS.md): full command reference
 - [docs/systemd.md](./docs/systemd.md): background service setup

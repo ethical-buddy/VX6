@@ -115,6 +115,8 @@ Connect to a published service:
 ./vx6 connect --service bob.ssh --listen 127.0.0.1:2222
 ```
 
+The `--listen` value is your local port on the client machine. You can change it to any free local port, for example `127.0.0.1:3333` or `127.0.0.1:9000`.
+
 Then use the local forwarded port:
 
 ```bash

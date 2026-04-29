@@ -412,10 +412,13 @@ func runConnect(ctx context.Context, args []string) error {
 	localListen := fs.String("listen", "127.0.0.1:2222", "local TCP listener address")
 	addrFlag := fs.String("addr", "", "direct VX6 node IPv6 address")
 	proxy := fs.Bool("proxy", false, "force proxy")
-	if err := fs.Parse(args); err != nil {
+	finalSvc, parseArgs := extractLeadingConnectService(args)
+	if err := fs.Parse(parseArgs); err != nil {
 		return err
 	}
-	finalSvc := *svc
+	if *svc != "" {
+		finalSvc = *svc
+	}
 	if finalSvc == "" && len(fs.Args()) > 0 {
 		finalSvc = fs.Args()[0]
 	}
@@ -481,6 +484,16 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("tunnel_active\t%s\t%s\n", *localListen, finalSvc)
 	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, id, dialer)
+}
+
+func extractLeadingConnectService(args []string) (string, []string) {
+	if len(args) == 0 {
+		return "", args
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return "", args
+	}
+	return args[0], args[1:]
 }
 
 func runService(args []string) error {

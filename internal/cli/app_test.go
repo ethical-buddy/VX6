@@ -49,3 +49,27 @@ func TestStatusProbeAddrKeepsConcreteListenAddress(t *testing.T) {
 		t.Fatalf("unexpected probe address %q", got)
 	}
 }
+
+func TestExtractLeadingConnectService(t *testing.T) {
+	t.Parallel()
+
+	service, rest := extractLeadingConnectService([]string{"bob.ssh", "--listen", "127.0.0.1:3333"})
+	if service != "bob.ssh" {
+		t.Fatalf("unexpected service %q", service)
+	}
+	if len(rest) != 2 || rest[0] != "--listen" || rest[1] != "127.0.0.1:3333" {
+		t.Fatalf("unexpected remaining args: %#v", rest)
+	}
+}
+
+func TestExtractLeadingConnectServiceKeepsFlagFirstForm(t *testing.T) {
+	t.Parallel()
+
+	service, rest := extractLeadingConnectService([]string{"--listen", "127.0.0.1:3333", "bob.ssh"})
+	if service != "" {
+		t.Fatalf("unexpected service %q", service)
+	}
+	if len(rest) != 3 || rest[0] != "--listen" || rest[2] != "bob.ssh" {
+		t.Fatalf("unexpected remaining args: %#v", rest)
+	}
+}
