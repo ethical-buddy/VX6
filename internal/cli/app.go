@@ -345,6 +345,8 @@ func runDiscover(ctx context.Context, args []string) error {
 		return runDiscoverPublish(ctx, args[1:])
 	case "resolve":
 		return runDiscoverResolve(ctx, args[1:])
+	case "list":
+		return runDiscoverList(args[1:])
 	default:
 		return fmt.Errorf("unknown discover subcommand %q", args[0])
 	}
@@ -429,9 +431,6 @@ func runDiscoverResolve(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *via == "" {
-		return errors.New("discover resolve requires --via")
-	}
 	if (*name == "" && *nodeID == "") || (*name != "" && *nodeID != "") {
 		return errors.New("discover resolve requires exactly one of --name or --node-id")
 	}
@@ -440,15 +439,33 @@ func runDiscoverResolve(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	bootstrapAddr, err := resolveAddress(store, *via)
-	if err != nil {
-		return err
+
+	var rec record.EndpointRecord
+	if *via != "" {
+		bootstrapAddr, err := resolveAddress(store, *via)
+		if err != nil {
+			return err
+		}
+		rec, err = discovery.Resolve(ctx, bootstrapAddr, *name, *nodeID)
+		if err != nil {
+			return err
+		}
+	} else {
+		// Resolve from local registry cache
+		cfg, err := store.Load()
+		if err != nil {
+			return err
+		}
+		registry, err := loadLocalRegistry(cfg.Node.DataDir)
+		if err != nil {
+			return err
+		}
+		rec, err = registry.ResolveLocal(*name, *nodeID)
+		if err != nil {
+			return fmt.Errorf("node not found in local registry; use --via to resolve from network: %w", err)
+		}
 	}
 
-	rec, err := discovery.Resolve(ctx, bootstrapAddr, *name, *nodeID)
-	if err != nil {
-		return err
-	}
 	data, err := record.JSON(rec)
 	if err != nil {
 		return err
@@ -916,8 +933,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 bootstrap add --addr [ipv6]:port")
 	fmt.Fprintln(w, "  vx6 bootstrap list")
 	fmt.Fprintln(w, "  vx6 connect --service <node.service> [--listen 127.0.0.1:2222]")
+	fmt.Fprintln(w, "  vx6 discover list")
 	fmt.Fprintln(w, "  vx6 discover publish --via <peer-name|[ipv6]:port> [--addr [ipv6]:port]")
-	fmt.Fprintln(w, "  vx6 discover resolve --via <peer-name|[ipv6]:port> (--name <node-name> | --node-id <node-id>) [--save-peer]")
+	fmt.Fprintln(w, "  vx6 discover resolve [--via <peer-name|[ipv6]:port>] (--name <node-name> | --node-id <node-id>) [--save-peer]")
 	fmt.Fprintln(w, "  vx6 init --name <node-name> [--listen [::]:4242] [--advertise [ipv6]:port] [--bootstrap [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 identity show")
 	fmt.Fprintln(w, "  vx6 node [--name <node-name>] [--listen [::]:4242] [--data-dir ./data/inbox]")
@@ -927,4 +945,45 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 service add --name <service> --target 127.0.0.1:22")
 	fmt.Fprintln(w, "  vx6 service list")
 	fmt.Fprintln(w, "  vx6 send [--name <node-name>] --file <path> (--addr [ipv6]:port | --to <peer-name>)")
+}
+
+func runDiscoverList(args []string) error {
+	fs := flag.NewFlagSet("discover list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	configPath := fs.String("config", "", "path to the VX6 config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore(*configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	registry, err := loadLocalRegistry(cfg.Node.DataDir)
+	if err != nil {
+		return err
+	}
+
+	records, services := registry.Snapshot()
+	if len(records) > 0 {
+		fmt.Fprintln(os.Stdout, "Nodes in Registry Cache:")
+		for _, rec := range records {
+			fmt.Fprintf(os.Stdout, "  %s\t%s\t%s\n", rec.NodeName, rec.Address, rec.NodeID)
+		}
+	} else {
+		fmt.Fprintln(os.Stdout, "No nodes in registry cache.")
+	}
+
+	if len(services) > 0 {
+		fmt.Fprintln(os.Stdout, "\nServices in Registry Cache:")
+		for _, rec := range services {
+			fmt.Fprintf(os.Stdout, "  %s.%s\t%s\n", rec.NodeName, rec.ServiceName, rec.Address)
+		}
+	}
+	return nil
 }
