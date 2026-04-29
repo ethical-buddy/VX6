@@ -12,6 +12,7 @@ const (
 	KindFileTransfer byte = 1
 	KindDiscoveryReq byte = 2
 	KindDiscoveryRes byte = 3
+	KindServiceConn  byte = 4
 )
 
 func WriteHeader(w io.Writer, kind byte) error {

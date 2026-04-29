@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
@@ -14,8 +15,18 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/node"
 	"github.com/vx6/vx6/internal/record"
+	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
 )
+
+type stringListFlag []string
+
+func (s *stringListFlag) String() string { return fmt.Sprint([]string(*s)) }
+
+func (s *stringListFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
 
 func Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
@@ -24,6 +35,10 @@ func Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "bootstrap":
+		return runBootstrap(args[1:])
+	case "connect":
+		return runConnect(ctx, args[1:])
 	case "discover":
 		return runDiscover(ctx, args[1:])
 	case "identity":
@@ -36,6 +51,8 @@ func Run(ctx context.Context, args []string) error {
 		return runPeer(args[1:])
 	case "record":
 		return runRecord(args[1:])
+	case "service":
+		return runService(args[1:])
 	case "send":
 		return runSend(ctx, args[1:])
 	case "-h", "--help", "help":
@@ -53,8 +70,11 @@ func runInit(args []string) error {
 
 	name := fs.String("name", "", "local human-readable node name")
 	listenAddr := fs.String("listen", "[::]:4242", "default IPv6 listen address in [addr]:port form")
+	advertiseAddr := fs.String("advertise", "", "public IPv6 address in [addr]:port form for discovery records")
 	dataDir := fs.String("data-dir", "./data/inbox", "default directory for received files")
 	configPath := fs.String("config", "", "path to the VX6 config file")
+	var bootstraps stringListFlag
+	fs.Var(&bootstraps, "bootstrap", "bootstrap IPv6 address in [addr]:port form; repeatable")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -64,6 +84,16 @@ func runInit(args []string) error {
 	}
 	if err := transfer.ValidateIPv6Address(*listenAddr); err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)
+	}
+	if *advertiseAddr != "" {
+		if err := transfer.ValidateIPv6Address(*advertiseAddr); err != nil {
+			return fmt.Errorf("invalid advertise address: %w", err)
+		}
+	}
+	for _, addr := range bootstraps {
+		if err := transfer.ValidateIPv6Address(addr); err != nil {
+			return fmt.Errorf("invalid bootstrap address %q: %w", addr, err)
+		}
 	}
 
 	store, err := config.NewStore(*configPath)
@@ -81,7 +111,11 @@ func runInit(args []string) error {
 	}
 	cfg.Node.Name = *name
 	cfg.Node.ListenAddr = *listenAddr
+	cfg.Node.AdvertiseAddr = *advertiseAddr
 	cfg.Node.DataDir = *dataDir
+	if len(bootstraps) > 0 {
+		cfg.Node.BootstrapAddrs = append([]string(nil), bootstraps...)
+	}
 
 	if err := store.Save(cfg); err != nil {
 		return err
@@ -145,18 +179,27 @@ func runSend(ctx context.Context, args []string) error {
 	}
 
 	if *peerName != "" {
-		peer, err := store.ResolvePeer(*peerName)
+		resolvedAddr, err := resolvePeerForSend(ctx, store, cfg, *peerName)
 		if err != nil {
 			return err
 		}
-		*address = peer.Address
+		*address = resolvedAddr
 	}
 
-	result, err := transfer.SendFile(ctx, transfer.SendRequest{
+	req := transfer.SendRequest{
 		NodeName: *nodeName,
 		FilePath: *filePath,
 		Address:  *address,
-	})
+	}
+
+	result, err := transfer.SendFile(ctx, req)
+	if err != nil && *peerName != "" {
+		resolvedAddr, resolveErr := refreshPeerFromBootstraps(ctx, store, cfg, *peerName)
+		if resolveErr == nil && resolvedAddr != req.Address {
+			req.Address = resolvedAddr
+			result, err = transfer.SendFile(ctx, req)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -216,14 +259,64 @@ func runNode(ctx context.Context, args []string) error {
 	}
 
 	cfg := node.Config{
-		Name:       *nodeName,
-		NodeID:     id.NodeID,
-		ListenAddr: *listenAddr,
-		DataDir:    *dataDir,
-		Registry:   discovery.NewRegistry(),
+		Name:           *nodeName,
+		NodeID:         id.NodeID,
+		ListenAddr:     *listenAddr,
+		AdvertiseAddr:  cfgFile.Node.AdvertiseAddr,
+		DataDir:        *dataDir,
+		BootstrapAddrs: append([]string(nil), cfgFile.Node.BootstrapAddrs...),
+		Services:       make(map[string]string, len(cfgFile.Services)),
+		Identity:       id,
 	}
+	for name, svc := range cfgFile.Services {
+		cfg.Services[name] = svc.Target
+	}
+	registry, err := discovery.NewRegistry(filepath.Join(*dataDir, "registry.json"))
+	if err != nil {
+		return err
+	}
+	cfg.Registry = registry
 
 	return node.Run(ctx, os.Stdout, cfg)
+}
+
+func runConnect(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	serviceName := fs.String("service", "", "full service name in node.service form")
+	localListen := fs.String("listen", "127.0.0.1:2222", "local TCP listener address")
+	configPath := fs.String("config", "", "path to the VX6 config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *serviceName == "" {
+		return errors.New("connect requires --service")
+	}
+
+	store, err := config.NewStore(*configPath)
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	serviceRec, err := resolveServiceFromBootstraps(ctx, cfg.Node.BootstrapAddrs, *serviceName)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "forwarding %s to %s on %s\n", *serviceName, serviceRec.Address, *localListen)
+
+	return serviceproxy.ServeLocalForward(ctx, *localListen, serviceRec, func(resolveCtx context.Context) (string, error) {
+		refreshed, err := resolveServiceFromBootstraps(resolveCtx, cfg.Node.BootstrapAddrs, *serviceName)
+		if err != nil {
+			return "", err
+		}
+		return refreshed.Address, nil
+	})
 }
 
 func runDiscover(ctx context.Context, args []string) error {
@@ -268,7 +361,10 @@ func runDiscoverPublish(ctx context.Context, args []string) error {
 		return errors.New("node name is not configured; run vx6 init first")
 	}
 	if *address == "" {
-		*address = cfg.Node.ListenAddr
+		*address = cfg.Node.AdvertiseAddr
+	}
+	if *address == "" {
+		return errors.New("discover publish requires --addr or a configured advertise address")
 	}
 
 	identityStore, err := identity.NewStoreForConfig(store.Path())
@@ -391,6 +487,7 @@ func runIdentityShow(args []string) error {
 	fmt.Fprintf(os.Stdout, "node_name\t%s\n", cfg.Node.Name)
 	fmt.Fprintf(os.Stdout, "node_id\t%s\n", id.NodeID)
 	fmt.Fprintf(os.Stdout, "listen_addr\t%s\n", cfg.Node.ListenAddr)
+	fmt.Fprintf(os.Stdout, "advertise_addr\t%s\n", cfg.Node.AdvertiseAddr)
 	fmt.Fprintf(os.Stdout, "identity_file\t%s\n", identityStore.Path())
 	return nil
 }
@@ -469,6 +566,72 @@ func runPeerList(args []string) error {
 	return nil
 }
 
+func runBootstrap(args []string) error {
+	if len(args) == 0 {
+		return errors.New("missing bootstrap subcommand")
+	}
+
+	switch args[0] {
+	case "add":
+		return runBootstrapAdd(args[1:])
+	case "list":
+		return runBootstrapList(args[1:])
+	default:
+		return fmt.Errorf("unknown bootstrap subcommand %q", args[0])
+	}
+}
+
+func runBootstrapAdd(args []string) error {
+	fs := flag.NewFlagSet("bootstrap add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	address := fs.String("addr", "", "bootstrap IPv6 address in [addr]:port form")
+	configPath := fs.String("config", "", "path to the VX6 config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *address == "" {
+		return errors.New("bootstrap add requires --addr")
+	}
+	if err := transfer.ValidateIPv6Address(*address); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore(*configPath)
+	if err != nil {
+		return err
+	}
+	if err := store.AddBootstrap(*address); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "saved bootstrap %s\n", *address)
+	return nil
+}
+
+func runBootstrapList(args []string) error {
+	fs := flag.NewFlagSet("bootstrap list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	configPath := fs.String("config", "", "path to the VX6 config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore(*configPath)
+	if err != nil {
+		return err
+	}
+	addresses, err := store.ListBootstraps()
+	if err != nil {
+		return err
+	}
+	for _, addr := range addresses {
+		fmt.Fprintln(os.Stdout, addr)
+	}
+	return nil
+}
+
 func runRecord(args []string) error {
 	if len(args) == 0 {
 		return errors.New("missing record subcommand")
@@ -480,6 +643,76 @@ func runRecord(args []string) error {
 	default:
 		return fmt.Errorf("unknown record subcommand %q", args[0])
 	}
+}
+
+func runService(args []string) error {
+	if len(args) == 0 {
+		return errors.New("missing service subcommand")
+	}
+
+	switch args[0] {
+	case "add":
+		return runServiceAdd(args[1:])
+	case "list":
+		return runServiceList(args[1:])
+	default:
+		return fmt.Errorf("unknown service subcommand %q", args[0])
+	}
+}
+
+func runServiceAdd(args []string) error {
+	fs := flag.NewFlagSet("service add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	name := fs.String("name", "", "local service name, for example ssh")
+	target := fs.String("target", "", "local TCP target such as 127.0.0.1:22")
+	configPath := fs.String("config", "", "path to the VX6 config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("service add requires --name")
+	}
+	if *target == "" {
+		return errors.New("service add requires --target")
+	}
+	if err := record.ValidateServiceName(*name); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore(*configPath)
+	if err != nil {
+		return err
+	}
+	if err := store.AddService(*name, *target); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "saved service %q -> %s\n", *name, *target)
+	return nil
+}
+
+func runServiceList(args []string) error {
+	fs := flag.NewFlagSet("service list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	configPath := fs.String("config", "", "path to the VX6 config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore(*configPath)
+	if err != nil {
+		return err
+	}
+	names, services, err := store.ListServices()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		fmt.Fprintf(os.Stdout, "%s\t%s\n", name, services[name].Target)
+	}
+	return nil
 }
 
 func runRecordPrint(args []string) error {
@@ -545,17 +778,56 @@ func resolveAddress(store *config.Store, value string) (string, error) {
 	return peer.Address, nil
 }
 
+func resolvePeerForSend(ctx context.Context, store *config.Store, cfgFile config.File, name string) (string, error) {
+	peer, err := store.ResolvePeer(name)
+	if err == nil {
+		return peer.Address, nil
+	}
+
+	return refreshPeerFromBootstraps(ctx, store, cfgFile, name)
+}
+
+func refreshPeerFromBootstraps(ctx context.Context, store *config.Store, cfgFile config.File, name string) (string, error) {
+	for _, bootstrapAddr := range cfgFile.Node.BootstrapAddrs {
+		rec, err := discovery.Resolve(ctx, bootstrapAddr, name, "")
+		if err != nil {
+			continue
+		}
+		if err := store.AddPeer(rec.NodeName, rec.Address); err != nil {
+			return "", err
+		}
+		return rec.Address, nil
+	}
+
+	return "", fmt.Errorf("peer %q not found locally and could not be resolved from configured bootstraps", name)
+}
+
+func resolveServiceFromBootstraps(ctx context.Context, bootstraps []string, service string) (record.ServiceRecord, error) {
+	for _, bootstrapAddr := range bootstraps {
+		rec, err := discovery.ResolveService(ctx, bootstrapAddr, service)
+		if err == nil {
+			return rec, nil
+		}
+	}
+	return record.ServiceRecord{}, fmt.Errorf("service %q could not be resolved from configured bootstraps", service)
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "VX6")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  vx6 bootstrap add --addr [ipv6]:port")
+	fmt.Fprintln(w, "  vx6 bootstrap list")
+	fmt.Fprintln(w, "  vx6 connect --service <node.service> [--listen 127.0.0.1:2222]")
 	fmt.Fprintln(w, "  vx6 discover publish --via <peer-name|[ipv6]:port> [--addr [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 discover resolve --via <peer-name|[ipv6]:port> (--name <node-name> | --node-id <node-id>) [--save-peer]")
-	fmt.Fprintln(w, "  vx6 init --name <node-name> [--listen [::]:4242] [--data-dir ./data/inbox]")
+	fmt.Fprintln(w, "  vx6 init --name <node-name> [--listen [::]:4242] [--advertise [ipv6]:port] [--bootstrap [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 identity show")
 	fmt.Fprintln(w, "  vx6 node [--name <node-name>] [--listen [::]:4242] [--data-dir ./data/inbox]")
 	fmt.Fprintln(w, "  vx6 peer add --name <peer-name> --addr [ipv6]:port")
 	fmt.Fprintln(w, "  vx6 peer list")
 	fmt.Fprintln(w, "  vx6 record print [--addr [ipv6]:port] [--ttl 15m]")
+	fmt.Fprintln(w, "  vx6 service add --name <service> --target 127.0.0.1:22")
+	fmt.Fprintln(w, "  vx6 service list")
 	fmt.Fprintln(w, "  vx6 send [--name <node-name>] --file <path> (--addr [ipv6]:port | --to <peer-name>)")
 }
