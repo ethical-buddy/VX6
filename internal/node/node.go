@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -25,6 +26,14 @@ import (
 	"github.com/vx6/vx6/internal/secure"
 	"github.com/vx6/vx6/internal/serviceproxy"
 	"github.com/vx6/vx6/internal/transfer"
+)
+
+const (
+	syncCycleInterval   = 30 * time.Second
+	syncTargetTimeout   = 2 * time.Second
+	syncProbeTimeout    = 1 * time.Second
+	syncMaxRounds       = 3
+	syncParallelTargets = 6
 )
 
 type ServiceRefresher func() map[string]string
@@ -259,70 +268,14 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			_ = liveCfg.Registry.Import([]record.EndpointRecord{rec}, nil)
 		}
 
-		targets := map[string]struct{}{}
-		for _, a := range dnsSeeds {
-			targets[a] = struct{}{}
-		}
-		for _, a := range liveCfg.BootstrapAddrs {
-			targets[a] = struct{}{}
-		}
 		nodes, _ := liveCfg.Registry.Snapshot()
 		seedDHTRouting(liveCfg.DHT, liveCfg.BootstrapAddrs, nodes)
-		for _, nodeRec := range nodes {
-			if nodeRec.Address != "" {
-				targets[nodeRec.Address] = struct{}{}
-			}
-		}
-
-		synced := map[string]struct{}{}
-		syncTarget := func(addr string) {
-			if addr == "" {
-				return
-			}
-			if _, ok := synced[addr]; ok {
-				return
-			}
-			synced[addr] = struct{}{}
-
-			fmt.Fprintf(log, "[SYNC] Connecting to target: %s\n", addr)
-			if !liveCfg.HideEndpoint {
-				_, err := discovery.Publish(ctx, addr, rec)
-				if err != nil {
-					fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
-				}
-			}
-
-			recs, svcs, err := discovery.Snapshot(ctx, addr)
-			if err != nil {
-				fmt.Fprintf(log, "[SYNC] Snapshot from %s failed: %v\n", addr, err)
-				return
-			}
-			_ = liveCfg.Registry.Import(recs, svcs)
-			seedDHTRouting(liveCfg.DHT, nil, recs)
-			fmt.Fprintf(log, "[SYNC] Successfully linked with %s. Received %d records.\n", addr, len(recs)+len(svcs))
-		}
-		for addr := range targets {
-			syncTarget(addr)
-		}
-
-		nodes, _ = liveCfg.Registry.Snapshot()
-		for _, nodeRec := range nodes {
-			if nodeRec.Address != "" {
-				targets[nodeRec.Address] = struct{}{}
-			}
-		}
-		for addr := range targets {
-			syncTarget(addr)
-		}
+		targets := syncMesh(ctx, log, liveCfg, rec, dnsSeeds, nodes)
 
 		nodes, _ = liveCfg.Registry.Snapshot()
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
 		serviceRecords, hiddenTopologies := buildServiceRecords(ctx, liveCfg, nodes)
-		for addr := range targets {
-			for _, srec := range serviceRecords {
-				_, _ = discovery.PublishService(ctx, addr, srec)
-			}
-		}
+		publishServicesToTargets(ctx, liveCfg, log, targets, serviceRecords)
 
 		for _, srec := range serviceRecords {
 			if !srec.IsHidden {
@@ -345,44 +298,13 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			}
 		}
 
-		nodes, _ = liveCfg.Registry.Snapshot()
-		for _, nodeRec := range nodes {
-			if nodeRec.Address == "" {
-				continue
-			}
-			targets[nodeRec.Address] = struct{}{}
-		}
-
-		for addr := range targets {
-			if addr == "" {
-				continue
-			}
-			if !liveCfg.HideEndpoint {
-				_, _ = discovery.Publish(ctx, addr, rec)
-			}
-			for _, srec := range serviceRecords {
-				_, _ = discovery.PublishService(ctx, addr, srec)
-			}
-		}
-
-		updatedNodes, _ := liveCfg.Registry.Snapshot()
-		for _, nodeRec := range updatedNodes {
-			if nodeRec.Address == "" {
-				continue
-			}
-			if !liveCfg.HideEndpoint {
-				_, _ = discovery.Publish(ctx, nodeRec.Address, rec)
-			}
-			for _, srec := range serviceRecords {
-				_, _ = discovery.PublishService(ctx, nodeRec.Address, srec)
-			}
-		}
+		publishRecordsToTargets(ctx, liveCfg, log, targets, rec, serviceRecords)
 
 		publishDHTRecords(ctx, liveCfg.DHT, rec, serviceRecords, liveCfg.HideEndpoint)
 	}
 
 	publishAndSync()
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(syncCycleInterval)
 	for {
 		select {
 		case <-ctx.Done():
@@ -522,6 +444,206 @@ func nodeAddresses(nodes []record.EndpointRecord) []string {
 		out = append(out, nodeRec.Address)
 	}
 	return out
+}
+
+func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec record.EndpointRecord, dnsSeeds []string, initialNodes []record.EndpointRecord) map[string]struct{} {
+	targets := map[string]struct{}{}
+	reachable := map[string]struct{}{}
+	for _, addr := range dnsSeeds {
+		addSyncTarget(targets, cfg.AdvertiseAddr, addr)
+	}
+	for _, addr := range cfg.BootstrapAddrs {
+		addSyncTarget(targets, cfg.AdvertiseAddr, addr)
+	}
+	for _, nodeRec := range initialNodes {
+		addSyncTarget(targets, cfg.AdvertiseAddr, nodeRec.Address)
+	}
+
+	synced := map[string]struct{}{}
+	for round := 0; round < syncMaxRounds; round++ {
+		pending := pendingSyncTargets(targets, synced)
+		if len(pending) == 0 {
+			break
+		}
+
+		results := syncTargetBatch(ctx, log, cfg, rec, pending)
+		for _, result := range results {
+			synced[result.addr] = struct{}{}
+			if result.err != nil {
+				continue
+			}
+			reachable[result.addr] = struct{}{}
+			_ = cfg.Registry.Import(result.records, result.services)
+			seedDHTRouting(cfg.DHT, nil, result.records)
+			for _, nodeRec := range result.records {
+				addSyncTarget(targets, cfg.AdvertiseAddr, nodeRec.Address)
+			}
+		}
+
+		nodes, _ := cfg.Registry.Snapshot()
+		for _, nodeRec := range nodes {
+			addSyncTarget(targets, cfg.AdvertiseAddr, nodeRec.Address)
+		}
+	}
+
+	return reachable
+}
+
+type syncResult struct {
+	addr     string
+	records  []record.EndpointRecord
+	services []record.ServiceRecord
+	err      error
+}
+
+func syncTargetBatch(ctx context.Context, log io.Writer, cfg Config, rec record.EndpointRecord, targets []string) []syncResult {
+	results := make([]syncResult, 0, len(targets))
+	if len(targets) == 0 {
+		return results
+	}
+
+	sem := make(chan struct{}, syncParallelTargets)
+	resultsCh := make(chan syncResult, len(targets))
+	var wg sync.WaitGroup
+
+	for _, addr := range targets {
+		addr := addr
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				resultsCh <- syncResult{addr: addr, err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
+			resultsCh <- syncTarget(ctx, log, cfg, rec, addr)
+		}()
+	}
+
+	wg.Wait()
+	close(resultsCh)
+
+	for result := range resultsCh {
+		results = append(results, result)
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].addr < results[j].addr
+	})
+	return results
+}
+
+func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec record.EndpointRecord, addr string) syncResult {
+	result := syncResult{addr: addr}
+	if addr == "" {
+		return result
+	}
+
+	if !probeSyncTarget(ctx, addr) {
+		fmt.Fprintf(log, "[SYNC] Skipping unreachable target: %s\n", addr)
+		result.err = fmt.Errorf("unreachable")
+		return result
+	}
+
+	fmt.Fprintf(log, "[SYNC] Connecting to target: %s\n", addr)
+	if !cfg.HideEndpoint {
+		publishCtx, cancel := withSyncTimeout(ctx)
+		_, err := discovery.Publish(publishCtx, addr, rec)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
+		}
+	}
+
+	snapshotCtx, cancel := withSyncTimeout(ctx)
+	recs, svcs, err := discovery.Snapshot(snapshotCtx, addr)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(log, "[SYNC] Snapshot from %s failed: %v\n", addr, err)
+		result.err = err
+		return result
+	}
+
+	result.records = recs
+	result.services = svcs
+	fmt.Fprintf(log, "[SYNC] Successfully linked with %s. Received %d records.\n", addr, len(recs)+len(svcs))
+	return result
+}
+
+func publishServicesToTargets(ctx context.Context, cfg Config, log io.Writer, targets map[string]struct{}, serviceRecords []record.ServiceRecord) {
+	for _, addr := range pendingSyncTargets(targets, nil) {
+		for _, srec := range serviceRecords {
+			publishCtx, cancel := withSyncTimeout(ctx)
+			_, err := discovery.PublishService(publishCtx, addr, srec)
+			cancel()
+			if err != nil {
+				fmt.Fprintf(log, "[SYNC] Service publish to %s failed: %v\n", addr, err)
+			}
+		}
+	}
+}
+
+func publishRecordsToTargets(ctx context.Context, cfg Config, log io.Writer, targets map[string]struct{}, rec record.EndpointRecord, serviceRecords []record.ServiceRecord) {
+	for _, addr := range pendingSyncTargets(targets, nil) {
+		if !cfg.HideEndpoint {
+			publishCtx, cancel := withSyncTimeout(ctx)
+			_, err := discovery.Publish(publishCtx, addr, rec)
+			cancel()
+			if err != nil {
+				fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
+			}
+		}
+		for _, srec := range serviceRecords {
+			publishCtx, cancel := withSyncTimeout(ctx)
+			_, err := discovery.PublishService(publishCtx, addr, srec)
+			cancel()
+			if err != nil {
+				fmt.Fprintf(log, "[SYNC] Service publish to %s failed: %v\n", addr, err)
+			}
+		}
+	}
+}
+
+func pendingSyncTargets(targets map[string]struct{}, synced map[string]struct{}) []string {
+	out := make([]string, 0, len(targets))
+	for addr := range targets {
+		if addr == "" {
+			continue
+		}
+		if synced != nil {
+			if _, ok := synced[addr]; ok {
+				continue
+			}
+		}
+		out = append(out, addr)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func addSyncTarget(targets map[string]struct{}, selfAddr, addr string) {
+	if addr == "" || addr == selfAddr {
+		return
+	}
+	targets[addr] = struct{}{}
+}
+
+func probeSyncTarget(ctx context.Context, addr string) bool {
+	dialCtx, cancel := context.WithTimeout(ctx, syncProbeTimeout)
+	defer cancel()
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func withSyncTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, syncTargetTimeout)
 }
 
 func runtimeConfig(base Config) Config {

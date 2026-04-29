@@ -18,6 +18,8 @@ import (
 
 const maxMessageSize = 64 * 1024
 
+const roundTripTimeout = 2 * time.Second
+
 type Registry struct {
 	mu            sync.RWMutex
 	path          string
@@ -434,12 +436,16 @@ func roundTrip(ctx context.Context, address string, req request) (response, erro
 		return response{}, err
 	}
 
+	dialCtx, cancel := context.WithTimeout(ctx, roundTripTimeout)
+	defer cancel()
+
 	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp6", address)
+	conn, err := dialer.DialContext(dialCtx, "tcp6", address)
 	if err != nil {
 		return response{}, fmt.Errorf("dial discovery endpoint %s: %w", address, err)
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(roundTripTimeout))
 
 	if err := proto.WriteHeader(conn, proto.KindDiscoveryReq); err != nil {
 		return response{}, err

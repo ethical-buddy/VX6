@@ -252,6 +252,29 @@ func TestBootstrapLossStillAllowsRepublish(t *testing.T) {
 	}, "DHT service update after bootstrap loss")
 }
 
+func TestDeadBootstrapIsSkippedWhileHealthyBootstrapStillSyncs(t *testing.T) {
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	baseDir := t.TempDir()
+	bootstrap := startVX6Node(t, rootCtx, filepath.Join(baseDir, "bootstrap"), "bootstrap", nil, nil)
+	deadBootstrap := startBlackholeServer(t, rootCtx)
+
+	owner := startVX6Node(
+		t,
+		rootCtx,
+		filepath.Join(baseDir, "owner"),
+		"owner",
+		[]string{deadBootstrap, bootstrap.listenAddr},
+		nil,
+	)
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		rec, err := discovery.Resolve(rootCtx, bootstrap.listenAddr, owner.name, "")
+		return err == nil && rec.Address == owner.listenAddr
+	}, "owner sync through healthy bootstrap while dead bootstrap is skipped")
+}
+
 func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping hidden-service integration test in short mode")
@@ -531,6 +554,35 @@ func startEchoServer(t *testing.T, ctx context.Context, addr string) {
 			}(conn)
 		}
 	}()
+}
+
+func startBlackholeServer(t *testing.T, ctx context.Context) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Fatalf("listen blackhole server: %v", err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				<-ctx.Done()
+			}(conn)
+		}
+	}()
+
+	return ln.Addr().String()
 }
 
 func reserveTCPAddr(t *testing.T, networkAddr string) string {
