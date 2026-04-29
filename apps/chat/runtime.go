@@ -246,12 +246,19 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, registry *d
 	}
 
 	if d := newDHTClient(cfg, registry); d != nil {
-		keys := serviceLookupKeys(service)
-		for _, key := range keys {
-			if val, err := d.RecursiveFindValue(ctx, key); err == nil && val != "" {
+		if strings.Contains(service, ".") {
+			if val, err := d.RecursiveFindValue(ctx, dht.ServiceKey(service)); err == nil && val != "" {
 				var rec record.ServiceRecord
 				if err := json.Unmarshal([]byte(val), &rec); err == nil {
 					if verifyErr := record.VerifyServiceRecord(rec, time.Now()); verifyErr == nil {
+						return rec, nil
+					}
+				}
+			}
+		} else {
+			for _, key := range dht.HiddenServiceLookupKeys(service, time.Now()) {
+				if val, err := d.RecursiveFindValue(ctx, key); err == nil && val != "" {
+					if rec, err := dht.DecodeHiddenServiceRecord(key, val, service, time.Now()); err == nil {
 						return rec, nil
 					}
 				}
@@ -302,7 +309,7 @@ func serviceLookupKeys(service string) []string {
 	if strings.Contains(service, ".") {
 		return []string{dht.ServiceKey(service)}
 	}
-	return append(dht.HiddenServiceLookupKeys(service, time.Now()), dht.ServiceKey(service))
+	return dht.HiddenServiceLookupKeys(service, time.Now())
 }
 
 func newDHTClient(cfg config.File, registry *discovery.Registry) *dht.Server {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -338,16 +339,60 @@ func TestHiddenServiceDescriptorKeyValidatesWrappedRecord(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	rec := mustServiceRecordForIdentity(t, id, "owner", "admin", "", true, "ghost", now)
-	payload := mustJSON(t, rec)
 	key := HiddenServiceKeyAt("ghost", now)
+	payload, err := EncodeHiddenServiceDescriptor(rec, key)
+	if err != nil {
+		t.Fatalf("encode hidden descriptor: %v", err)
+	}
+	if strings.Contains(payload, "\"alias\"") || strings.Contains(payload, "\"intro_points\"") || strings.Contains(payload, "\"address\"") {
+		t.Fatalf("expected encrypted hidden descriptor payload, got %s", payload)
+	}
 	signed := mustSignedValue(t, id, key, payload, now)
 
 	value, err := validateLookupValue(key, signed, now)
 	if err != nil {
 		t.Fatalf("validate hidden descriptor: %v", err)
 	}
-	if !value.verified || value.family != "hidden:"+id.NodeID+":ghost" {
+	if !value.verified || value.family != "hidden:"+id.NodeID+":"+hiddenServiceTag(rec) {
 		t.Fatalf("unexpected validated hidden descriptor: %+v", value)
+	}
+
+	decoded, err := DecodeHiddenServiceRecord(key, signed, "ghost", now)
+	if err != nil {
+		t.Fatalf("decode encrypted hidden descriptor: %v", err)
+	}
+	if decoded.Alias != rec.Alias || decoded.NodeID != rec.NodeID || decoded.ServiceName != rec.ServiceName {
+		t.Fatalf("unexpected decoded hidden descriptor: %+v", decoded)
+	}
+}
+
+func TestHiddenServiceDescriptorDecodeLegacyWrappedRecord(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	rec := mustServiceRecordForIdentity(t, id, "owner", "admin", "", true, "ghost", now)
+	key := HiddenServiceKeyAt("ghost", now)
+	payload := mustJSON(t, rec)
+	signed := mustSignedValue(t, id, key, payload, now)
+
+	value, err := validateLookupValue(key, signed, now)
+	if err != nil {
+		t.Fatalf("validate legacy hidden descriptor: %v", err)
+	}
+	if !value.verified || value.family != "hidden:"+id.NodeID+":"+hiddenServiceTag(rec) {
+		t.Fatalf("unexpected validated legacy hidden descriptor: %+v", value)
+	}
+
+	decoded, err := DecodeHiddenServiceRecord(key, signed, "ghost", now)
+	if err != nil {
+		t.Fatalf("decode legacy hidden descriptor: %v", err)
+	}
+	if decoded.Alias != rec.Alias || decoded.NodeID != rec.NodeID || decoded.ServiceName != rec.ServiceName {
+		t.Fatalf("unexpected decoded legacy hidden descriptor: %+v", decoded)
 	}
 }
 

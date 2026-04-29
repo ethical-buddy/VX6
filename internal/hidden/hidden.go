@@ -1473,6 +1473,12 @@ func proxyDuplex(a, b net.Conn) error {
 	copyPipe := func(dst io.Writer, src io.Reader) {
 		defer wg.Done()
 		_, err := io.Copy(dst, src)
+		if closer, ok := dst.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if closer, ok := src.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		errCh <- err
 	}
 
@@ -1483,7 +1489,7 @@ func proxyDuplex(a, b net.Conn) error {
 	close(errCh)
 
 	for err := range errCh {
-		if err != nil && err != io.EOF {
+		if err != nil && !isControlCloseError(err) && !strings.Contains(err.Error(), "closed pipe") {
 			return err
 		}
 	}

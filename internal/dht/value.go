@@ -462,10 +462,27 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 			originNodeID: rec.NodeID,
 		}, nil
 	case strings.HasPrefix(key, "hidden-desc/v1/"):
-		epoch, err := parseHiddenDescriptorEpoch(key)
-		if err != nil {
+		if _, err := parseHiddenDescriptorEpoch(key); err != nil {
 			return validatedValue{}, err
 		}
+		if desc, err := parseHiddenDescriptor(raw); err == nil {
+			issuedAt, expiresAt, version, err := recordTimes(desc.IssuedAt, desc.ExpiresAt)
+			if err != nil {
+				return validatedValue{}, err
+			}
+			return validatedValue{
+				storedRaw:    raw,
+				raw:          raw,
+				verified:     true,
+				family:       "hidden:" + desc.NodeID + ":" + desc.ServiceTag,
+				fingerprint:  hiddenDescriptorFingerprint(desc),
+				issuedAt:     issuedAt,
+				expiresAt:    expiresAt,
+				version:      version,
+				originNodeID: desc.NodeID,
+			}, nil
+		}
+
 		var rec record.ServiceRecord
 		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 			return validatedValue{}, fmt.Errorf("decode hidden service descriptor: %w", err)
@@ -476,6 +493,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 		if !rec.IsHidden || rec.Alias == "" {
 			return validatedValue{}, fmt.Errorf("hidden descriptor must wrap a hidden service with alias")
 		}
+		epoch, _ := parseHiddenDescriptorEpoch(key)
 		if expected := hiddenServiceKeyForEpoch(rec.Alias, epoch); expected != key {
 			return validatedValue{}, fmt.Errorf("hidden descriptor key %q does not match alias-derived blinded key %q", key, expected)
 		}
@@ -487,7 +505,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 			storedRaw:    raw,
 			raw:          raw,
 			verified:     true,
-			family:       "hidden:" + rec.NodeID + ":" + rec.Alias,
+			family:       "hidden:" + rec.NodeID + ":" + hiddenServiceTag(rec),
 			fingerprint:  serviceFingerprint(rec),
 			issuedAt:     issuedAt,
 			expiresAt:    expiresAt,

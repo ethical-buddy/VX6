@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,17 +93,17 @@ func TestSixteenNodeSwarmServiceAndProxy(t *testing.T) {
 		return json.Unmarshal([]byte(value), &got) == nil && got.ServiceName == "echo" && got.NodeName == owner.name
 	}, "service record in DHT")
 
-	endpointValue, err := dhtClient.RecursiveFindValue(rootCtx, dht.NodeNameKey(owner.name))
-	if err != nil {
-		t.Fatalf("resolve endpoint from DHT: %v", err)
-	}
 	var endpointRec record.EndpointRecord
-	if err := json.Unmarshal([]byte(endpointValue), &endpointRec); err != nil {
-		t.Fatalf("decode endpoint DHT value: %v", err)
-	}
-	if endpointRec.NodeName != owner.name || endpointRec.Address != owner.listenAddr {
-		t.Fatalf("unexpected endpoint record from DHT: %+v", endpointRec)
-	}
+	waitForCondition(t, 5*time.Second, func() bool {
+		endpointValue, err := dhtClient.RecursiveFindValue(rootCtx, dht.NodeNameKey(owner.name))
+		if err != nil || endpointValue == "" {
+			return false
+		}
+		if err := json.Unmarshal([]byte(endpointValue), &endpointRec); err != nil {
+			return false
+		}
+		return endpointRec.NodeName == owner.name && endpointRec.Address == owner.listenAddr
+	}, "endpoint record in DHT")
 
 	directAddr := reserveTCPAddr(t, "127.0.0.1:0")
 	directCtx, directCancel := context.WithCancel(rootCtx)
@@ -343,14 +344,23 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 
 	dhtClient := dht.NewServer("hidden-observer")
 	dhtClient.RT.AddNode(proto.NodeInfo{ID: "seed:" + bootstrap.listenAddr, Addr: bootstrap.listenAddr})
+	hiddenKey := dht.HiddenServiceKey(serviceName)
 	waitForCondition(t, 10*time.Second, func() bool {
-		value, err := dhtClient.RecursiveFindValue(rootCtx, dht.HiddenServiceKey(serviceName))
+		value, err := dhtClient.RecursiveFindValue(rootCtx, hiddenKey)
 		if err != nil || value == "" {
 			return false
 		}
-		var rec record.ServiceRecord
-		return json.Unmarshal([]byte(value), &rec) == nil && rec.IsHidden && len(rec.IntroPoints) == 3 && len(rec.StandbyIntroPoints) == 2 && rec.Address == ""
+		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceName, time.Now())
+		return err == nil && rec.IsHidden && len(rec.IntroPoints) == 3 && len(rec.StandbyIntroPoints) == 2 && rec.Address == ""
 	}, "hidden service descriptor in DHT")
+
+	hiddenValue, err := dhtClient.RecursiveFindValue(rootCtx, hiddenKey)
+	if err != nil {
+		t.Fatalf("resolve hidden descriptor from DHT: %v", err)
+	}
+	if strings.Contains(hiddenValue, "\"alias\"") || strings.Contains(hiddenValue, "\"intro_points\"") || strings.Contains(hiddenValue, "\"address\"") {
+		t.Fatalf("hidden DHT descriptor leaked plaintext service metadata: %s", hiddenValue)
+	}
 
 	if _, err := dhtClient.RecursiveFindValue(rootCtx, dht.ServiceKey(record.FullServiceName(owner.name, serviceRec.ServiceName))); err == nil {
 		t.Fatalf("hidden service should not be published under public service DHT key")
@@ -595,6 +605,7 @@ func TestOnionRelayInspectVisibility(t *testing.T) {
 type runningNode struct {
 	cancel     context.CancelFunc
 	configPath string
+	done       <-chan error
 	id         identity.Identity
 	dht        *dht.Server
 	name       string
@@ -695,8 +706,9 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		},
 	}
 
+	done := make(chan error, 1)
 	go func() {
-		_ = node.Run(nodeCtx, io.Discard, cfg)
+		done <- node.Run(nodeCtx, io.Discard, cfg)
 	}()
 
 	waitForCondition(t, 3*time.Second, func() bool {
@@ -708,9 +720,22 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		return true
 	}, fmt.Sprintf("%s listener", opts.name))
 
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("node %s shutdown: %v", opts.name, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Errorf("timed out waiting for node %s shutdown", opts.name)
+		}
+	})
+
 	return runningNode{
 		cancel:     cancel,
 		configPath: configPath,
+		done:       done,
 		id:         id,
 		dht:        cfg.DHT,
 		name:       opts.name,

@@ -3,9 +3,11 @@ package serviceproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/vx6/vx6/internal/identity"
@@ -117,6 +119,12 @@ func proxyDuplex(a, b io.ReadWriter) error {
 	copyPipe := func(dst io.Writer, src io.Reader) {
 		defer wg.Done()
 		_, err := io.Copy(dst, src)
+		if closer, ok := dst.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if closer, ok := src.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		errCh <- err
 	}
 
@@ -127,9 +135,19 @@ func proxyDuplex(a, b io.ReadWriter) error {
 	close(errCh)
 
 	for err := range errCh {
-		if err != nil && err != io.EOF {
+		if err != nil && !isProxyCloseError(err) {
 			return err
 		}
 	}
 	return nil
+}
+
+func isProxyCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return strings.Contains(err.Error(), "use of closed network connection") || strings.Contains(err.Error(), "closed pipe")
 }

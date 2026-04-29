@@ -177,6 +177,15 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		go func() {
 			defer wg.Done()
 			defer conn.Close()
+			done := make(chan struct{})
+			defer close(done)
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = conn.Close()
+				case <-done:
+				}
+			}()
 			reader := bufio.NewReader(conn)
 			kind, err := proto.ReadHeader(reader)
 			if err != nil {
@@ -486,14 +495,18 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, endpoint record.
 	}
 
 	for _, svc := range services {
+		if svc.IsHidden && svc.Alias != "" {
+			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, time.Now()) {
+				payload, err := dht.EncodeHiddenServiceDescriptor(svc, key)
+				if err != nil {
+					continue
+				}
+				_ = server.Store(ctx, key, payload)
+			}
+			continue
+		}
 		if data, err := json.Marshal(svc); err == nil {
 			payload := string(data)
-			if svc.IsHidden && svc.Alias != "" {
-				for _, key := range dht.HiddenServicePublishKeys(svc.Alias, time.Now()) {
-					_ = server.Store(ctx, key, payload)
-				}
-				continue
-			}
 			_ = server.Store(ctx, dht.ServiceKey(record.FullServiceName(svc.NodeName, svc.ServiceName)), payload)
 		}
 	}

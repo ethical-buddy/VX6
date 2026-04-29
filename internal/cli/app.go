@@ -1308,7 +1308,20 @@ func runDebugDHTGet(ctx context.Context, args []string) error {
 		if strings.Contains(*service, ".") {
 			*key = dht.ServiceKey(*service)
 		} else {
-			*key = dht.HiddenServiceKey(*service)
+			for _, hiddenKey := range dht.HiddenServiceLookupKeys(*service, time.Now()) {
+				value, err := client.RecursiveFindValue(ctx, hiddenKey)
+				if err != nil || value == "" {
+					continue
+				}
+				rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, *service, time.Now())
+				if err != nil {
+					continue
+				}
+				formatted, _ := json.MarshalIndent(rec, "", "  ")
+				fmt.Printf("%s\n", formatted)
+				return nil
+			}
+			return fmt.Errorf("hidden service %q not found", *service)
 		}
 	case *nodeName != "":
 		*key = dht.NodeNameKey(*nodeName)
@@ -1517,13 +1530,20 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 	}
 
 	if d := newDHTClient(cfg); d != nil {
-		keys := serviceLookupKeys(service)
-		for _, key := range keys {
-			if val, err := d.RecursiveFindValue(ctx, key); err == nil && val != "" {
+		if strings.Contains(service, ".") {
+			if val, err := d.RecursiveFindValue(ctx, dht.ServiceKey(service)); err == nil && val != "" {
 				var r record.ServiceRecord
 				if err := json.Unmarshal([]byte(val), &r); err == nil {
 					if verifyErr := record.VerifyServiceRecord(r, time.Now()); verifyErr == nil {
 						return r, nil
+					}
+				}
+			}
+		} else {
+			for _, key := range dht.HiddenServiceLookupKeys(service, time.Now()) {
+				if val, err := d.RecursiveFindValue(ctx, key); err == nil && val != "" {
+					if rec, err := dht.DecodeHiddenServiceRecord(key, val, service, time.Now()); err == nil {
+						return rec, nil
 					}
 				}
 			}
@@ -1551,7 +1571,7 @@ func serviceLookupKeys(service string) []string {
 	if strings.Contains(service, ".") {
 		return []string{dht.ServiceKey(service)}
 	}
-	return append(dht.HiddenServiceLookupKeys(service, time.Now()), dht.ServiceKey(service))
+	return dht.HiddenServiceLookupKeys(service, time.Now())
 }
 
 func discoveryCandidates(cfg config.File) []string {
