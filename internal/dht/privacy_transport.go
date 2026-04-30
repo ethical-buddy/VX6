@@ -9,6 +9,7 @@ import (
 
 	"github.com/vx6/vx6/internal/onion"
 	"github.com/vx6/vx6/internal/record"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const hiddenDescriptorRelayHopCount = 3
@@ -52,8 +53,7 @@ func (s *Server) dialDHTConn(ctx context.Context, addr, key, action string) (net
 	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	var dialer net.Dialer
-	return dialer.DialContext(dialCtx, "tcp6", addr)
+	return vxtransport.DialContext(dialCtx, vxtransport.ModeAuto, addr)
 }
 
 func (s *Server) dialHiddenDescriptorConn(ctx context.Context, targetAddr, key, action string) (net.Conn, bool, error) {

@@ -62,12 +62,12 @@ func NewStoreForConfig(configPath string) (*Store, error) {
 }
 
 func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
+	configRoot, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
+		return "", fmt.Errorf("resolve config directory: %w", err)
 	}
 
-	return filepath.Join(home, ".config", "vx6", "identity.json"), nil
+	return filepath.Join(configRoot, "vx6", "identity.json"), nil
 }
 
 func (s *Store) Path() string {

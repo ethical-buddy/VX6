@@ -388,7 +388,7 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	data := pageData{
 		VX6Bin:  s.vx6Bin,
-		Actions: actions,
+		Actions: availableActions(),
 		Last:    s.last,
 		Tasks:   tasks,
 	}
@@ -517,7 +517,7 @@ func (s *server) setLast(title string, args []string, output string, success boo
 }
 
 func actionByID(id string) (actionSpec, bool) {
-	for _, spec := range actions {
+	for _, spec := range availableActions() {
 		if spec.ID == id {
 			return spec, true
 		}
@@ -715,6 +715,20 @@ func detectVX6Binary() string {
 		return "vx6.exe"
 	}
 	return "vx6"
+}
+
+func availableActions() []actionSpec {
+	if runtime.GOOS == "linux" {
+		return actions
+	}
+	filtered := make([]actionSpec, 0, len(actions))
+	for _, action := range actions {
+		if action.ID == "ebpf_status" {
+			continue
+		}
+		filtered = append(filtered, action)
+	}
+	return filtered
 }
 
 func openBrowser(target string) error {

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -109,9 +110,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug dht-status")
-	fmt.Fprintln(w, "  vx6 debug ebpf-status")
-	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
-	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
+	fmt.Fprintln(w, "  vx6 debug ebpf-status            (Linux only)")
+	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE   (Linux only)")
+	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE   (Linux only)")
 	fmt.Fprintln(w, "  vx6-gui")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Working features:")
@@ -140,10 +141,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug dht-get --service hs-admin")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Storage:")
-	fmt.Fprintln(w, "  - Config: ~/.config/vx6/config.json")
-	fmt.Fprintln(w, "  - Identity: ~/.config/vx6/identity.json")
-	fmt.Fprintln(w, "  - Runtime state: ~/.local/share/vx6")
-	fmt.Fprintln(w, "  - Received files: ~/Downloads")
+	for _, line := range defaultStorageLines() {
+		fmt.Fprintln(w, line)
+	}
 }
 
 func prompt(label string) string {
@@ -1276,9 +1276,9 @@ func printDebugUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug dht-status")
-	fmt.Fprintln(w, "  vx6 debug ebpf-status [--iface IFACE]")
-	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
-	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
+	fmt.Fprintln(w, "  vx6 debug ebpf-status [--iface IFACE]       (Linux only)")
+	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE         (Linux only)")
+	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE         (Linux only)")
 }
 
 func runDebugRegistry(args []string) error {
@@ -1437,10 +1437,14 @@ func runDebugEBPFStatus(args ...string) error {
 	}
 
 	if *iface == "" {
+		warning := "embedded XDP program targets the legacy VX6 onion header and is not yet the active fast path for the current encrypted relay data path"
+		if runtime.GOOS != "linux" {
+			warning = "XDP/eBPF status and attach commands are Linux-only; this VX6 build uses the normal user-space TCP path on this platform"
+		}
 		printXDPStatus(onion.XDPStatus{
 			EmbeddedBytecode:     onion.IsEBPFAvailable(),
 			BytecodeSize:         len(onion.OnionRelayBytecode),
-			CompatibilityWarning: "embedded XDP program targets the legacy VX6 onion header and is not yet the active fast path for the current encrypted relay data path",
+			CompatibilityWarning: warning,
 		})
 		fmt.Println("attach_state\tuse --iface IFACE for live kernel status")
 		return nil
@@ -1540,6 +1544,33 @@ func defaultDownloadDirValue() string {
 		return filepath.Join(".", "Downloads")
 	}
 	return path
+}
+
+func defaultStorageLines() []string {
+	configPath, err := config.DefaultPath()
+	if err != nil || strings.TrimSpace(configPath) == "" {
+		configPath = filepath.Join(".", "config.json")
+	}
+	idStore, err := identity.NewStoreForConfig(configPath)
+	identityPath := filepath.Join(filepath.Dir(configPath), "identity.json")
+	if err == nil && strings.TrimSpace(idStore.Path()) != "" {
+		identityPath = idStore.Path()
+	}
+	dataDir := defaultDataDirValue()
+	downloadDir := defaultDownloadDirValue()
+	return []string{
+		"  - Config: " + configPath,
+		"  - Identity: " + identityPath,
+		"  - Runtime state: " + dataDir,
+		"  - Received files: " + downloadDir,
+	}
+}
+
+func runningNodeAdvice() string {
+	if runtime.GOOS == "windows" {
+		return "use 'vx6 status', 'vx6 reload', or stop the existing vx6 process"
+	}
+	return "use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'"
 }
 
 func friendlyRelayPathError(err error, feature string) error {
@@ -1834,9 +1865,9 @@ func (l *nodeRuntimeLock) Close() error {
 func runningNodeError(pidPath string) error {
 	pid, err := readNodePID(pidPath)
 	if err == nil && pid > 0 {
-		return fmt.Errorf("vx6 node is already running in the background (pid %d). use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'", pid)
+		return fmt.Errorf("vx6 node is already running in the background (pid %d). %s", pid, runningNodeAdvice())
 	}
-	return errors.New("vx6 node is already running in the background. use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'")
+	return fmt.Errorf("vx6 node is already running in the background. %s", runningNodeAdvice())
 }
 
 func clearStaleRuntimeLock(lockPath, pidPath, controlPath string) bool {

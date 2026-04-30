@@ -41,12 +41,12 @@ func EffectiveMode(mode string) string {
 }
 
 func Listen(mode, addr string) (net.Listener, error) {
-	return net.Listen("tcp6", addr)
+	return net.Listen("tcp", addr)
 }
 
 func DialContext(ctx context.Context, mode, addr string) (net.Conn, error) {
 	var dialer net.Dialer
-	return dialer.DialContext(ctx, "tcp6", addr)
+	return dialer.DialContext(ctx, "tcp", addr)
 }
 
 func DialTimeout(mode, addr string, timeout time.Duration) (net.Conn, error) {

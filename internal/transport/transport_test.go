@@ -2,7 +2,6 @@ package transport
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 )
@@ -10,7 +9,7 @@ import (
 func TestDialTimeoutAndProbeContext(t *testing.T) {
 	t.Parallel()
 
-	ln, err := net.Listen("tcp6", "[::1]:0")
+	ln, err := Listen(ModeTCP, "[::1]:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}

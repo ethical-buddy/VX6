@@ -14,6 +14,7 @@ import (
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
 	"github.com/vx6/vx6/internal/transfer"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 const maxMessageSize = 64 * 1024
@@ -456,8 +457,7 @@ func roundTrip(ctx context.Context, address string, req request) (response, erro
 	dialCtx, cancel := context.WithTimeout(ctx, roundTripTimeout)
 	defer cancel()
 
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", address)
+	conn, err := vxtransport.DialContext(dialCtx, vxtransport.ModeAuto, address)
 	if err != nil {
 		return response{}, fmt.Errorf("dial discovery endpoint %s: %w", address, err)
 	}

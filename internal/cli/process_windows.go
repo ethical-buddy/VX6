@@ -13,6 +13,9 @@ func registerReloadSignal(_ chan os.Signal) {}
 func processExists(pid int) error {
 	h, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
+		if errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+			return nil
+		}
 		return err
 	}
 	defer syscall.CloseHandle(h)

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -58,6 +59,9 @@ func NewXDPManager() *XDPManager {
 
 func (m *XDPManager) Status(ctx context.Context, iface string) (XDPStatus, error) {
 	status := baseXDPStatus(iface)
+	if !xdpSupported() {
+		return status, fmt.Errorf("xdp/eBPF management is only supported on Linux")
+	}
 	if strings.TrimSpace(iface) == "" {
 		return status, fmt.Errorf("interface is required")
 	}
@@ -77,6 +81,9 @@ func (m *XDPManager) Status(ctx context.Context, iface string) (XDPStatus, error
 }
 
 func (m *XDPManager) Attach(ctx context.Context, iface string) (XDPStatus, error) {
+	if !xdpSupported() {
+		return baseXDPStatus(iface), fmt.Errorf("xdp/eBPF attach is only supported on Linux")
+	}
 	if strings.TrimSpace(iface) == "" {
 		return baseXDPStatus(""), fmt.Errorf("interface is required")
 	}
@@ -124,6 +131,9 @@ func (m *XDPManager) Attach(ctx context.Context, iface string) (XDPStatus, error
 }
 
 func (m *XDPManager) Detach(ctx context.Context, iface string) (XDPStatus, error) {
+	if !xdpSupported() {
+		return baseXDPStatus(iface), fmt.Errorf("xdp/eBPF detach is only supported on Linux")
+	}
 	if strings.TrimSpace(iface) == "" {
 		return baseXDPStatus(""), fmt.Errorf("interface is required")
 	}
@@ -155,7 +165,14 @@ func finalizeXDPStatus(status XDPStatus) XDPStatus {
 }
 
 func xdpCompatibilityWarning() string {
+	if !xdpSupported() {
+		return "XDP/eBPF status and attach commands are Linux-only; this VX6 build uses the normal user-space TCP path on this platform"
+	}
 	return "embedded XDP program targets the legacy VX6 onion header and is not yet the active fast path for the current encrypted relay data path"
+}
+
+func xdpSupported() bool {
+	return runtime.GOOS == "linux"
 }
 
 func parseXDPStatusJSON(data []byte, iface string) (XDPStatus, error) {

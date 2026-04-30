@@ -17,6 +17,7 @@ import (
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
 	"github.com/vx6/vx6/internal/record"
+	vxtransport "github.com/vx6/vx6/internal/transport"
 )
 
 type Server struct {
@@ -593,8 +594,7 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
+	conn, err := vxtransport.DialContext(dialCtx, vxtransport.ModeAuto, addr)
 	if err != nil {
 		return nil, err
 	}
