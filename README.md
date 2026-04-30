@@ -18,6 +18,10 @@ HackitiseLabs Pvt. Ltd.<br>
   Build <code>vx6</code> and <code>vx6-gui</code> from here for Linux hosts and Linux-centered deployments.
 </p>
 
+<p align="center">
+  <strong>Platform support available now:</strong> Linux on this branch, Windows on the <code>Windows-compatible</code> branch.
+</p>
+
 ## What VX6 Is
 
 VX6 is a service network built for applications that already work locally.
@@ -164,6 +168,8 @@ It is a local web UI that:
 
 This keeps the GUI aligned with the CLI and avoids splitting the protocol logic into two different apps.
 
+A fuller browser-wrapper experience is planned, but it is not part of the current release yet.
+
 ## Quick Start
 
 ### Build
@@ -213,6 +219,7 @@ vx6-gui
 
 - [Setup](./docs/SETUP.md)
 - [Linux Guide](./docs/LINUX.md)
+- [Windows Guide](./docs/WINDOWS.md)
 - [Usage](./docs/USAGE.md)
 - [Commands](./docs/COMMANDS.md)
 - [Architecture](./docs/architecture.md)

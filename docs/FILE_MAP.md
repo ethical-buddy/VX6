@@ -6,6 +6,10 @@ This file explains what the important files and directories do.
 
 - `cmd/vx6/main.go`
   - CLI entrypoint
+- `cmd/vx6/signals_unix.go`
+  - Unix/Linux process signal setup
+- `cmd/vx6/signals_windows.go`
+  - Windows process signal setup
 - `cmd/vx6-gui/main.go`
   - local web GUI front-end that wraps the CLI binary
 

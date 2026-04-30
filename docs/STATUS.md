@@ -29,7 +29,8 @@ That means:
 
 ## Other Platforms
 
-- Windows should follow the same protocol and feature behavior through the `Windows-compatible` branch
+- Windows support is available through the `Windows-compatible` branch
+- Linux and Windows are intended to stay aligned on protocol and feature behavior
 - macOS packaging and runtime polish are still behind Linux
 
 ## Still In Progress

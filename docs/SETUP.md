@@ -76,4 +76,5 @@ The GUI opens a local browser page and calls the `vx6` binary underneath.
 ## Linux-Specific Follow-Up
 
 - [Linux Guide](./LINUX.md)
+- [Windows Guide](./WINDOWS.md)
 - [systemd](./systemd.md)
