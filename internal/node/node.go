@@ -385,7 +385,7 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 
 		nodes, _ = liveCfg.Registry.Snapshot()
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
-		serviceRecords, hiddenTopologies := buildServiceRecords(ctx, liveCfg, nodes)
+		serviceRecords, hiddenTopologies, hiddenLookupSecrets := buildServiceRecords(ctx, liveCfg, nodes)
 		publishServicesToTargets(ctx, liveCfg, log, targets, serviceRecords)
 		hiddenTargets := make([]hidden.OwnerRegistrationTarget, 0)
 
@@ -435,7 +435,7 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 
 		publishRecordsToTargets(ctx, liveCfg, log, targets, rec, serviceRecords)
 
-		publishDHTRecords(ctx, liveCfg.DHT, liveCfg.Identity, rec, serviceRecords, liveCfg.HideEndpoint)
+		publishDHTRecords(ctx, liveCfg.DHT, liveCfg.Identity, rec, serviceRecords, hiddenLookupSecrets, liveCfg.HideEndpoint)
 	}
 
 	publishAndSync()
@@ -517,7 +517,7 @@ func seedDHTRouting(server *dht.Server, seedAddrs []string, records []record.End
 	}
 }
 
-func publishDHTRecords(ctx context.Context, server *dht.Server, signer identity.Identity, endpoint record.EndpointRecord, services []record.ServiceRecord, hideEndpoint bool) {
+func publishDHTRecords(ctx context.Context, server *dht.Server, signer identity.Identity, endpoint record.EndpointRecord, services []record.ServiceRecord, hiddenLookupSecrets map[string]string, hideEndpoint bool) {
 	if server == nil {
 		return
 	}
@@ -536,8 +536,9 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, signer identity.
 			continue
 		}
 		if svc.IsHidden && svc.Alias != "" {
-			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, now) {
-				payload, err := dht.EncodeHiddenServiceDescriptor(svc, key)
+			lookupSecret := hiddenLookupSecrets[svc.ServiceName]
+			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, lookupSecret, now) {
+				payload, err := dht.EncodeHiddenServiceDescriptor(svc, key, lookupSecret)
 				if err != nil {
 					continue
 				}
@@ -634,9 +635,10 @@ func dhtStatusSummary(server *dht.Server) dht.ReplicaSummary {
 	return server.ReplicaSummary(time.Now(), syncCycleInterval)
 }
 
-func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.EndpointRecord) ([]record.ServiceRecord, map[string]hidden.Topology) {
+func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.EndpointRecord) ([]record.ServiceRecord, map[string]hidden.Topology, map[string]string) {
 	serviceRecords := make([]record.ServiceRecord, 0, len(cfg.Services))
 	topologies := make(map[string]hidden.Topology)
+	hiddenLookupSecrets := make(map[string]string)
 	entries := loadServiceEntries(cfg.ConfigPath)
 
 	for name := range cfg.Services {
@@ -663,15 +665,16 @@ func buildServiceRecords(ctx context.Context, cfg Config, nodes []record.Endpoin
 			srec.IntroPoints = append([]string(nil), topology.ActiveIntros...)
 			srec.StandbyIntroPoints = append([]string(nil), topology.StandbyIntros...)
 			topologies[record.ServiceLookupKey(srec)] = topology
+			hiddenLookupSecrets[srec.ServiceName] = entry.HiddenLookupSecret
 		}
 		_ = record.SignServiceRecord(cfg.Identity, &srec)
-		if !srec.IsPrivate {
+		if !srec.IsPrivate && !srec.IsHidden {
 			_ = cfg.Registry.Import(nil, []record.ServiceRecord{srec})
 		}
 		serviceRecords = append(serviceRecords, srec)
 	}
 
-	return serviceRecords, topologies
+	return serviceRecords, topologies, hiddenLookupSecrets
 }
 
 func nodeAddresses(nodes []record.EndpointRecord) []string {
@@ -822,7 +825,7 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec record.Endpo
 func publishServicesToTargets(ctx context.Context, cfg Config, log io.Writer, targets map[string]struct{}, serviceRecords []record.ServiceRecord) {
 	for _, addr := range pendingSyncTargets(targets, nil) {
 		for _, srec := range serviceRecords {
-			if srec.IsPrivate {
+			if srec.IsPrivate || srec.IsHidden {
 				continue
 			}
 			publishCtx, cancel := withSyncTimeout(ctx)
@@ -846,7 +849,7 @@ func publishRecordsToTargets(ctx context.Context, cfg Config, log io.Writer, tar
 			}
 		}
 		for _, srec := range serviceRecords {
-			if srec.IsPrivate {
+			if srec.IsPrivate || srec.IsHidden {
 				continue
 			}
 			publishCtx, cancel := withSyncTimeout(ctx)

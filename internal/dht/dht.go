@@ -2,6 +2,7 @@ package dht
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
+	"github.com/vx6/vx6/internal/record"
 )
 
 type Server struct {
@@ -38,6 +40,7 @@ const (
 	lookupQueryBudget        = 12
 	replicationFactor        = 5
 	hiddenDescriptorRotation = time.Hour
+	hiddenLookupDelimiter    = "#"
 )
 
 type StoredVersion struct {
@@ -90,21 +93,24 @@ func HiddenServiceKey(alias string) string {
 }
 
 func HiddenServiceKeyAt(alias string, now time.Time) string {
-	return hiddenServiceKeyForEpoch(alias, hiddenDescriptorEpoch(now))
+	ref, _ := ParseHiddenLookupRef(alias)
+	return hiddenServiceKeyForRefEpoch(ref, hiddenDescriptorEpoch(now))
 }
 
 func HiddenServiceLookupKeys(alias string, now time.Time) []string {
+	ref, _ := ParseHiddenLookupRef(alias)
 	current := hiddenDescriptorEpoch(now)
-	keys := []string{hiddenServiceKeyForEpoch(alias, current)}
+	keys := []string{hiddenServiceKeyForRefEpoch(ref, current)}
 	previous := current - 1
 	if previous >= 0 {
-		keys = append(keys, hiddenServiceKeyForEpoch(alias, previous))
+		keys = append(keys, hiddenServiceKeyForRefEpoch(ref, previous))
 	}
 	return keys
 }
 
-func HiddenServicePublishKeys(alias string, now time.Time) []string {
-	keys := HiddenServiceLookupKeys(alias, now)
+func HiddenServicePublishKeys(alias, secret string, now time.Time) []string {
+	ref := HiddenLookupRef{Alias: alias, Secret: secret}
+	keys := hiddenServiceLookupKeysForRef(ref, now)
 	out := make([]string, 0, len(keys))
 	seen := map[string]struct{}{}
 	for _, key := range keys {
@@ -115,6 +121,58 @@ func HiddenServicePublishKeys(alias string, now time.Time) []string {
 		out = append(out, key)
 	}
 	return out
+}
+
+type HiddenLookupRef struct {
+	Alias  string
+	Secret string
+}
+
+func ParseHiddenLookupRef(input string) (HiddenLookupRef, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return HiddenLookupRef{}, fmt.Errorf("hidden lookup reference cannot be empty")
+	}
+	parts := strings.SplitN(input, hiddenLookupDelimiter, 2)
+	ref := HiddenLookupRef{Alias: parts[0]}
+	if err := record.ValidateHiddenAlias(ref.Alias); err != nil {
+		return HiddenLookupRef{}, err
+	}
+	if len(parts) == 2 {
+		ref.Secret = strings.TrimSpace(parts[1])
+		if err := ValidateHiddenLookupSecret(ref.Secret); err != nil {
+			return HiddenLookupRef{}, err
+		}
+	}
+	return ref, nil
+}
+
+func ComposeHiddenLookupInvite(alias, secret string) string {
+	if strings.TrimSpace(secret) == "" {
+		return alias
+	}
+	return alias + hiddenLookupDelimiter + secret
+}
+
+func NewHiddenLookupSecret() (string, error) {
+	buf := make([]byte, 18)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate hidden lookup secret: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func ValidateHiddenLookupSecret(secret string) error {
+	if strings.TrimSpace(secret) == "" {
+		return fmt.Errorf("hidden lookup secret cannot be empty")
+	}
+	if strings.ContainsAny(secret, " \t\r\n/#") {
+		return fmt.Errorf("hidden lookup secret contains unsupported characters")
+	}
+	if len(secret) < 16 {
+		return fmt.Errorf("hidden lookup secret must be at least 16 characters")
+	}
+	return nil
 }
 
 func NewServer(selfID string) *Server {
@@ -133,8 +191,22 @@ func hiddenDescriptorEpoch(now time.Time) int64 {
 	return now.UTC().Unix() / int64(hiddenDescriptorRotation/time.Second)
 }
 
-func hiddenServiceKeyForEpoch(alias string, epoch int64) string {
-	sum := sha256.Sum256([]byte("vx6-hidden-desc-v1\n" + alias + "\n" + strconv.FormatInt(epoch, 10)))
+func hiddenServiceLookupKeysForRef(ref HiddenLookupRef, now time.Time) []string {
+	current := hiddenDescriptorEpoch(now)
+	keys := []string{hiddenServiceKeyForRefEpoch(ref, current)}
+	previous := current - 1
+	if previous >= 0 {
+		keys = append(keys, hiddenServiceKeyForRefEpoch(ref, previous))
+	}
+	return keys
+}
+
+func hiddenServiceKeyForRefEpoch(ref HiddenLookupRef, epoch int64) string {
+	lookupSecret := ref.Alias
+	if strings.TrimSpace(ref.Secret) != "" {
+		lookupSecret = ref.Secret
+	}
+	sum := sha256.Sum256([]byte("vx6-hidden-desc-v1\n" + ref.Alias + "\n" + lookupSecret + "\n" + strconv.FormatInt(epoch, 10)))
 	return "hidden-desc/v1/" + strconv.FormatInt(epoch, 10) + "/" + base64.RawURLEncoding.EncodeToString(sum[:20])
 }
 

@@ -654,9 +654,10 @@ func TestHiddenServiceLookupKeysRotateByEpoch(t *testing.T) {
 	t.Parallel()
 
 	base := time.Unix(1_700_000_000, 0).UTC()
-	current := HiddenServiceKeyAt("ghost", base)
-	sameEpoch := HiddenServiceKeyAt("ghost", base.Add(20*time.Minute))
-	nextEpoch := HiddenServiceKeyAt("ghost", base.Add(hiddenDescriptorRotation))
+	invite := ComposeHiddenLookupInvite("ghost", "super-secret-hidden-token")
+	current := HiddenServiceKeyAt(invite, base)
+	sameEpoch := HiddenServiceKeyAt(invite, base.Add(20*time.Minute))
+	nextEpoch := HiddenServiceKeyAt(invite, base.Add(hiddenDescriptorRotation))
 
 	if current != sameEpoch {
 		t.Fatalf("expected key to stay stable within one epoch: %q != %q", current, sameEpoch)
@@ -668,7 +669,7 @@ func TestHiddenServiceLookupKeysRotateByEpoch(t *testing.T) {
 		t.Fatalf("expected blinded descriptor keys, got %q and %q", current, nextEpoch)
 	}
 
-	keys := HiddenServiceLookupKeys("ghost", base.Add(hiddenDescriptorRotation))
+	keys := HiddenServiceLookupKeys(invite, base.Add(hiddenDescriptorRotation))
 	if len(keys) != 2 {
 		t.Fatalf("expected current+previous lookup keys, got %d", len(keys))
 	}
@@ -686,8 +687,9 @@ func TestHiddenServiceDescriptorKeyValidatesWrappedRecord(t *testing.T) {
 		t.Fatalf("generate identity: %v", err)
 	}
 	rec := mustServiceRecordForIdentity(t, id, "owner", "admin", "", true, "ghost", now)
-	key := HiddenServiceKeyAt("ghost", now)
-	payload, err := EncodeHiddenServiceDescriptor(rec, key)
+	invite := ComposeHiddenLookupInvite("ghost", "super-secret-hidden-token")
+	key := HiddenServiceKeyAt(invite, now)
+	payload, err := EncodeHiddenServiceDescriptor(rec, key, "super-secret-hidden-token")
 	if err != nil {
 		t.Fatalf("encode hidden descriptor: %v", err)
 	}
@@ -704,7 +706,7 @@ func TestHiddenServiceDescriptorKeyValidatesWrappedRecord(t *testing.T) {
 		t.Fatalf("unexpected validated hidden descriptor: %+v", value)
 	}
 
-	decoded, err := DecodeHiddenServiceRecord(key, signed, "ghost", now)
+	decoded, err := DecodeHiddenServiceRecord(key, signed, invite, now)
 	if err != nil {
 		t.Fatalf("decode encrypted hidden descriptor: %v", err)
 	}
@@ -740,6 +742,18 @@ func TestHiddenServiceDescriptorDecodeLegacyWrappedRecord(t *testing.T) {
 	}
 	if decoded.Alias != rec.Alias || decoded.NodeID != rec.NodeID || decoded.ServiceName != rec.ServiceName {
 		t.Fatalf("unexpected decoded legacy hidden descriptor: %+v", decoded)
+	}
+}
+
+func TestParseHiddenLookupRefSupportsInviteSecret(t *testing.T) {
+	t.Parallel()
+
+	ref, err := ParseHiddenLookupRef("ghost#super-secret-hidden-token")
+	if err != nil {
+		t.Fatalf("parse hidden invite: %v", err)
+	}
+	if ref.Alias != "ghost" || ref.Secret != "super-secret-hidden-token" {
+		t.Fatalf("unexpected hidden invite parse result: %+v", ref)
 	}
 }
 

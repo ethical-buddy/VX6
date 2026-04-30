@@ -573,7 +573,7 @@ func validateInnerLookupValue(key, raw string, now time.Time) (validatedValue, e
 			return validatedValue{}, fmt.Errorf("hidden descriptor must wrap a hidden service with alias")
 		}
 		epoch, _ := parseHiddenDescriptorEpoch(key)
-		if expected := hiddenServiceKeyForEpoch(rec.Alias, epoch); expected != key {
+		if expected := hiddenServiceKeyForRefEpoch(HiddenLookupRef{Alias: rec.Alias}, epoch); expected != key {
 			return validatedValue{}, fmt.Errorf("hidden descriptor key %q does not match alias-derived blinded key %q", key, expected)
 		}
 		issuedAt, expiresAt, version, err := recordTimes(rec.IssuedAt, rec.ExpiresAt)

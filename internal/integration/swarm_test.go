@@ -305,18 +305,20 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	for i := 0; i < 14; i++ {
 		startVX6Node(t, rootCtx, filepath.Join(baseDir, fmt.Sprintf("relay-%02d", i+1)), fmt.Sprintf("relay-%02d", i+1), []string{bootstrap.listenAddr}, nil)
 	}
+	hiddenSecret := "ghost-invite-secret-2026"
 	owner := startVX6NodeWithOptions(t, rootCtx, nodeOptions{
-		dir:            filepath.Join(baseDir, "hidden-owner"),
-		name:           "hidden-owner",
-		bootstraps:     []string{bootstrap.listenAddr},
-		services:       map[string]string{"ghost": echoAddr},
-		hiddenServices: map[string]bool{"ghost": true},
-		hideEndpoint:   true,
+		dir:                 filepath.Join(baseDir, "hidden-owner"),
+		name:                "hidden-owner",
+		bootstraps:          []string{bootstrap.listenAddr},
+		services:            map[string]string{"ghost": echoAddr},
+		hiddenServices:      map[string]bool{"ghost": true},
+		hiddenLookupSecrets: map[string]string{"ghost": hiddenSecret},
+		hideEndpoint:        true,
 	})
 
 	waitForCondition(t, 10*time.Second, func() bool {
-		nodes, services := bootstrap.registry.Snapshot()
-		return len(nodes) >= 16 && len(services) >= 1
+		nodes, _ := bootstrap.registry.Snapshot()
+		return len(nodes) >= 16
 	}, "hidden-service mesh convergence")
 
 	records, services, err := discovery.Snapshot(rootCtx, bootstrap.listenAddr)
@@ -327,31 +329,35 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 		t.Fatalf("import client hidden registry: %v", err)
 	}
 
-	serviceName := "ghost"
-	waitForCondition(t, 10*time.Second, func() bool {
-		rec, err := client.registry.ResolveServiceLocal(serviceName)
-		return err == nil && rec.IsHidden && rec.Address == "" && len(rec.IntroPoints) == 3 && len(rec.StandbyIntroPoints) == 2
-	}, "hidden service descriptor publication")
+	serviceAlias := "ghost"
+	serviceInvite := dht.ComposeHiddenLookupInvite(serviceAlias, hiddenSecret)
+
+	if _, err := client.registry.ResolveServiceLocal(serviceAlias); err == nil {
+		t.Fatalf("hidden service should not be published through the shared registry")
+	}
+	if _, err := discovery.ResolveService(rootCtx, bootstrap.listenAddr, serviceAlias); err == nil {
+		t.Fatalf("hidden service should not resolve through shared discovery service lookup")
+	}
 
 	if _, err := discovery.Resolve(rootCtx, bootstrap.listenAddr, owner.name, ""); err == nil {
 		t.Fatalf("hidden owner endpoint should not be published publicly")
 	}
 
-	serviceRec, err := client.registry.ResolveServiceLocal(serviceName)
-	if err != nil {
-		t.Fatalf("resolve hidden service: %v", err)
-	}
-
 	dhtClient := dht.NewServer("hidden-observer")
 	dhtClient.RT.AddNode(proto.NodeInfo{ID: "seed:" + bootstrap.listenAddr, Addr: bootstrap.listenAddr})
-	hiddenKey := dht.HiddenServiceKey(serviceName)
+	hiddenKey := dht.HiddenServiceKey(serviceInvite)
+	var serviceRec record.ServiceRecord
 	waitForCondition(t, 10*time.Second, func() bool {
 		value, err := dhtClient.RecursiveFindValue(rootCtx, hiddenKey)
 		if err != nil || value == "" {
 			return false
 		}
-		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceName, time.Now())
-		return err == nil && rec.IsHidden && len(rec.IntroPoints) == 3 && len(rec.StandbyIntroPoints) == 2 && rec.Address == ""
+		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceInvite, time.Now())
+		if err != nil || !rec.IsHidden || len(rec.IntroPoints) != 3 || len(rec.StandbyIntroPoints) != 2 || rec.Address != "" {
+			return false
+		}
+		serviceRec = rec
+		return true
 	}, "hidden service descriptor in DHT")
 
 	hiddenValue, err := dhtClient.RecursiveFindValue(rootCtx, hiddenKey)
@@ -367,8 +373,8 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 		if err != nil || value == "" {
 			return false
 		}
-		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceName, time.Now())
-		return err == nil && rec.IsHidden && rec.Alias == serviceName
+		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceInvite, time.Now())
+		return err == nil && rec.IsHidden && rec.Alias == serviceAlias
 	}, "anonymous hidden descriptor lookup through relay dht path")
 
 	if _, err := dhtClient.RecursiveFindValue(rootCtx, dht.ServiceKey(record.FullServiceName(owner.name, serviceRec.ServiceName))); err == nil {
@@ -732,15 +738,16 @@ func startVX6Node(t *testing.T, parent context.Context, dir, name string, bootst
 }
 
 type nodeOptions struct {
-	dir             string
-	name            string
-	bootstraps      []string
-	services        map[string]string
-	hiddenServices  map[string]bool
-	privateServices map[string]bool
-	hideEndpoint    bool
-	identity        identity.Identity
-	reuseIdentity   bool
+	dir                 string
+	name                string
+	bootstraps          []string
+	services            map[string]string
+	hiddenServices      map[string]bool
+	hiddenLookupSecrets map[string]string
+	privateServices     map[string]bool
+	hideEndpoint        bool
+	identity            identity.Identity
+	reuseIdentity       bool
 }
 
 func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOptions) runningNode {
@@ -781,9 +788,10 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 	}
 	for serviceName, target := range opts.services {
 		cfgFile.Services[serviceName] = config.ServiceEntry{
-			Target:    target,
-			IsHidden:  opts.hiddenServices[serviceName],
-			IsPrivate: opts.privateServices[serviceName],
+			Target:             target,
+			IsHidden:           opts.hiddenServices[serviceName],
+			HiddenLookupSecret: opts.hiddenLookupSecrets[serviceName],
+			IsPrivate:          opts.privateServices[serviceName],
 		}
 	}
 	if err := store.Save(cfgFile); err != nil {

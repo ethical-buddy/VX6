@@ -304,8 +304,11 @@ func TestRunDebugRegistryRedactsDiscoveredAddresses(t *testing.T) {
 	if !strings.Contains(output, "node\talice") || !strings.Contains(output, "endpoint=sealed") {
 		t.Fatalf("registry node output missing redacted summary: %q", output)
 	}
-	if !strings.Contains(output, "service\tkey=alice.ssh") || !strings.Contains(output, "service\tkey=ghost-admin") || !strings.Contains(output, "endpoint=hidden\thidden=true") {
-		t.Fatalf("registry service output missing hidden/public summaries: %q", output)
+	if !strings.Contains(output, "service\tkey=alice.ssh") {
+		t.Fatalf("registry service output missing public summary: %q", output)
+	}
+	if strings.Contains(output, "ghost-admin") || strings.Contains(output, "hidden=true") {
+		t.Fatalf("registry output should not include hidden services from shared registry snapshots: %q", output)
 	}
 }
 

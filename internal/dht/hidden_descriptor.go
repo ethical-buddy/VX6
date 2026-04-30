@@ -24,7 +24,7 @@ type HiddenDescriptor struct {
 	Ciphertext string `json:"ciphertext"`
 }
 
-func EncodeHiddenServiceDescriptor(rec record.ServiceRecord, lookupKey string) (string, error) {
+func EncodeHiddenServiceDescriptor(rec record.ServiceRecord, lookupKey, lookupSecret string) (string, error) {
 	if !rec.IsHidden || rec.Alias == "" {
 		return "", fmt.Errorf("hidden descriptor requires a hidden service record with alias")
 	}
@@ -32,7 +32,7 @@ func EncodeHiddenServiceDescriptor(rec record.ServiceRecord, lookupKey string) (
 	if err != nil {
 		return "", err
 	}
-	key := hiddenDescriptorCipherKey(rec.Alias, epoch)
+	key := hiddenDescriptorCipherKey(rec.Alias, lookupSecret, epoch)
 	plaintext, err := json.Marshal(rec)
 	if err != nil {
 		return "", fmt.Errorf("marshal hidden service record: %w", err)
@@ -76,11 +76,15 @@ func DecodeHiddenServiceRecord(lookupKey, storedValue, alias string, now time.Ti
 		}
 		return record.ServiceRecord{}, err
 	}
+	ref, err := ParseHiddenLookupRef(alias)
+	if err != nil {
+		return record.ServiceRecord{}, err
+	}
 	epoch, err := parseHiddenDescriptorEpoch(lookupKey)
 	if err != nil {
 		return record.ServiceRecord{}, err
 	}
-	key := hiddenDescriptorCipherKey(alias, epoch)
+	key := hiddenDescriptorCipherKey(ref.Alias, ref.Secret, epoch)
 	nonce, err := base64.RawURLEncoding.DecodeString(desc.Nonce)
 	if err != nil {
 		return record.ServiceRecord{}, fmt.Errorf("decode hidden descriptor nonce: %w", err)
@@ -110,8 +114,8 @@ func DecodeHiddenServiceRecord(lookupKey, storedValue, alias string, now time.Ti
 	if err := record.VerifyServiceRecord(rec, now); err != nil {
 		return record.ServiceRecord{}, err
 	}
-	if !rec.IsHidden || rec.Alias != alias {
-		return record.ServiceRecord{}, fmt.Errorf("decrypted hidden service alias %q does not match requested alias %q", rec.Alias, alias)
+	if !rec.IsHidden || rec.Alias != ref.Alias {
+		return record.ServiceRecord{}, fmt.Errorf("decrypted hidden service alias %q does not match requested alias %q", rec.Alias, ref.Alias)
 	}
 	if rec.NodeID != desc.NodeID {
 		return record.ServiceRecord{}, fmt.Errorf("hidden descriptor node id %q does not match decrypted record %q", desc.NodeID, rec.NodeID)
@@ -189,15 +193,19 @@ func decodeLegacyHiddenServiceRecord(lookupKey, storedValue, alias string, now t
 		if err != nil {
 			return record.ServiceRecord{}, err
 		}
-		if expected := hiddenServiceKeyForEpoch(rec.Alias, epoch); expected != lookupKey {
+		if expected := hiddenServiceKeyForRefEpoch(HiddenLookupRef{Alias: rec.Alias}, epoch); expected != lookupKey {
 			return record.ServiceRecord{}, fmt.Errorf("legacy hidden descriptor key %q does not match alias-derived blinded key %q", lookupKey, expected)
 		}
 	}
 	return rec, nil
 }
 
-func hiddenDescriptorCipherKey(alias string, epoch int64) [32]byte {
-	return sha256.Sum256([]byte("vx6-hidden-desc-v1-key\n" + alias + "\n" + strconv.FormatInt(epoch, 10)))
+func hiddenDescriptorCipherKey(alias, secret string, epoch int64) [32]byte {
+	lookupSecret := alias
+	if secret != "" {
+		lookupSecret = secret
+	}
+	return sha256.Sum256([]byte("vx6-hidden-desc-v1-key\n" + alias + "\n" + lookupSecret + "\n" + strconv.FormatInt(epoch, 10)))
 }
 
 func hiddenServiceTag(rec record.ServiceRecord) string {

@@ -716,6 +716,13 @@ func runService(args []string) error {
 			if entry.Alias == "" {
 				entry.Alias = *name
 			}
+			if entry.HiddenLookupSecret == "" {
+				secret, err := dht.NewHiddenLookupSecret()
+				if err != nil {
+					return err
+				}
+				entry.HiddenLookupSecret = secret
+			}
 			if entry.HiddenProfile == "" {
 				return fmt.Errorf("invalid hidden profile %q", *profile)
 			}
@@ -741,7 +748,7 @@ func runService(args []string) error {
 			return err
 		}
 		if entry.IsHidden {
-			fmt.Printf("hidden_alias\t%s\nhidden_profile\t%s\nintro_mode\t%s\n", entry.Alias, entry.HiddenProfile, entry.IntroMode)
+			fmt.Printf("hidden_alias\t%s\nhidden_invite\t%s\nhidden_profile\t%s\nintro_mode\t%s\n", entry.Alias, dht.ComposeHiddenLookupInvite(entry.Alias, entry.HiddenLookupSecret), entry.HiddenProfile, entry.IntroMode)
 		} else if entry.IsPrivate {
 			fmt.Println("visibility\tPRIVATE")
 		}

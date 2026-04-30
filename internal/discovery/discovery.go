@@ -133,6 +133,9 @@ func (r *Registry) handlePublishService(conn net.Conn, rec record.ServiceRecord)
 	if rec.IsPrivate {
 		return writeResponse(conn, response{Error: "private services are not published through the shared registry"})
 	}
+	if rec.IsHidden {
+		return writeResponse(conn, response{Error: "hidden services are not published through the shared registry"})
+	}
 
 	fullName := record.ServiceLookupKey(rec)
 
@@ -269,7 +272,7 @@ func (r *Registry) Import(records []record.EndpointRecord, serviceRecords []reco
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		if rec.IsPrivate {
+		if rec.IsPrivate || rec.IsHidden {
 			continue
 		}
 		fullName := record.ServiceLookupKey(rec)
@@ -314,7 +317,7 @@ func (r *Registry) load() error {
 		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
 			continue
 		}
-		if rec.IsPrivate {
+		if rec.IsPrivate || rec.IsHidden {
 			continue
 		}
 		r.serviceByName[record.ServiceLookupKey(rec)] = rec

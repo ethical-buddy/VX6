@@ -51,13 +51,14 @@ type PeerEntry struct {
 }
 
 type ServiceEntry struct {
-	Target        string   `json:"target"`
-	IsHidden      bool     `json:"is_hidden"`
-	IsPrivate     bool     `json:"is_private,omitempty"`
-	Alias         string   `json:"alias,omitempty"`
-	HiddenProfile string   `json:"hidden_profile,omitempty"`
-	IntroMode     string   `json:"intro_mode,omitempty"`
-	IntroNodes    []string `json:"intro_nodes,omitempty"`
+	Target             string   `json:"target"`
+	IsHidden           bool     `json:"is_hidden"`
+	IsPrivate          bool     `json:"is_private,omitempty"`
+	Alias              string   `json:"alias,omitempty"`
+	HiddenLookupSecret string   `json:"hidden_lookup_secret,omitempty"`
+	HiddenProfile      string   `json:"hidden_profile,omitempty"`
+	IntroMode          string   `json:"intro_mode,omitempty"`
+	IntroNodes         []string `json:"intro_nodes,omitempty"`
 }
 
 type Store struct {
@@ -374,9 +375,13 @@ func normalize(cfg *File) {
 		}
 		if svc.IsPrivate {
 			svc.Alias = ""
+			svc.HiddenLookupSecret = ""
 			svc.HiddenProfile = ""
 			svc.IntroMode = ""
 			svc.IntroNodes = nil
+		}
+		if !svc.IsHidden {
+			svc.HiddenLookupSecret = ""
 		}
 		cfg.Services[name] = svc
 	}

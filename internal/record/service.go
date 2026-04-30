@@ -164,7 +164,7 @@ func ValidateHiddenAlias(alias string) error {
 	if alias == "" {
 		return fmt.Errorf("hidden alias cannot be empty")
 	}
-	if strings.ContainsAny(alias, " \t\r\n/") {
+	if strings.ContainsAny(alias, " \t\r\n/#") {
 		return fmt.Errorf("hidden alias %q contains unsupported characters", alias)
 	}
 	return nil
