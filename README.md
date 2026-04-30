@@ -1,5 +1,4 @@
 # VX6
-
 VX6 is a TCP-based peer-to-peer service network for real local applications.
 
 The main idea is simple:
