@@ -1376,15 +1376,8 @@ func runDebugDHTGet(ctx context.Context, args []string) error {
 		if strings.Contains(*service, ".") {
 			*key = dht.ServiceKey(*service)
 		} else {
-			for _, hiddenKey := range dht.HiddenServiceLookupKeys(*service, time.Now()) {
-				value, err := client.RecursiveFindValue(ctx, hiddenKey)
-				if err != nil || value == "" {
-					continue
-				}
-				rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, *service, time.Now())
-				if err != nil {
-					continue
-				}
+			rec, err := client.ResolveHiddenService(ctx, *service, time.Now())
+			if err == nil {
 				formatted, _ := json.MarshalIndent(rec, "", "  ")
 				fmt.Printf("%s\n", formatted)
 				return nil
@@ -1634,12 +1627,8 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 				return rec, nil
 			}
 		} else {
-			for _, key := range dht.HiddenServiceLookupKeys(service, time.Now()) {
-				if val, err := d.RecursiveFindValue(ctx, key); err == nil && val != "" {
-					if rec, err := dht.DecodeHiddenServiceRecord(key, val, service, time.Now()); err == nil {
-						return rec, nil
-					}
-				}
+			if rec, err := d.ResolveHiddenService(ctx, service, time.Now()); err == nil {
+				return rec, nil
 			}
 		}
 	}

@@ -18,11 +18,26 @@ type HiddenDescriptorPrivacyConfig struct {
 	RelayHopCount   int
 	RelayCandidates func() []record.EndpointRecord
 	ExcludeAddrs    func() []string
+	PollInterval    time.Duration
+	CacheWindow     time.Duration
+	CoverLookups    int
 }
 
 func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
 	if cfg.RelayHopCount <= 0 {
 		cfg.RelayHopCount = hiddenDescriptorRelayHopCount
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = hiddenDescriptorPollInterval
+	}
+	if cfg.CacheWindow <= 0 {
+		cfg.CacheWindow = hiddenDescriptorCacheWindow
+	}
+	if cfg.CoverLookups < 0 {
+		cfg.CoverLookups = 0
+	}
+	if cfg.CoverLookups == 0 {
+		cfg.CoverLookups = hiddenDescriptorCoverLookups
 	}
 	s.mu.Lock()
 	s.hidden = cfg

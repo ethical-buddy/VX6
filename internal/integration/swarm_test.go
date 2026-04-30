@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -415,16 +416,28 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	if len(filtered) < 2 {
 		t.Fatalf("expected at least two hidden rendezvous traces, got %d total and %d rendezvous traces", len(gotTraces), len(filtered))
 	}
-	filtered = filtered[len(filtered)-2:]
-	if filtered[0].TargetAddr == "" || filtered[0].TargetAddr != filtered[1].TargetAddr {
-		t.Fatalf("expected both hidden-service circuits to share one rendezvous target, got %q and %q", filtered[0].TargetAddr, filtered[1].TargetAddr)
+	var pair []onion.TraceEvent
+	for i := 0; i < len(filtered); i++ {
+		for j := i + 1; j < len(filtered); j++ {
+			if filtered[i].TargetAddr == "" || filtered[i].TargetAddr != filtered[j].TargetAddr {
+				continue
+			}
+			if len(filtered[i].RelayAddrs) != 3 || len(filtered[j].RelayAddrs) != 3 {
+				continue
+			}
+			pair = []onion.TraceEvent{filtered[i], filtered[j]}
+			break
+		}
+		if len(pair) == 2 {
+			break
+		}
 	}
-	if len(filtered[0].RelayAddrs) != 3 || len(filtered[1].RelayAddrs) != 3 {
-		t.Fatalf("expected 3 relay hops on both sides, got %d and %d", len(filtered[0].RelayAddrs), len(filtered[1].RelayAddrs))
+	if len(pair) != 2 {
+		t.Fatalf("expected one successful hidden rendezvous pair with a shared target, got %+v", filtered)
 	}
 
 	seenRelays := map[string]struct{}{}
-	for _, trace := range filtered {
+	for _, trace := range pair {
 		for _, addr := range trace.RelayAddrs {
 			if _, ok := seenRelays[addr]; ok {
 				t.Fatalf("expected disjoint hidden-service relay sets, duplicate %s detected", addr)
@@ -464,6 +477,112 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	}
 	if !sawDescriptorLookup {
 		t.Fatal("expected hidden descriptor lookup to use anonymous relay DHT transport")
+	}
+}
+
+func TestHiddenServiceReconnectsAfterIntroLoss(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping hidden failover integration test in short mode")
+	}
+	if os.Getenv("VX6_RUN_HIDDEN_FAILOVER") == "" {
+		t.Skip("set VX6_RUN_HIDDEN_FAILOVER=1 to run the relay-loss hidden failover scenario")
+	}
+
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	baseDir := t.TempDir()
+	bootstrap := startVX6Node(t, rootCtx, filepath.Join(baseDir, "bootstrap"), "bootstrap", nil, nil)
+
+	echoAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	startEchoServer(t, rootCtx, echoAddr)
+
+	client := startVX6Node(t, rootCtx, filepath.Join(baseDir, "client"), "client", []string{bootstrap.listenAddr}, nil)
+	relays := make([]runningNode, 0, 10)
+	for i := 0; i < 10; i++ {
+		relays = append(relays, startVX6Node(t, rootCtx, filepath.Join(baseDir, fmt.Sprintf("relay-%02d", i+1)), fmt.Sprintf("relay-%02d", i+1), []string{bootstrap.listenAddr}, nil))
+	}
+	introNodes := []string{relays[0].listenAddr, relays[1].listenAddr, relays[2].listenAddr, relays[3].listenAddr, relays[4].listenAddr}
+	owner := startVX6NodeWithOptions(t, rootCtx, nodeOptions{
+		dir:                 filepath.Join(baseDir, "hidden-owner"),
+		name:                "hidden-owner",
+		bootstraps:          []string{bootstrap.listenAddr},
+		services:            map[string]string{"ghost": echoAddr},
+		hiddenServices:      map[string]bool{"ghost": true},
+		hiddenLookupSecrets: map[string]string{"ghost": "ghost-invite-secret-2026"},
+		hiddenIntroNodes:    map[string][]string{"ghost": introNodes},
+		hideEndpoint:        true,
+	})
+
+	waitForCondition(t, 10*time.Second, func() bool {
+		nodes, _ := bootstrap.registry.Snapshot()
+		return len(nodes) >= 12
+	}, "hidden failover mesh convergence")
+
+	records, services, err := discovery.Snapshot(rootCtx, bootstrap.listenAddr)
+	if err != nil {
+		t.Fatalf("snapshot hidden failover bootstrap registry: %v", err)
+	}
+	if err := client.registry.Import(records, services); err != nil {
+		t.Fatalf("import hidden failover client registry: %v", err)
+	}
+
+	serviceInvite := dht.ComposeHiddenLookupInvite("ghost", "ghost-invite-secret-2026")
+	hiddenKey := dht.HiddenServiceKey(serviceInvite)
+	var serviceRec record.ServiceRecord
+	waitForCondition(t, 10*time.Second, func() bool {
+		value, err := client.dht.RecursiveFindValue(rootCtx, hiddenKey)
+		if err != nil || value == "" {
+			return false
+		}
+		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceInvite, time.Now())
+		if err != nil {
+			return false
+		}
+		serviceRec = rec
+		return len(serviceRec.IntroPoints) > 0 && len(serviceRec.StandbyIntroPoints) > 0
+	}, "hidden failover descriptor lookup")
+
+	candidatesByAddr := map[string]runningNode{}
+	for _, relay := range relays {
+		candidatesByAddr[relay.listenAddr] = relay
+	}
+	var (
+		failedIntro runningNode
+		found       bool
+	)
+	for _, addr := range append(append([]string(nil), serviceRec.IntroPoints...), serviceRec.StandbyIntroPoints...) {
+		node, ok := candidatesByAddr[addr]
+		if !ok {
+			continue
+		}
+		failedIntro = node
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("expected manual relay intro selection, active=%v standby=%v", serviceRec.IntroPoints, serviceRec.StandbyIntroPoints)
+	}
+	failedIntro.cancel()
+	time.Sleep(200 * time.Millisecond)
+
+	hiddenAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	hiddenCtx, hiddenCancel := context.WithCancel(rootCtx)
+	hiddenDone := make(chan error, 1)
+	go func() {
+		hiddenDone <- serviceproxy.ServeLocalForward(hiddenCtx, hiddenAddr, serviceRec, client.id, func(ctx context.Context) (net.Conn, error) {
+			return hidden.DialHiddenServiceWithOptions(ctx, serviceRec, client.registry, hidden.DialOptions{
+				SelfAddr: client.listenAddr,
+				Identity: client.id,
+			})
+		})
+	}()
+	assertEchoEventually(t, hiddenAddr, "hidden rendezvous path after intro loss")
+	hiddenCancel()
+	waitForShutdown(t, hiddenDone)
+
+	if _, err := discovery.Resolve(rootCtx, bootstrap.listenAddr, owner.name, ""); err == nil {
+		t.Fatalf("hidden owner endpoint should remain unpublished during intro failover")
 	}
 }
 
@@ -744,6 +863,7 @@ type nodeOptions struct {
 	services            map[string]string
 	hiddenServices      map[string]bool
 	hiddenLookupSecrets map[string]string
+	hiddenIntroNodes    map[string][]string
 	privateServices     map[string]bool
 	hideEndpoint        bool
 	identity            identity.Identity
@@ -791,6 +911,7 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 			Target:             target,
 			IsHidden:           opts.hiddenServices[serviceName],
 			HiddenLookupSecret: opts.hiddenLookupSecrets[serviceName],
+			IntroNodes:         append([]string(nil), opts.hiddenIntroNodes[serviceName]...),
 			IsPrivate:          opts.privateServices[serviceName],
 		}
 	}

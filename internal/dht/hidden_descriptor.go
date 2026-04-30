@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vx6/vx6/internal/record"
 )
+
+const hiddenDescriptorPayloadTargetSize = 1024
 
 type HiddenDescriptor struct {
 	NodeID     string `json:"node_id"`
@@ -22,6 +25,11 @@ type HiddenDescriptor struct {
 	ExpiresAt  string `json:"expires_at"`
 	Nonce      string `json:"nonce"`
 	Ciphertext string `json:"ciphertext"`
+}
+
+type hiddenDescriptorPayload struct {
+	Record  record.ServiceRecord `json:"record"`
+	Padding string               `json:"padding"`
 }
 
 func EncodeHiddenServiceDescriptor(rec record.ServiceRecord, lookupKey, lookupSecret string) (string, error) {
@@ -33,9 +41,9 @@ func EncodeHiddenServiceDescriptor(rec record.ServiceRecord, lookupKey, lookupSe
 		return "", err
 	}
 	key := hiddenDescriptorCipherKey(rec.Alias, lookupSecret, epoch)
-	plaintext, err := json.Marshal(rec)
+	plaintext, err := marshalHiddenDescriptorPayload(rec)
 	if err != nil {
-		return "", fmt.Errorf("marshal hidden service record: %w", err)
+		return "", err
 	}
 	block, err := aes.NewCipher(key[:])
 	if err != nil {
@@ -108,7 +116,9 @@ func DecodeHiddenServiceRecord(lookupKey, storedValue, alias string, now time.Ti
 	}
 
 	var rec record.ServiceRecord
-	if err := json.Unmarshal(plaintext, &rec); err != nil {
+	if payload, err := decodeHiddenDescriptorPayload(plaintext); err == nil {
+		rec = payload.Record
+	} else if err := json.Unmarshal(plaintext, &rec); err != nil {
 		return record.ServiceRecord{}, fmt.Errorf("decode decrypted hidden record: %w", err)
 	}
 	if err := record.VerifyServiceRecord(rec, now); err != nil {
@@ -224,4 +234,40 @@ func hiddenDescriptorAAD(lookupKey, serviceTag, nodeID string) []byte {
 
 func stringsHasHiddenDescriptorKey(key string) bool {
 	return len(key) >= len("hidden-desc/v1/") && key[:len("hidden-desc/v1/")] == "hidden-desc/v1/"
+}
+
+func marshalHiddenDescriptorPayload(rec record.ServiceRecord) ([]byte, error) {
+	payload := hiddenDescriptorPayload{Record: rec, Padding: ""}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal hidden descriptor payload: %w", err)
+	}
+	target := hiddenDescriptorPayloadTargetSize
+	for len(raw) > target {
+		target += 256
+	}
+	payload.Padding = strings.Repeat("x", target-len(raw))
+	raw, err = json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal hidden descriptor payload: %w", err)
+	}
+	if len(raw) < target {
+		payload.Padding += strings.Repeat("x", target-len(raw))
+		raw, err = json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("marshal hidden descriptor payload: %w", err)
+		}
+	}
+	return raw, nil
+}
+
+func decodeHiddenDescriptorPayload(plaintext []byte) (hiddenDescriptorPayload, error) {
+	var payload hiddenDescriptorPayload
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return hiddenDescriptorPayload{}, err
+	}
+	if payload.Record.NodeID == "" || payload.Record.ServiceName == "" {
+		return hiddenDescriptorPayload{}, fmt.Errorf("hidden descriptor payload missing wrapped record")
+	}
+	return payload, nil
 }

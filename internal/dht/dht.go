@@ -20,13 +20,16 @@ import (
 )
 
 type Server struct {
-	RT        *RoutingTable
-	Values    map[string]string // The decentralized database
-	publisher identity.Identity
-	hidden    HiddenDescriptorPrivacyConfig
-	versions  map[string]StoredValueState
-	replicas  map[string]ReplicaObservation
-	mu        sync.RWMutex
+	RT            *RoutingTable
+	Values        map[string]string // The decentralized database
+	publisher     identity.Identity
+	hidden        HiddenDescriptorPrivacyConfig
+	versions      map[string]StoredValueState
+	replicas      map[string]ReplicaObservation
+	hiddenCache   map[string]cachedHiddenService
+	hiddenWarmers map[string]struct{}
+	hiddenRates   map[string]rateWindow
+	mu            sync.RWMutex
 }
 
 type lookupBranch struct {
@@ -36,11 +39,18 @@ type lookupBranch struct {
 }
 
 const (
-	lookupAlpha              = 3
-	lookupQueryBudget        = 12
-	replicationFactor        = 5
-	hiddenDescriptorRotation = time.Hour
-	hiddenLookupDelimiter    = "#"
+	lookupAlpha                      = 3
+	lookupQueryBudget                = 12
+	replicationFactor                = 5
+	hiddenDescriptorRotation         = time.Hour
+	hiddenLookupDelimiter            = "#"
+	hiddenDescriptorCacheWindow      = 45 * time.Second
+	hiddenDescriptorPollInterval     = 12 * time.Second
+	hiddenDescriptorCoverLookups     = 1
+	hiddenDescriptorLookupRateWindow = 30 * time.Second
+	hiddenDescriptorLookupRateLimit  = 48
+	hiddenDescriptorStoreRateWindow  = 30 * time.Second
+	hiddenDescriptorStoreRateLimit   = 24
 )
 
 type StoredVersion struct {
@@ -177,10 +187,13 @@ func ValidateHiddenLookupSecret(secret string) error {
 
 func NewServer(selfID string) *Server {
 	return &Server{
-		RT:       NewRoutingTable(selfID),
-		Values:   make(map[string]string),
-		versions: make(map[string]StoredValueState),
-		replicas: make(map[string]ReplicaObservation),
+		RT:            NewRoutingTable(selfID),
+		Values:        make(map[string]string),
+		versions:      make(map[string]StoredValueState),
+		replicas:      make(map[string]ReplicaObservation),
+		hiddenCache:   make(map[string]cachedHiddenService),
+		hiddenWarmers: make(map[string]struct{}),
+		hiddenRates:   make(map[string]rateWindow),
 	}
 }
 
@@ -236,6 +249,15 @@ func (s *Server) LookupState(key string) (StoredValueState, bool) {
 // HandleDHT processes an incoming DHT request from a peer.
 func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequest) error {
 	resp := proto.DHTResponse{}
+	if stringsHasHiddenDescriptorKey(req.Target) {
+		if !s.allowHiddenDescriptorRequest(conn.RemoteAddr().String(), req.Action, time.Now()) {
+			payload, _ := json.Marshal(resp)
+			if err := proto.WriteHeader(conn, proto.KindDHT); err != nil {
+				return err
+			}
+			return proto.WriteLengthPrefixed(conn, payload)
+		}
+	}
 
 	switch req.Action {
 	case "find_node":

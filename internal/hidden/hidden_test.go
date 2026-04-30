@@ -2,6 +2,7 @@ package hidden
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -495,6 +496,82 @@ func TestPruneOwnerRegistrationsCancelsStaleLeases(t *testing.T) {
 		t.Fatal("expected stale guard lease to be pruned")
 	}
 	guardClientMu.Unlock()
+}
+
+func TestAllowHiddenActionRateLimit(t *testing.T) {
+	hiddenRateMu.Lock()
+	original := hiddenRateCounters
+	hiddenRateCounters = map[string]windowCounter{}
+	hiddenRateMu.Unlock()
+	defer func() {
+		hiddenRateMu.Lock()
+		hiddenRateCounters = original
+		hiddenRateMu.Unlock()
+	}()
+
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		if !allowHiddenAction("node:alice", "intro_request", time.Second, 3, now) {
+			t.Fatalf("unexpected rate-limit before limit at attempt %d", i+1)
+		}
+	}
+	if allowHiddenAction("node:alice", "intro_request", time.Second, 3, now) {
+		t.Fatal("expected rate-limit after limit is reached")
+	}
+	if !allowHiddenAction("node:alice", "intro_request", time.Second, 3, now.Add(1100*time.Millisecond)) {
+		t.Fatal("expected window reset after rate-limit window elapsed")
+	}
+}
+
+func TestHiddenPathFailureAppliesCooldown(t *testing.T) {
+	healthMu.Lock()
+	original := healthCache
+	healthCache = map[string]healthEntry{}
+	healthMu.Unlock()
+	defer func() {
+		healthMu.Lock()
+		healthCache = original
+		healthMu.Unlock()
+	}()
+
+	addr := "[::1]:65530"
+	noteHiddenPathFailure([]string{addr})
+
+	healthy, _, failures := measureHealth(context.Background(), addr)
+	if healthy {
+		t.Fatal("expected cooled-down relay to be considered unhealthy")
+	}
+	if failures == 0 {
+		t.Fatal("expected cooled-down relay to retain a failure count")
+	}
+}
+
+func TestJoinRendezvousRejectsWhenCapacityReached(t *testing.T) {
+	rendezvousMu.Lock()
+	original := rendezvouses
+	rendezvouses = map[string]*rendezvousWait{}
+	for i := 0; i < maxActiveRendezvous; i++ {
+		rendezvouses[fmt.Sprintf("rv-%d", i)] = &rendezvousWait{
+			peerCh:    make(chan net.Conn, 1),
+			doneCh:    make(chan struct{}),
+			createdAt: time.Now(),
+			expiresAt: time.Now().Add(time.Minute),
+		}
+	}
+	rendezvousMu.Unlock()
+	defer func() {
+		rendezvousMu.Lock()
+		rendezvouses = original
+		rendezvousMu.Unlock()
+	}()
+
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+
+	if err := joinRendezvous(left, "overflow"); err == nil || !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("expected rendezvous capacity rejection, got %v", err)
+	}
 }
 
 func waitForGuardRegistration(t *testing.T, scope string) {

@@ -757,6 +757,84 @@ func TestParseHiddenLookupRefSupportsInviteSecret(t *testing.T) {
 	}
 }
 
+func TestHiddenDescriptorPayloadHasStableSize(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	short := mustServiceRecordForIdentity(t, id, "owner", "a", "", true, "ghost", now)
+	short.IntroPoints = []string{"[2001:db8::1]:4242"}
+	long := mustServiceRecordForIdentity(t, id, "owner", "administration-panel", "", true, "ghost", now)
+	long.IntroPoints = []string{"[2001:db8::1]:4242", "[2001:db8::2]:4242", "[2001:db8::3]:4242"}
+	long.StandbyIntroPoints = []string{"[2001:db8::4]:4242", "[2001:db8::5]:4242"}
+
+	key := HiddenServiceKeyAt(ComposeHiddenLookupInvite("ghost", "super-secret-hidden-token"), now)
+	shortPayload, err := EncodeHiddenServiceDescriptor(short, key, "super-secret-hidden-token")
+	if err != nil {
+		t.Fatalf("encode short hidden descriptor: %v", err)
+	}
+	longPayload, err := EncodeHiddenServiceDescriptor(long, key, "super-secret-hidden-token")
+	if err != nil {
+		t.Fatalf("encode long hidden descriptor: %v", err)
+	}
+	if len(shortPayload) != len(longPayload) {
+		t.Fatalf("expected padded hidden descriptors to share size, got %d and %d", len(shortPayload), len(longPayload))
+	}
+}
+
+func TestResolveHiddenServiceFallsBackToShortLivedCache(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	rec := mustServiceRecordForIdentity(t, id, "owner", "admin", "", true, "ghost", now)
+	invite := ComposeHiddenLookupInvite("ghost", "super-secret-hidden-token")
+	client := NewServer("client")
+	client.storeHiddenServiceCache(invite, HiddenServiceKeyAt(invite, now), rec, now)
+
+	resolved, err := client.ResolveHiddenService(context.Background(), invite, now.Add(40*time.Second))
+	if err != nil {
+		t.Fatalf("resolve hidden service from short-lived cache: %v", err)
+	}
+	if resolved.NodeID != rec.NodeID || resolved.Alias != rec.Alias || resolved.ServiceName != rec.ServiceName {
+		t.Fatalf("unexpected hidden cache resolution %+v", resolved)
+	}
+}
+
+func TestHiddenDescriptorLookupRateLimit(t *testing.T) {
+	t.Parallel()
+
+	server := NewServer("ratelimit")
+	now := time.Now()
+	for i := 0; i < hiddenDescriptorLookupRateLimit; i++ {
+		if !server.allowHiddenDescriptorRequest("[2001:db8::1]:4242", "find_value", now) {
+			t.Fatalf("unexpected lookup rate-limit at attempt %d", i+1)
+		}
+	}
+	if server.allowHiddenDescriptorRequest("[2001:db8::1]:4242", "find_value", now) {
+		t.Fatal("expected hidden descriptor lookup to be rate limited")
+	}
+	if !server.allowHiddenDescriptorRequest("[2001:db8::1]:4242", "find_value", now.Add(hiddenDescriptorLookupRateWindow+time.Second)) {
+		t.Fatal("expected hidden descriptor lookup window to reset")
+	}
+	for i := 0; i < hiddenDescriptorStoreRateLimit; i++ {
+		if !server.allowHiddenDescriptorRequest("[2001:db8::2]:4242", "store", now) {
+			t.Fatalf("unexpected store rate-limit at attempt %d", i+1)
+		}
+	}
+	if server.allowHiddenDescriptorRequest("[2001:db8::2]:4242", "store", now) {
+		t.Fatal("expected hidden descriptor store to be rate limited")
+	}
+}
+
 func startDHTListener(t *testing.T, ctx context.Context, srv *Server) string {
 	t.Helper()
 
