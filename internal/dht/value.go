@@ -23,23 +23,25 @@ var (
 const (
 	minTrustedSupportingSources = 2
 	minTrustedNetworkGroups     = 2
+	minTrustedProviderGroups    = 2
 	minTrustedConfirmationScore = 4
 	minTrustedLookupBranches    = 2
 )
 
 type LookupResult struct {
-	Value            string
-	Verified         bool
-	SourceCount      int
-	ExactMatchCount  int
-	QueriedNodes     int
-	RejectedValues   int
-	ConflictCount    int
-	PublisherCount   int
-	NetworkDiversity int
-	BranchDiversity  int
-	TrustWeight      int
-	Version          uint64
+	Value             string
+	Verified          bool
+	SourceCount       int
+	ExactMatchCount   int
+	QueriedNodes      int
+	RejectedValues    int
+	ConflictCount     int
+	PublisherCount    int
+	NetworkDiversity  int
+	ProviderDiversity int
+	BranchDiversity   int
+	TrustWeight       int
+	Version           uint64
 }
 
 type validatedValue struct {
@@ -65,15 +67,17 @@ type sourceObservation struct {
 }
 
 type candidateObservation struct {
-	value         validatedValue
-	sources       map[string]sourceObservation
-	exactSources  map[string]sourceObservation
-	networks      map[string]struct{}
-	exactNetworks map[string]struct{}
-	branches      map[int]struct{}
-	exactBranches map[int]struct{}
-	publishers    map[string]struct{}
-	exactWeight   int
+	value          validatedValue
+	sources        map[string]sourceObservation
+	exactSources   map[string]sourceObservation
+	providers      map[string]struct{}
+	exactProviders map[string]struct{}
+	networks       map[string]struct{}
+	exactNetworks  map[string]struct{}
+	branches       map[int]struct{}
+	exactBranches  map[int]struct{}
+	publishers     map[string]struct{}
+	exactWeight    int
 }
 
 type lookupCollector struct {
@@ -168,7 +172,7 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		for _, candidate := range c.verified {
 			result := candidate.lookupResult(queried, c.rejected)
 			if !candidate.confirmed() {
-				return result, fmt.Errorf("%w: exact=%d branches=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactBranches), len(candidate.exactNetworks), candidate.exactWeight)
+				return result, fmt.Errorf("%w: exact=%d branches=%d providers=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactBranches), len(candidate.exactProviders), len(candidate.exactNetworks), candidate.exactWeight)
 			}
 			return result, nil
 		}
@@ -216,20 +220,25 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 
 func newCandidateObservation(value validatedValue) *candidateObservation {
 	return &candidateObservation{
-		value:         value,
-		sources:       map[string]sourceObservation{},
-		exactSources:  map[string]sourceObservation{},
-		networks:      map[string]struct{}{},
-		exactNetworks: map[string]struct{}{},
-		branches:      map[int]struct{}{},
-		exactBranches: map[int]struct{}{},
-		publishers:    map[string]struct{}{},
+		value:          value,
+		sources:        map[string]sourceObservation{},
+		exactSources:   map[string]sourceObservation{},
+		providers:      map[string]struct{}{},
+		exactProviders: map[string]struct{}{},
+		networks:       map[string]struct{}{},
+		exactNetworks:  map[string]struct{}{},
+		branches:       map[int]struct{}{},
+		exactBranches:  map[int]struct{}{},
+		publishers:     map[string]struct{}{},
 	}
 }
 
 func (c *candidateObservation) addSource(source sourceObservation) {
 	if _, ok := c.sources[source.nodeID]; !ok {
 		c.sources[source.nodeID] = source
+	}
+	if provider := source.providerKey(); provider != "" {
+		c.providers[provider] = struct{}{}
 	}
 	if network := source.networkKey(); network != "" {
 		c.networks[network] = struct{}{}
@@ -243,6 +252,9 @@ func (c *candidateObservation) addExactSource(source sourceObservation, value va
 	if _, ok := c.exactSources[source.nodeID]; !ok {
 		c.exactSources[source.nodeID] = source
 		c.exactWeight += source.weightFor(value)
+	}
+	if provider := source.providerKey(); provider != "" {
+		c.exactProviders[provider] = struct{}{}
 	}
 	if network := source.networkKey(); network != "" {
 		c.exactNetworks[network] = struct{}{}
@@ -268,6 +280,9 @@ func (c *candidateObservation) confirmed() bool {
 	if !c.onlyLoopbackNetworks() && len(c.exactBranches) < minTrustedLookupBranches {
 		return false
 	}
+	if !c.onlyLoopbackNetworks() && len(c.exactProviders) < minTrustedProviderGroups {
+		return false
+	}
 	if len(c.exactNetworks) >= minTrustedNetworkGroups {
 		return true
 	}
@@ -288,18 +303,38 @@ func (c *candidateObservation) onlyLoopbackNetworks() bool {
 
 func (c *candidateObservation) lookupResult(queried, rejected int) LookupResult {
 	return LookupResult{
-		Value:            c.value.raw,
-		Verified:         c.value.verified,
-		SourceCount:      len(c.sources),
-		ExactMatchCount:  len(c.exactSources),
-		QueriedNodes:     queried,
-		RejectedValues:   rejected,
-		PublisherCount:   len(c.publishers),
-		NetworkDiversity: len(c.exactNetworks),
-		BranchDiversity:  len(c.exactBranches),
-		TrustWeight:      c.exactWeight,
-		Version:          c.value.version,
+		Value:             c.value.raw,
+		Verified:          c.value.verified,
+		SourceCount:       len(c.sources),
+		ExactMatchCount:   len(c.exactSources),
+		QueriedNodes:      queried,
+		RejectedValues:    rejected,
+		PublisherCount:    len(c.publishers),
+		NetworkDiversity:  len(c.exactNetworks),
+		ProviderDiversity: len(c.exactProviders),
+		BranchDiversity:   len(c.exactBranches),
+		TrustWeight:       c.exactWeight,
+		Version:           c.value.version,
 	}
+}
+
+func (s sourceObservation) providerKey() string {
+	host := s.addr
+	if parsedHost, _, err := net.SplitHostPort(s.addr); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return ""
+	}
+	if ip.IsLoopback() {
+		return "loopback:" + ip.String()
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return "provider4:" + v4.Mask(net.CIDRMask(16, 32)).String()
+	}
+	return "provider6:" + ip.Mask(net.CIDRMask(32, 128)).String()
 }
 
 func (s sourceObservation) networkKey() string {
@@ -615,6 +650,18 @@ func compareObservationStrength(left, right *candidateObservation) int {
 		return 1
 	}
 	if left.exactWeight < right.exactWeight {
+		return -1
+	}
+	if len(left.exactProviders) > len(right.exactProviders) {
+		return 1
+	}
+	if len(left.exactProviders) < len(right.exactProviders) {
+		return -1
+	}
+	if len(left.exactNetworks) > len(right.exactNetworks) {
+		return 1
+	}
+	if len(left.exactNetworks) < len(right.exactNetworks) {
 		return -1
 	}
 	if left.value.fingerprint < right.value.fingerprint {

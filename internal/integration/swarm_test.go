@@ -362,6 +362,15 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 		t.Fatalf("hidden DHT descriptor leaked plaintext service metadata: %s", hiddenValue)
 	}
 
+	waitForCondition(t, 5*time.Second, func() bool {
+		value, err := client.dht.RecursiveFindValue(rootCtx, hiddenKey)
+		if err != nil || value == "" {
+			return false
+		}
+		rec, err := dht.DecodeHiddenServiceRecord(hiddenKey, value, serviceName, time.Now())
+		return err == nil && rec.IsHidden && rec.Alias == serviceName
+	}, "anonymous hidden descriptor lookup through relay dht path")
+
 	if _, err := dhtClient.RecursiveFindValue(rootCtx, dht.ServiceKey(record.FullServiceName(owner.name, serviceRec.ServiceName))); err == nil {
 		t.Fatalf("hidden service should not be published under public service DHT key")
 	}
@@ -422,6 +431,33 @@ func TestHiddenServiceRendezvousPlainTCP(t *testing.T) {
 	}
 	if len(seenRelays) != 6 {
 		t.Fatalf("expected 6 unique hidden-service relays, got %d", len(seenRelays))
+	}
+
+	traceMu.Lock()
+	allTraces := append([]onion.TraceEvent(nil), traces...)
+	traceMu.Unlock()
+	var sawDescriptorStore, sawDescriptorLookup bool
+	for _, trace := range allTraces {
+		switch trace.Purpose {
+		case "dht-hidden-desc-store":
+			sawDescriptorStore = true
+		case "dht-hidden-desc-lookup":
+			sawDescriptorLookup = true
+		default:
+			continue
+		}
+		if len(trace.RelayAddrs) != 3 {
+			t.Fatalf("expected hidden descriptor privacy circuits to use 3 relays, got %d in %+v", len(trace.RelayAddrs), trace)
+		}
+		if trace.TargetAddr == "" {
+			t.Fatalf("expected hidden descriptor privacy circuit to target a DHT holder: %+v", trace)
+		}
+	}
+	if !sawDescriptorStore {
+		t.Fatal("expected hidden descriptor publication to use anonymous relay DHT transport")
+	}
+	if !sawDescriptorLookup {
+		t.Fatal("expected hidden descriptor lookup to use anonymous relay DHT transport")
 	}
 }
 

@@ -21,6 +21,7 @@ type Server struct {
 	RT        *RoutingTable
 	Values    map[string]string // The decentralized database
 	publisher identity.Identity
+	hidden    HiddenDescriptorPrivacyConfig
 	versions  map[string]StoredValueState
 	replicas  map[string]ReplicaObservation
 	mu        sync.RWMutex
@@ -369,11 +370,7 @@ func (s *Server) storeValidated(key, value string, now time.Time) (string, bool,
 }
 
 func (s *Server) sendStore(ctx context.Context, addr, key, value string) error {
-	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
+	conn, err := s.dialDHTConn(ctx, addr, key, "store")
 	if err != nil {
 		return err
 	}
@@ -536,11 +533,7 @@ func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.
 }
 
 func (s *Server) QueryValue(ctx context.Context, addr, key string) (string, []proto.NodeInfo, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(dialCtx, "tcp6", addr)
+	conn, err := s.dialDHTConn(ctx, addr, key, "lookup")
 	if err != nil {
 		return "", nil, err
 	}
@@ -663,27 +656,60 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 	}
 
 	out := make([]proto.NodeInfo, 0, limit)
-	sameNetwork := make([]proto.NodeInfo, 0, len(nodes))
-	networks := map[string]struct{}{}
+	remaining := make([]proto.NodeInfo, 0, len(nodes))
+	seenProviders := map[string]struct{}{}
+	seenNetworks := map[string]struct{}{}
+	selected := map[string]struct{}{}
+
+	appendNode := func(node proto.NodeInfo) bool {
+		if _, ok := selected[node.ID]; ok {
+			return false
+		}
+		selected[node.ID] = struct{}{}
+		out = append(out, node)
+		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
+			seenProviders[provider] = struct{}{}
+		}
+		if network := (sourceObservation{addr: node.Addr}).networkKey(); network != "" {
+			seenNetworks[network] = struct{}{}
+		}
+		return len(out) == limit
+	}
 
 	for _, node := range nodes {
-		network := sourceObservation{addr: node.Addr}.networkKey()
-		if network == "" {
-			out = append(out, node)
-		} else if _, ok := networks[network]; !ok {
-			networks[network] = struct{}{}
-			out = append(out, node)
-		} else {
-			sameNetwork = append(sameNetwork, node)
+		provider := (sourceObservation{addr: node.Addr}).providerKey()
+		if provider == "" {
+			remaining = append(remaining, node)
+			continue
 		}
-		if len(out) == limit {
+		if _, ok := seenProviders[provider]; ok {
+			remaining = append(remaining, node)
+			continue
+		}
+		if appendNode(node) {
 			return out
 		}
 	}
 
-	for _, node := range sameNetwork {
-		out = append(out, node)
-		if len(out) == limit {
+	secondPass := remaining
+	remaining = remaining[:0]
+	for _, node := range secondPass {
+		network := (sourceObservation{addr: node.Addr}).networkKey()
+		if network == "" {
+			remaining = append(remaining, node)
+			continue
+		}
+		if _, ok := seenNetworks[network]; ok {
+			remaining = append(remaining, node)
+			continue
+		}
+		if appendNode(node) {
+			return out
+		}
+	}
+
+	for _, node := range remaining {
+		if appendNode(node) {
 			return out
 		}
 	}

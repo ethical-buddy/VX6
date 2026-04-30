@@ -1730,6 +1730,7 @@ func discoveryCandidates(cfg config.File) []string {
 
 func newDHTClient(cfg config.File) *dht.Server {
 	client := dht.NewServer("cli-observer")
+	var registryNodes []record.EndpointRecord
 
 	for _, addr := range cfg.Node.BootstrapAddrs {
 		if addr != "" {
@@ -1744,12 +1745,30 @@ func newDHTClient(cfg config.File) *dht.Server {
 	}
 	if registry, err := loadLocalRegistry(cfg.Node.DataDir); err == nil {
 		nodes, _ := registry.Snapshot()
+		registryNodes = append(registryNodes, nodes...)
 		for _, rec := range nodes {
 			if rec.NodeID != "" && rec.Address != "" {
 				client.RT.AddNode(proto.NodeInfo{ID: rec.NodeID, Addr: rec.Address})
 			}
 		}
 	}
+	client.SetHiddenDescriptorPrivacy(dht.HiddenDescriptorPrivacyConfig{
+		TransportMode: cfg.Node.TransportMode,
+		RelayHopCount: 3,
+		RelayCandidates: func() []record.EndpointRecord {
+			return append([]record.EndpointRecord(nil), registryNodes...)
+		},
+		ExcludeAddrs: func() []string {
+			exclude := make([]string, 0, 2)
+			if cfg.Node.AdvertiseAddr != "" {
+				exclude = append(exclude, cfg.Node.AdvertiseAddr)
+			}
+			if cfg.Node.ListenAddr != "" && cfg.Node.ListenAddr != cfg.Node.AdvertiseAddr {
+				exclude = append(exclude, cfg.Node.ListenAddr)
+			}
+			return exclude
+		},
+	})
 	return client
 }
 

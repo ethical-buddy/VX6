@@ -407,17 +407,43 @@ func TestLookupCollectorRequiresBranchDiversityForNonLoopbackSources(t *testing.
 	payload := mustSignedValue(t, id, NodeNameKey("owner"), mustJSON(t, rec), now)
 
 	collector := newLookupCollector(NodeNameKey("owner"), now)
-	collector.Observe(sourceObservation{nodeID: "a", addr: "[2001:db8:1::1]:4242", trust: 1, branch: 1}, payload)
-	collector.Observe(sourceObservation{nodeID: "b", addr: "[2001:db8:2::1]:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "198.51.100.1:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "203.0.113.1:4242", trust: 1, branch: 1}, payload)
 	if _, err := collector.Resolve(2); err == nil || !errors.Is(err, ErrInsufficientConfirmation) {
 		t.Fatalf("expected insufficient confirmation without branch diversity, got %v", err)
 	}
 
 	collector = newLookupCollector(NodeNameKey("owner"), now)
-	collector.Observe(sourceObservation{nodeID: "a", addr: "[2001:db8:1::1]:4242", trust: 1, branch: 1}, payload)
-	collector.Observe(sourceObservation{nodeID: "b", addr: "[2001:db8:2::1]:4242", trust: 1, branch: 2}, payload)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "198.51.100.1:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "203.0.113.1:4242", trust: 1, branch: 2}, payload)
 	if _, err := collector.Resolve(2); err != nil {
 		t.Fatalf("expected branch-diverse confirmation to succeed, got %v", err)
+	}
+}
+
+func TestLookupCollectorRequiresProviderDiversityForNonLoopbackSources(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	rec := mustEndpointRecordForIdentity(t, id, "owner", "[2001:db8::99]:4242", now)
+	payload := mustSignedValue(t, id, NodeNameKey("owner"), mustJSON(t, rec), now)
+
+	collector := newLookupCollector(NodeNameKey("owner"), now)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "198.51.10.1:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "198.51.20.1:4242", trust: 1, branch: 2}, payload)
+	if _, err := collector.Resolve(2); err == nil || !errors.Is(err, ErrInsufficientConfirmation) {
+		t.Fatalf("expected insufficient confirmation without provider diversity, got %v", err)
+	}
+
+	collector = newLookupCollector(NodeNameKey("owner"), now)
+	collector.Observe(sourceObservation{nodeID: "a", addr: "198.51.10.1:4242", trust: 1, branch: 1}, payload)
+	collector.Observe(sourceObservation{nodeID: "b", addr: "203.0.113.1:4242", trust: 1, branch: 2}, payload)
+	if _, err := collector.Resolve(2); err != nil {
+		t.Fatalf("expected provider-diverse confirmation to succeed, got %v", err)
 	}
 }
 
@@ -588,16 +614,16 @@ func TestStoreRejectsConflictingVerifiedFamilyAndTracksConflict(t *testing.T) {
 	}
 }
 
-func TestSelectReplicationNodesPrefersDistinctNetworks(t *testing.T) {
+func TestSelectReplicationNodesPrefersDistinctProvidersAndNetworks(t *testing.T) {
 	t.Parallel()
 
 	nodes := []proto.NodeInfo{
-		{ID: "n1", Addr: "[2001:db8:1::1]:4242"},
-		{ID: "n2", Addr: "[2001:db8:1::2]:4242"},
-		{ID: "n3", Addr: "[2001:db8:2::1]:4242"},
-		{ID: "n4", Addr: "[2001:db8:3::1]:4242"},
-		{ID: "n5", Addr: "[2001:db8:4::1]:4242"},
-		{ID: "n6", Addr: "[2001:db8:5::1]:4242"},
+		{ID: "n1", Addr: "198.51.1.1:4242"},
+		{ID: "n2", Addr: "198.51.2.1:4242"},
+		{ID: "n3", Addr: "203.0.113.1:4242"},
+		{ID: "n4", Addr: "192.0.2.1:4242"},
+		{ID: "n5", Addr: "198.51.3.1:4242"},
+		{ID: "n6", Addr: "203.0.113.2:4242"},
 	}
 
 	selected := selectReplicationNodes(nodes, 4)
@@ -605,12 +631,19 @@ func TestSelectReplicationNodesPrefersDistinctNetworks(t *testing.T) {
 		t.Fatalf("expected 4 selected nodes, got %d", len(selected))
 	}
 
+	seenProviders := map[string]struct{}{}
 	seenNetworks := map[string]struct{}{}
 	for _, node := range selected {
+		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
+			seenProviders[provider] = struct{}{}
+		}
 		network := sourceObservation{addr: node.Addr}.networkKey()
 		if network != "" {
 			seenNetworks[network] = struct{}{}
 		}
+	}
+	if len(seenProviders) < 3 {
+		t.Fatalf("expected provider spread, got %d providers from %+v", len(seenProviders), selected)
 	}
 	if len(seenNetworks) < 4 {
 		t.Fatalf("expected diverse replicas, got %d networks from %+v", len(seenNetworks), selected)

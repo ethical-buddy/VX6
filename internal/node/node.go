@@ -98,6 +98,29 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Services == nil {
 		cfg.Services = map[string]string{}
 	}
+	if cfg.DHT != nil {
+		cfg.DHT.SetHiddenDescriptorPrivacy(dht.HiddenDescriptorPrivacyConfig{
+			TransportMode: cfg.TransportMode,
+			RelayHopCount: 3,
+			RelayCandidates: func() []record.EndpointRecord {
+				if cfg.Registry == nil {
+					return nil
+				}
+				nodes, _ := cfg.Registry.Snapshot()
+				return append([]record.EndpointRecord(nil), nodes...)
+			},
+			ExcludeAddrs: func() []string {
+				exclude := make([]string, 0, 2)
+				if cfg.AdvertiseAddr != "" {
+					exclude = append(exclude, cfg.AdvertiseAddr)
+				}
+				if cfg.ListenAddr != "" && cfg.ListenAddr != cfg.AdvertiseAddr {
+					exclude = append(exclude, cfg.ListenAddr)
+				}
+				return exclude
+			},
+		})
+	}
 	startedAt := time.Now()
 
 	listener, err := vxtransport.Listen(cfg.TransportMode, cfg.ListenAddr)
