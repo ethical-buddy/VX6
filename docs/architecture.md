@@ -1,81 +1,112 @@
 # VX6 Architecture
 
-VX6 is a single-binary system with a small set of runtime layers.
+VX6 is a small stack with a few clear layers.
 
-## Main Parts
+## 1. Identity
 
-### 1. Identity
+Every node has:
 
-Each node has:
+- one Ed25519 identity keypair
+- one stable VX6 node ID derived from that key
 
-- a persistent Ed25519 keypair
-- a stable VX6 node ID
+This identity signs:
 
-Default storage:
+- endpoint records
+- service records
+- DHT envelopes and catalogs
 
-- `~/.config/vx6/identity.json`
+## 2. Node Runtime
 
-### 2. Node Runtime
+`vx6 node` is the runtime process.
 
-`vx6 node` runs the IPv6 listener and handles:
+It listens for:
 
-- file transfer
-- discovery requests
+- discovery traffic
 - DHT requests
-- direct service connections
-- relay path extension
-- hidden-service rendezvous control
+- direct service sessions
+- relay extension traffic
+- hidden-service control and rendezvous traffic
+- file transfers
 
-### 3. Discovery
+## 3. Service Model
 
-The local registry stores:
+VX6 is built around localhost-to-localhost service access.
 
-- known node records
-- known service records
+That means:
 
-Bootstrap nodes and known peers exchange snapshots and signed updates.
+- the owner keeps the real app on `127.0.0.1`
+- the client uses a local forwarder on its own machine
+- VX6 carries the stream between the two nodes
 
-### 4. DHT
+The app itself does not need to become directly public.
 
-The DHT stores lookup keys for:
+## 4. Discovery
 
-- nodes by name
-- nodes by ID
-- direct services
-- hidden service aliases
+VX6 has two discovery layers:
 
-### 5. Service Proxy
+- registry sync between known peers
+- DHT lookups for public, private, and hidden records
 
-Direct services work like this:
+The local registry is a working cache.
+The DHT is the distributed lookup path.
 
-1. client resolves a service record
-2. client opens a VX6 session to the remote node
-3. remote node forwards the stream to the local TCP target
+## 5. DHT
 
-### 6. Hidden Services
+The DHT stores a bounded distributed set of signed records.
 
-Hidden services add:
+Main record families:
+
+- `node/name/...`
+- `node/id/...`
+- `service/...`
+- `private-catalog/...`
+- `hidden-desc/v1/...`
+
+Important point:
+
+- not every node stores every record
+- each record is stored only on a small responsible set of nodes
+
+## 6. Encryption
+
+VX6 uses two different protection layers:
+
+- secure session encryption between nodes
+- layered relay protection for hidden-service paths
+
+Hidden services also use:
+
+- encrypted hidden descriptors
+- blinded rotating lookup keys
+- invite secrets
+
+## 7. Hidden Services
+
+Hidden services use:
 
 - intro nodes
 - guard nodes
-- rendezvous selection
-- relay planning
+- rendezvous nodes
+- encrypted and blinded descriptor lookup
+- onion-style relay circuits
 
-The working transport is plain multi-hop TCP plus the VX6 secure session. It is not Tor-style layered onion encryption.
+Current result:
 
-### 7. Background Operation
+- much stronger privacy than plain alias lookup
+- not a full Tor replacement
 
-VX6 can run under systemd and reload changed config with:
+## 8. Transport
 
-```bash
-vx6 reload
-```
+Current transport is TCP only.
 
-Reload is meant for:
+The code keeps a transport abstraction so QUIC can be added later, but this build does not use QUIC.
 
-- new services
-- changed bootstrap list
-- changed advertise address
-- changed hidden-service settings
+## 9. Runtime Control
 
-Changing the listen address still requires a restart.
+VX6 exposes a local runtime control channel for:
+
+- live status
+- reload requests
+- DHT publish health
+
+This is the shared control model for Linux, Windows, and macOS going forward.

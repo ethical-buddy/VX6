@@ -1,66 +1,37 @@
-# VX6 Discovery
+# Discovery
 
-VX6 uses a practical discovery model:
+VX6 discovery has two parts.
 
-- bootstrap nodes for first contact
-- signed records for trust
-- local registry cache for resilience
-- DHT-backed lookup for node and service keys
+## Local Registry
 
-## What Gets Published
+The registry is the local working view of the network.
 
-VX6 publishes:
+It stores:
 
-- node records
-- direct service records
-- hidden service descriptors
+- known node records
+- known service records
 
-Each record is signed by the publishing node.
+Peers exchange signed snapshots and updates.
 
-## Bootstrap Role
+## DHT
 
-A bootstrap node gives a new node its first known VX6 peers.
+The DHT is the distributed lookup layer.
 
-After that, nodes:
+It is used when:
 
-- keep a local registry cache
-- sync with known peers
-- republish their own node and service records
-- answer lookups from their cached state
+- the record is not already in your local registry
+- you want a public service by exact name
+- you want a private service catalog for one user
+- you want a hidden descriptor by invite
 
-That means a bootstrap is required for first contact, but not for every later lookup.
+## Important Rule
 
-## DHT Role
+VX6 is not meant to store every user and every service on every node.
 
-VX6 stores and resolves:
+Instead:
 
-- `node/name/<name>`
-- `node/id/<node_id>`
-- `service/<user.service>`
-- `hidden/<alias>`
+- routing tables stay small
+- records are replicated to a bounded set
+- lookups walk toward the key
 
-## Hidden Services
-
-Hidden services do not publish a direct service endpoint.
-
-They publish:
-
-- alias
-- intro points
-- standby intro points
-- hidden profile
-
-## Practical Model
-
-VX6 is not trying to be bootstrap-free from absolute zero.
-
-The intended model is:
-
-1. first contact through bootstrap or a known peer
-2. node and service state spreads across known nodes
-3. later updates continue through peers and DHT
-
-## Operator Notes
-
-- if you add bootstraps or services while the node is running, use `vx6 reload`
-- if you know a remote IPv6 address already, you can skip discovery entirely and use `--addr`
+That is what makes the design scale better than a full global registry.

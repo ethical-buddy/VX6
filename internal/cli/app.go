@@ -10,11 +10,9 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/vx6/vx6/internal/config"
@@ -90,7 +88,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp|quic] [--relay on|off] [--relay-percent N] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
+	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
@@ -114,6 +112,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug ebpf-status")
 	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
 	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
+	fmt.Fprintln(w, "  vx6-gui")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Working features:")
 	fmt.Fprintln(w, "  - Signed endpoint and service discovery via bootstrap registry")
@@ -126,6 +125,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Experimental / not complete:")
 	fmt.Fprintln(w, "  - eBPF loader and attach path (embedded bytecode is present and tested)")
+	fmt.Fprintln(w, "  - QUIC transport is not active in this build; all network traffic uses TCP")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  vx6 init --name alice --listen '[::]:4242' --bootstrap '[::1]:4242'")
@@ -162,7 +162,7 @@ func runInit(args []string) error {
 	name := fs.String("name", "", "local human-readable node name")
 	listenAddr := fs.String("listen", "[::]:4242", "default IPv6 listen address in [addr]:port form")
 	advertiseAddr := fs.String("advertise", "", "public IPv6 address in [addr]:port form for discovery records")
-	transportMode := fs.String("transport", vxtransport.ModeAuto, "neighbor transport mode: auto, tcp, or quic")
+	transportMode := fs.String("transport", vxtransport.ModeAuto, "neighbor transport mode: auto or tcp (quic is reserved for a future transport)")
 	hiddenNode := fs.Bool("hidden-node", false, "do not publish the node endpoint record; publish services only")
 	relayMode := fs.String("relay", config.RelayModeOn, "relay participation: on or off")
 	relayPercent := fs.Int("relay-percent", 33, "maximum share of local relay capacity reserved for transit work")
@@ -466,8 +466,7 @@ func runNode(ctx context.Context, args []string) error {
 
 	reloadCh := make(chan struct{}, 1)
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP)
-	defer signal.Stop(sigCh)
+	registerReloadSignal(sigCh)
 	go func() {
 		for {
 			select {
@@ -559,10 +558,10 @@ func runReload(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read node pid file: %w", err)
 	}
-	if err := syscall.Kill(pid, 0); err != nil {
+	if err := processExists(pid); err != nil {
 		return fmt.Errorf("check node process: %w", err)
 	}
-	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+	if err := sendReloadSignal(pid); err != nil {
 		return fmt.Errorf("signal node reload: %w", err)
 	}
 	fmt.Printf("reload_sent\tmode=signal\tpid=%d\n", pid)
@@ -1776,7 +1775,6 @@ func writePIDFile(path string, pid int) error {
 }
 
 type nodeRuntimeLock struct {
-	file        *os.File
 	lockPath    string
 	pidPath     string
 	controlPath string
@@ -1799,58 +1797,38 @@ func acquireNodeLock(configPath string) (*nodeRuntimeLock, error) {
 		return nil, fmt.Errorf("create runtime directory: %w", err)
 	}
 
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("open runtime lock: %w", err)
-	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = lockFile.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	acquired := false
+	for attempt := 0; attempt < 2 && !acquired; attempt++ {
+		if err := os.Mkdir(lockPath, 0o755); err == nil {
+			acquired = true
+			break
+		} else if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("lock runtime state: %w", err)
+		}
+		if !clearStaleRuntimeLock(lockPath, pidPath, controlPath) {
 			return nil, runningNodeError(pidPath)
 		}
-		return nil, fmt.Errorf("lock runtime state: %w", err)
 	}
-	if err := lockFile.Truncate(0); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
-		return nil, fmt.Errorf("reset runtime lock: %w", err)
-	}
-	if _, err := lockFile.Seek(0, 0); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
-		return nil, fmt.Errorf("seek runtime lock: %w", err)
-	}
-	if _, err := fmt.Fprintf(lockFile, "%d\n", os.Getpid()); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
-		return nil, fmt.Errorf("write runtime lock: %w", err)
-	}
-	if err := lockFile.Sync(); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
-		return nil, fmt.Errorf("sync runtime lock: %w", err)
+	if !acquired {
+		return nil, runningNodeError(pidPath)
 	}
 	if err := writePIDFile(pidPath, os.Getpid()); err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
+		_ = os.Remove(pidPath)
+		_ = os.Remove(controlPath)
+		_ = os.Remove(lockPath)
 		return nil, err
 	}
 
-	return &nodeRuntimeLock{file: lockFile, lockPath: lockPath, pidPath: pidPath, controlPath: controlPath}, nil
+	return &nodeRuntimeLock{lockPath: lockPath, pidPath: pidPath, controlPath: controlPath}, nil
 }
 
 func (l *nodeRuntimeLock) Close() error {
-	if l == nil || l.file == nil {
+	if l == nil {
 		return nil
 	}
 	_ = os.Remove(l.pidPath)
 	_ = os.Remove(l.controlPath)
-	_ = l.file.Truncate(0)
-	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
-	err := l.file.Close()
-	l.file = nil
-	_ = os.Remove(l.lockPath)
-	return err
+	return os.Remove(l.lockPath)
 }
 
 func runningNodeError(pidPath string) error {
@@ -1859,6 +1837,21 @@ func runningNodeError(pidPath string) error {
 		return fmt.Errorf("vx6 node is already running in the background (pid %d). use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'", pid)
 	}
 	return errors.New("vx6 node is already running in the background. use 'vx6 status', 'vx6 reload', or 'systemctl --user restart vx6'")
+}
+
+func clearStaleRuntimeLock(lockPath, pidPath, controlPath string) bool {
+	pid, err := readNodePID(pidPath)
+	if err == nil && pid > 0 {
+		if err := processExists(pid); err == nil {
+			return false
+		}
+	}
+	_ = os.Remove(pidPath)
+	_ = os.Remove(controlPath)
+	if err := os.Remove(lockPath); err == nil || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return false
 }
 
 func readNodePID(pidPath string) (int, error) {
