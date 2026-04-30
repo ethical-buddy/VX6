@@ -5,11 +5,16 @@ PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
 CLANG ?= clang
 GO ?= go
+GOCACHE ?= /tmp/vx6-go-build
+GOMODCACHE ?= /tmp/vx6-go-mod
 EBPF_SRC := internal/ebpf/onion_relay.c
 EBPF_OBJ := internal/onion/onion_relay.o
+VX6_BIN := vx6
+VX6_GUI_BIN := vx6-gui
 
 build:
-	@GO_BIN=""; \
+	@set -e; \
+	GO_BIN=""; \
 	for candidate in "$(GO)" go /usr/local/go/bin/go /usr/bin/go; do \
 		[ -z "$$candidate" ] && continue; \
 		if command -v "$$candidate" >/dev/null 2>&1; then \
@@ -31,8 +36,11 @@ build:
 		echo "  sudo make install"; \
 		exit 1; \
 	fi; \
+	mkdir -p "$(GOCACHE)" "$(GOMODCACHE)"; \
 	echo "building vx6 with $$GO_BIN"; \
-	"$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o vx6 ./cmd/vx6
+	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_BIN) ./cmd/vx6; \
+	echo "building vx6-gui with $$GO_BIN"; \
+	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_GUI_BIN) ./cmd/vx6-gui
 
 build-ebpf: ebpf build
 
@@ -112,14 +120,15 @@ ebpf:
 	fi
 
 clean:
-	rm -f vx6 $(EBPF_OBJ)
+	rm -f $(VX6_BIN) $(VX6_GUI_BIN)
 
 install:
-	@if [ -f vx6 ]; then \
-		echo "installing existing ./vx6"; \
+	@set -e; \
+	if [ -f $(VX6_BIN) ] && [ -f $(VX6_GUI_BIN) ]; then \
+		echo "installing existing ./$(VX6_BIN) and ./$(VX6_GUI_BIN)"; \
 	else \
-		echo "vx6 binary not found in the current directory"; \
-		echo "trying to build it before install"; \
+		echo "release binaries not found in the current directory"; \
+		echo "trying to build them before install"; \
 		GO_BIN=""; \
 		for candidate in "$(GO)" go /usr/local/go/bin/go /usr/bin/go; do \
 			[ -z "$$candidate" ] && continue; \
@@ -134,22 +143,28 @@ install:
 		done; \
 		if [ -z "$$GO_BIN" ]; then \
 			echo "go toolchain not found"; \
-			echo "if you already built VX6, place the executable at ./vx6 and rerun:"; \
+			echo "if you already built VX6, place the executables at ./$(VX6_BIN) and ./$(VX6_GUI_BIN) and rerun:"; \
 			echo "  sudo make install"; \
 			echo "otherwise build with:"; \
 			echo "  make build"; \
 			echo "or:"; \
-			echo "  /usr/local/go/bin/go build -o ./vx6 ./cmd/vx6"; \
+			echo "  /usr/local/go/bin/go build -o ./$(VX6_BIN) ./cmd/vx6"; \
+			echo "  /usr/local/go/bin/go build -o ./$(VX6_GUI_BIN) ./cmd/vx6-gui"; \
 			exit 1; \
 		fi; \
+		mkdir -p "$(GOCACHE)" "$(GOMODCACHE)"; \
 		echo "building vx6 with $$GO_BIN before install"; \
-		"$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o vx6 ./cmd/vx6; \
+		GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_BIN) ./cmd/vx6; \
+		echo "building vx6-gui with $$GO_BIN before install"; \
+		GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_GUI_BIN) ./cmd/vx6-gui; \
 	fi
-	install -Dm755 vx6 $(DESTDIR)$(BINDIR)/vx6
+	install -Dm755 $(VX6_BIN) $(DESTDIR)$(BINDIR)/vx6
+	install -Dm755 $(VX6_GUI_BIN) $(DESTDIR)$(BINDIR)/vx6-gui
 	install -Dm644 deployments/systemd/vx6.service $(DESTDIR)$(PREFIX)/lib/systemd/user/vx6.service
 
 test:
-	@GO_BIN=""; \
+	@set -e; \
+	GO_BIN=""; \
 	for candidate in "$(GO)" go /usr/local/go/bin/go /usr/bin/go; do \
 		[ -z "$$candidate" ] && continue; \
 		if command -v "$$candidate" >/dev/null 2>&1; then \
@@ -165,4 +180,5 @@ test:
 		echo "go toolchain not found"; \
 		exit 1; \
 	fi; \
-	"$$GO_BIN" test ./...
+	mkdir -p "$(GOCACHE)" "$(GOMODCACHE)"; \
+	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" test ./...
