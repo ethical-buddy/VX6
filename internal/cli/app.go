@@ -227,6 +227,7 @@ func runInit(args []string) error {
 	cfg.Node.DownloadDir = *downloadDir
 	cfg.Node.FileReceiveMode = config.NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
 	if len(bootstraps) > 0 {
+		cfg.Node.Bootstraps = nil
 		cfg.Node.BootstrapAddrs = append([]string(nil), bootstraps...)
 	}
 	if err := store.Save(cfg); err != nil {
@@ -511,7 +512,7 @@ func runNode(ctx context.Context, args []string) error {
 		FileReceiveMode:      cfgFile.Node.FileReceiveMode,
 		AllowedFileSenders:   append([]string(nil), cfgFile.Node.AllowedFileSenders...),
 		DHT:                  dht.NewServerWithIdentity(id),
-		BootstrapAddrs:       cfgFile.Node.BootstrapAddrs,
+		BootstrapAddrs:       config.BootstrapAddresses(cfgFile.Node),
 		Services:             services,
 		Registry:             registry,
 		Reload:               reloadCh,
@@ -845,12 +846,21 @@ func runBootstrap(args []string) error {
 	if err != nil {
 		return err
 	}
-	list, err := store.ListBootstraps()
+	entries, err := store.ListBootstrapEntries()
 	if err != nil {
 		return err
 	}
-	for _, b := range list {
-		fmt.Println(b)
+	for _, entry := range entries {
+		switch {
+		case entry.NodeName != "" && entry.NodeID != "":
+			fmt.Printf("%s\tname=%s\tnode_id=%s\n", entry.Address, entry.NodeName, entry.NodeID)
+		case entry.NodeName != "":
+			fmt.Printf("%s\tname=%s\n", entry.Address, entry.NodeName)
+		case entry.NodeID != "":
+			fmt.Printf("%s\tnode_id=%s\n", entry.Address, entry.NodeID)
+		default:
+			fmt.Println(entry.Address)
+		}
 	}
 	return nil
 }
@@ -1739,7 +1749,7 @@ func discoveryCandidates(cfg config.File) []string {
 		out = append(out, addr)
 	}
 
-	for _, addr := range cfg.Node.BootstrapAddrs {
+	for _, addr := range config.BootstrapAddresses(cfg.Node) {
 		add(addr)
 	}
 	for _, peer := range cfg.Peers {
@@ -1758,7 +1768,7 @@ func newDHTClient(cfg config.File) *dht.Server {
 	client := dht.NewServer("cli-observer")
 	var registryNodes []record.EndpointRecord
 
-	for _, addr := range cfg.Node.BootstrapAddrs {
+	for _, addr := range config.BootstrapAddresses(cfg.Node) {
 		if addr != "" {
 			client.RT.AddNode(proto.NodeInfo{ID: "seed:" + addr, Addr: addr})
 		}
