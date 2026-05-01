@@ -41,13 +41,15 @@ type NodeConfig struct {
 	RelayResourcePercent int              `json:"relay_resource_percent,omitempty"`
 	DataDir              string           `json:"data_dir"`
 	DownloadDir          string           `json:"download_dir"`
-	BootstrapAddrs       []string         `json:"bootstrap_addrs"`
-	Bootstraps           []BootstrapEntry `json:"bootstraps,omitempty"`
+	KnownPeerAddrs       []string         `json:"known_peer_addrs,omitempty"`
+	KnownPeers           []KnownPeerEntry `json:"known_peers,omitempty"`
+	BootstrapAddrs       []string         `json:"bootstrap_addrs,omitempty"`
+	Bootstraps           []KnownPeerEntry `json:"bootstraps,omitempty"`
 	FileReceiveMode      string           `json:"file_receive_mode,omitempty"`
 	AllowedFileSenders   []string         `json:"allowed_file_senders,omitempty"`
 }
 
-type BootstrapEntry struct {
+type KnownPeerEntry struct {
 	NodeID   string `json:"node_id,omitempty"`
 	NodeName string `json:"node_name,omitempty"`
 	Address  string `json:"address"`
@@ -203,7 +205,7 @@ func (s *Store) ListPeers() ([]string, map[string]PeerEntry, error) {
 	return names, cfg.Peers, nil
 }
 
-func (s *Store) AddBootstrap(address string) error {
+func (s *Store) AddKnownPeerAddress(address string) error {
 	cfg, err := s.Load()
 	if err != nil {
 		return err
@@ -212,26 +214,28 @@ func (s *Store) AddBootstrap(address string) error {
 		return err
 	}
 
-	cfg.Node.Bootstraps = upsertBootstrapEntry(cfg.Node.Bootstraps, BootstrapEntry{Address: address})
+	cfg.Node.KnownPeers = upsertKnownPeerEntry(cfg.Node.KnownPeers, KnownPeerEntry{Address: address})
+	cfg.Node.BootstrapAddrs = nil
+	cfg.Node.Bootstraps = nil
 	return s.Save(cfg)
 }
 
-func (s *Store) ListBootstraps() ([]string, error) {
+func (s *Store) ListKnownPeerAddresses() ([]string, error) {
 	cfg, err := s.Load()
 	if err != nil {
 		return nil, err
 	}
 
-	out := BootstrapAddresses(cfg.Node)
+	out := KnownPeerAddresses(cfg.Node)
 	return out, nil
 }
 
-func (s *Store) ListBootstrapEntries() ([]BootstrapEntry, error) {
+func (s *Store) ListKnownPeerEntries() ([]KnownPeerEntry, error) {
 	cfg, err := s.Load()
 	if err != nil {
 		return nil, err
 	}
-	out := append([]BootstrapEntry(nil), cfg.Node.Bootstraps...)
+	out := append([]KnownPeerEntry(nil), cfg.Node.KnownPeers...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].NodeName != out[j].NodeName {
 			return out[i].NodeName < out[j].NodeName
@@ -244,17 +248,19 @@ func (s *Store) ListBootstrapEntries() ([]BootstrapEntry, error) {
 	return out, nil
 }
 
-func (s *Store) UpsertBootstrapRecord(rec record.EndpointRecord) error {
+func (s *Store) UpsertKnownPeerRecord(rec record.EndpointRecord) error {
 	cfg, err := s.Load()
 	if err != nil {
 		return err
 	}
-	updated, changed := mergeBootstrapRecord(cfg.Node.Bootstraps, rec)
+	updated, changed := mergeKnownPeerRecord(cfg.Node.KnownPeers, rec)
 	if !changed {
 		return nil
 	}
-	cfg.Node.Bootstraps = updated
+	cfg.Node.KnownPeers = updated
+	cfg.Node.KnownPeerAddrs = nil
 	cfg.Node.BootstrapAddrs = nil
+	cfg.Node.Bootstraps = nil
 	return s.Save(cfg)
 }
 
@@ -343,8 +349,10 @@ func normalize(cfg *File) {
 	if cfg.Node.DownloadDir == "" {
 		cfg.Node.DownloadDir = defaultDownloadDirValue()
 	}
-	cfg.Node.Bootstraps = normalizeBootstrapEntries(cfg.Node.Bootstraps, cfg.Node.BootstrapAddrs)
-	cfg.Node.BootstrapAddrs = BootstrapAddresses(cfg.Node)
+	cfg.Node.KnownPeers = normalizeKnownPeerEntries(cfg.Node.KnownPeers, cfg.Node.KnownPeerAddrs, cfg.Node.Bootstraps, cfg.Node.BootstrapAddrs)
+	cfg.Node.KnownPeerAddrs = KnownPeerAddresses(cfg.Node)
+	cfg.Node.Bootstraps = nil
+	cfg.Node.BootstrapAddrs = nil
 	cfg.Node.FileReceiveMode = NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
 	cfg.Node.AllowedFileSenders = uniqueSortedStrings(cfg.Node.AllowedFileSenders)
 	if cfg.Node.FileReceiveMode != FileReceiveTrusted {
@@ -389,9 +397,9 @@ func normalize(cfg *File) {
 	}
 }
 
-func BootstrapAddresses(node NodeConfig) []string {
+func KnownPeerAddresses(node NodeConfig) []string {
 	seen := map[string]struct{}{}
-	out := make([]string, 0, len(node.Bootstraps)+len(node.BootstrapAddrs))
+	out := make([]string, 0, len(node.KnownPeers)+len(node.KnownPeerAddrs)+len(node.Bootstraps)+len(node.BootstrapAddrs))
 	add := func(addr string) {
 		if addr == "" {
 			return
@@ -401,6 +409,12 @@ func BootstrapAddresses(node NodeConfig) []string {
 		}
 		seen[addr] = struct{}{}
 		out = append(out, addr)
+	}
+	for _, entry := range node.KnownPeers {
+		add(strings.TrimSpace(entry.Address))
+	}
+	for _, addr := range node.KnownPeerAddrs {
+		add(strings.TrimSpace(addr))
 	}
 	for _, entry := range node.Bootstraps {
 		add(strings.TrimSpace(entry.Address))
@@ -412,16 +426,50 @@ func BootstrapAddresses(node NodeConfig) []string {
 	return out
 }
 
-func normalizeBootstrapEntries(entries []BootstrapEntry, legacyAddrs []string) []BootstrapEntry {
-	out := make([]BootstrapEntry, 0, len(entries)+len(legacyAddrs))
+func ConfiguredPeerAddresses(cfg File) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(cfg.Peers)+len(cfg.Node.KnownPeers)+len(cfg.Node.KnownPeerAddrs))
+	add := func(addr string) {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			return
+		}
+		if _, ok := seen[addr]; ok {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	for _, addr := range KnownPeerAddresses(cfg.Node) {
+		add(addr)
+	}
+	for _, peer := range cfg.Peers {
+		add(peer.Address)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeKnownPeerEntries(entries []KnownPeerEntry, addrs []string, legacyEntries []KnownPeerEntry, legacyAddrs []string) []KnownPeerEntry {
+	out := make([]KnownPeerEntry, 0, len(entries)+len(addrs)+len(legacyEntries)+len(legacyAddrs))
 	for _, entry := range entries {
-		if normalized, ok := normalizeBootstrapEntry(entry); ok {
-			out = upsertBootstrapEntry(out, normalized)
+		if normalized, ok := normalizeKnownPeerEntry(entry); ok {
+			out = upsertKnownPeerEntry(out, normalized)
+		}
+	}
+	for _, addr := range addrs {
+		if normalized, ok := normalizeKnownPeerEntry(KnownPeerEntry{Address: addr}); ok {
+			out = upsertKnownPeerEntry(out, normalized)
+		}
+	}
+	for _, entry := range legacyEntries {
+		if normalized, ok := normalizeKnownPeerEntry(entry); ok {
+			out = upsertKnownPeerEntry(out, normalized)
 		}
 	}
 	for _, addr := range legacyAddrs {
-		if normalized, ok := normalizeBootstrapEntry(BootstrapEntry{Address: addr}); ok {
-			out = upsertBootstrapEntry(out, normalized)
+		if normalized, ok := normalizeKnownPeerEntry(KnownPeerEntry{Address: addr}); ok {
+			out = upsertKnownPeerEntry(out, normalized)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -436,15 +484,15 @@ func normalizeBootstrapEntries(entries []BootstrapEntry, legacyAddrs []string) [
 	return out
 }
 
-func normalizeBootstrapEntry(entry BootstrapEntry) (BootstrapEntry, bool) {
+func normalizeKnownPeerEntry(entry KnownPeerEntry) (KnownPeerEntry, bool) {
 	entry.NodeID = strings.TrimSpace(entry.NodeID)
 	entry.NodeName = strings.TrimSpace(entry.NodeName)
 	entry.Address = strings.TrimSpace(entry.Address)
 	if entry.Address == "" {
-		return BootstrapEntry{}, false
+		return KnownPeerEntry{}, false
 	}
 	if err := transfer.ValidateIPv6Address(entry.Address); err != nil {
-		return BootstrapEntry{}, false
+		return KnownPeerEntry{}, false
 	}
 	if entry.NodeName != "" && record.ValidateNodeName(entry.NodeName) != nil {
 		entry.NodeName = ""
@@ -452,14 +500,14 @@ func normalizeBootstrapEntry(entry BootstrapEntry) (BootstrapEntry, bool) {
 	return entry, true
 }
 
-func upsertBootstrapEntry(entries []BootstrapEntry, entry BootstrapEntry) []BootstrapEntry {
-	if normalized, ok := normalizeBootstrapEntry(entry); ok {
+func upsertKnownPeerEntry(entries []KnownPeerEntry, entry KnownPeerEntry) []KnownPeerEntry {
+	if normalized, ok := normalizeKnownPeerEntry(entry); ok {
 		entry = normalized
 	} else {
 		return entries
 	}
 	for i := range entries {
-		if bootstrapEntriesMatch(entries[i], entry) {
+		if knownPeerEntriesMatch(entries[i], entry) {
 			if entry.NodeID != "" {
 				entries[i].NodeID = entry.NodeID
 			}
@@ -473,9 +521,9 @@ func upsertBootstrapEntry(entries []BootstrapEntry, entry BootstrapEntry) []Boot
 	return append(entries, entry)
 }
 
-func mergeBootstrapRecord(entries []BootstrapEntry, rec record.EndpointRecord) ([]BootstrapEntry, bool) {
+func mergeKnownPeerRecord(entries []KnownPeerEntry, rec record.EndpointRecord) ([]KnownPeerEntry, bool) {
 	for i := range entries {
-		if bootstrapRecordMatches(entries[i], rec) {
+		if knownPeerRecordMatches(entries[i], rec) {
 			updated := entries[i]
 			updated.NodeID = rec.NodeID
 			updated.NodeName = rec.NodeName
@@ -490,7 +538,7 @@ func mergeBootstrapRecord(entries []BootstrapEntry, rec record.EndpointRecord) (
 	return entries, false
 }
 
-func bootstrapEntriesMatch(a, b BootstrapEntry) bool {
+func knownPeerEntriesMatch(a, b KnownPeerEntry) bool {
 	if a.NodeID != "" && b.NodeID != "" && a.NodeID == b.NodeID {
 		return true
 	}
@@ -500,7 +548,7 @@ func bootstrapEntriesMatch(a, b BootstrapEntry) bool {
 	return a.Address != "" && a.Address == b.Address
 }
 
-func bootstrapRecordMatches(entry BootstrapEntry, rec record.EndpointRecord) bool {
+func knownPeerRecordMatches(entry KnownPeerEntry, rec record.EndpointRecord) bool {
 	if entry.NodeID != "" && entry.NodeID == rec.NodeID {
 		return true
 	}

@@ -974,7 +974,7 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 			AdvertiseAddr:  advertiseAddr,
 			HideEndpoint:   opts.hideEndpoint,
 			DataDir:        dataDir,
-			BootstrapAddrs: append([]string(nil), opts.bootstraps...),
+			KnownPeerAddrs: append([]string(nil), opts.bootstraps...),
 		},
 		Peers:    map[string]config.PeerEntry{},
 		Services: map[string]config.ServiceEntry{},
@@ -994,18 +994,18 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 
 	nodeCtx, cancel := context.WithCancel(parent)
 	cfg := node.Config{
-		Name:           opts.name,
-		NodeID:         id.NodeID,
-		ListenAddr:     listenAddr,
-		AdvertiseAddr:  advertiseAddr,
-		HideEndpoint:   opts.hideEndpoint,
-		DataDir:        dataDir,
-		ConfigPath:     configPath,
-		BootstrapAddrs: append([]string(nil), opts.bootstraps...),
-		Services:       cloneServices(opts.services),
-		DHT:            dht.NewServerWithIdentity(id),
-		Identity:       id,
-		Registry:       registry,
+		Name:          opts.name,
+		NodeID:        id.NodeID,
+		ListenAddr:    listenAddr,
+		AdvertiseAddr: advertiseAddr,
+		HideEndpoint:  opts.hideEndpoint,
+		DataDir:       dataDir,
+		ConfigPath:    configPath,
+		PeerAddrs:     append([]string(nil), opts.bootstraps...),
+		Services:      cloneServices(opts.services),
+		DHT:           dht.NewServerWithIdentity(id),
+		Identity:      id,
+		Registry:      registry,
 		RefreshServices: func() map[string]string {
 			c, err := store.Load()
 			if err != nil {
