@@ -87,7 +87,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--peer [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
+	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--peer [ipv6]:port] [--hidden-node] [--setup-firewall] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
@@ -164,6 +164,7 @@ func runInit(args []string) error {
 	relayPercent := fs.Int("relay-percent", 33, "maximum share of local relay capacity reserved for transit work")
 	dataDir := fs.String("data-dir", defaultDataDirValue(), "directory for VX6 runtime state")
 	downloadDir := fs.String("downloads-dir", defaultDownloadDirValue(), "directory for received files")
+	setupFirewall := fs.Bool("setup-firewall", false, "create firewall exceptions for the listen port (Windows: requires admin privileges)")
 	var peers stringListFlag
 	fs.Var(&peers, "peer", "known peer IPv6 address in [addr]:port form; repeatable")
 
@@ -243,6 +244,20 @@ func runInit(args []string) error {
 	fmt.Printf("node_initialized\t%s\t%s\n", *name, id.NodeID)
 	fmt.Printf("config_path\t%s\n", store.Path())
 	fmt.Printf("identity_path\t%s\n", idStore.Path())
+
+	// Setup firewall exceptions if requested
+	if *setupFirewall {
+		port, err := ExtractPortFromAddress(*listenAddr)
+		if err != nil {
+			return fmt.Errorf("extract port for firewall setup: %w", err)
+		}
+		if err := SetupFirewallException(port, "Both"); err != nil {
+			fmt.Printf("firewall_setup\tport=%d\tstatus=failed\terror=%v\n", port, err)
+		} else {
+			fmt.Printf("firewall_setup\tport=%d\tprotocol=tcp,udp\tstatus=success\n", port)
+		}
+	}
+
 	return nil
 }
 
@@ -1257,6 +1272,10 @@ func runDebug(ctx context.Context, args []string) error {
 		return runDebugEBPFAttach(ctx, args[1:])
 	case "ebpf-detach":
 		return runDebugEBPFDetach(ctx, args[1:])
+	case "firewall-clear":
+		return runDebugFirewallClear(args[1:])
+	case "bootstrap-info":
+		return runDebugBootstrapInfo(args[1:])
 	default:
 		printDebugUsage(os.Stderr)
 		return fmt.Errorf("unknown debug subcommand %q", args[0])
@@ -1268,9 +1287,21 @@ func printDebugUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
 	fmt.Fprintln(w, "  vx6 debug dht-status")
-	fmt.Fprintln(w, "  vx6 debug ebpf-status [--iface IFACE]       (Linux only)")
-	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE         (Linux only)")
-	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE         (Linux only)")
+	fmt.Fprintln(w, "  vx6 debug bootstrap-info")
+	printDebugEBPFUsage(w)
+	printDebugFirewallUsage(w)
+}
+
+func printDebugEBPFUsage(w io.Writer) {
+	fmt.Fprintln(w, "  vx6 debug ebpf-status [--iface IFACE]")
+	fmt.Fprintln(w, "  vx6 debug ebpf-attach --iface IFACE")
+	fmt.Fprintln(w, "  vx6 debug ebpf-detach --iface IFACE")
+}
+
+func printDebugFirewallUsage(w io.Writer) {
+	if runtime.GOOS == "windows" {
+		fmt.Fprintln(w, "  vx6 debug firewall-clear --port PORT")
+	}
 }
 
 func runDebugRegistry(args []string) error {
@@ -1421,6 +1452,11 @@ func runDebugDHTStatus(ctx context.Context, args []string) error {
 }
 
 func runDebugEBPFStatus(args ...string) error {
+	if runtime.GOOS == "windows" {
+		PrintEBPFPlatformNote()
+		return nil
+	}
+
 	fs := flag.NewFlagSet("debug ebpf-status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	iface := fs.String("iface", "", "network interface name")
@@ -1430,9 +1466,6 @@ func runDebugEBPFStatus(args ...string) error {
 
 	if *iface == "" {
 		warning := "embedded XDP program targets the legacy VX6 onion header and is not yet the active fast path for the current encrypted relay data path"
-		if runtime.GOOS != "linux" {
-			warning = "XDP/eBPF status and attach commands are Linux-only; this VX6 build uses the normal user-space TCP path on this platform"
-		}
 		printXDPStatus(onion.XDPStatus{
 			EmbeddedBytecode:     onion.IsEBPFAvailable(),
 			BytecodeSize:         len(onion.OnionRelayBytecode),
@@ -1451,6 +1484,11 @@ func runDebugEBPFStatus(args ...string) error {
 }
 
 func runDebugEBPFAttach(ctx context.Context, args []string) error {
+	if runtime.GOOS == "windows" {
+		PrintEBPFPlatformNote()
+		return nil
+	}
+
 	fs := flag.NewFlagSet("debug ebpf-attach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	iface := fs.String("iface", "", "network interface name")
@@ -1471,6 +1509,11 @@ func runDebugEBPFAttach(ctx context.Context, args []string) error {
 }
 
 func runDebugEBPFDetach(ctx context.Context, args []string) error {
+	if runtime.GOOS == "windows" {
+		PrintEBPFPlatformNote()
+		return nil
+	}
+
 	fs := flag.NewFlagSet("debug ebpf-detach", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	iface := fs.String("iface", "", "network interface name")
@@ -1487,6 +1530,58 @@ func runDebugEBPFDetach(ctx context.Context, args []string) error {
 	}
 	fmt.Println("ebpf_detach\tok")
 	printXDPStatus(status)
+	return nil
+}
+
+func runDebugFirewallClear(args []string) error {
+	fs := flag.NewFlagSet("debug firewall-clear", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	port := fs.Int("port", 0, "port number to clear firewall rules for")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *port == 0 {
+		return errors.New("debug firewall-clear requires --port")
+	}
+
+	if err := RemoveFirewallException(*port); err != nil {
+		return err
+	}
+	fmt.Printf("firewall_clear\tport=%d\tstatus=ok\n", *port)
+	return nil
+}
+
+func runDebugBootstrapInfo(args []string) error {
+	fs := flag.NewFlagSet("debug bootstrap-info", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+
+	bootstrapAddrs := config.ConfiguredPeerAddresses(cfg)
+	fmt.Println("Bootstrap Peers (used for network discovery via DHT):")
+	if len(bootstrapAddrs) == 0 {
+		fmt.Println("  (none configured)")
+		fmt.Println("\nTo add bootstrap peers:")
+		fmt.Println("  vx6 peer add --addr [ipv6]:port")
+		fmt.Println("  OR")
+		fmt.Println("  vx6 init --name <name> --peer [ipv6]:port")
+		return nil
+	}
+	for _, addr := range bootstrapAddrs {
+		fmt.Printf("  %s\n", addr)
+	}
+	fmt.Printf("\nTotal bootstrap peers: %d\n", len(bootstrapAddrs))
+	fmt.Println("\nThese peers are seeded into the DHT routing table on startup.")
 	return nil
 }
 
