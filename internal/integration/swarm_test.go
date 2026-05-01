@@ -171,6 +171,73 @@ func TestDirectIPv6ServiceWithoutBootstrap(t *testing.T) {
 	waitForShutdown(t, directDone)
 }
 
+func TestSyncOnlyBootstrapClientLearnsAndUsesRemoteService(t *testing.T) {
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	baseDir := t.TempDir()
+	bootstrap := startVX6Node(t, rootCtx, filepath.Join(baseDir, "bootstrap"), "bootstrap", nil, nil)
+
+	echoAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	startEchoServer(t, rootCtx, echoAddr)
+
+	owner := startVX6Node(
+		t,
+		rootCtx,
+		filepath.Join(baseDir, "owner"),
+		"owner",
+		[]string{bootstrap.listenAddr},
+		map[string]string{"echo": echoAddr},
+	)
+	client := startVX6NodeWithOptions(t, rootCtx, nodeOptions{
+		dir:              filepath.Join(baseDir, "client"),
+		name:             "client",
+		bootstraps:       []string{bootstrap.listenAddr},
+		disableAdvertise: true,
+	})
+
+	waitForCondition(t, 8*time.Second, func() bool {
+		nodes, services := client.registry.Snapshot()
+		seenOwner := false
+		seenBootstrap := false
+		for _, rec := range nodes {
+			if rec.NodeName == owner.name {
+				seenOwner = true
+			}
+			if rec.NodeName == bootstrap.name {
+				seenBootstrap = true
+			}
+		}
+		return seenOwner && seenBootstrap && len(services) >= 1
+	}, "sync-only client registry convergence")
+
+	serviceName := record.FullServiceName(owner.name, "echo")
+	serviceRec, err := client.registry.ResolveServiceLocal(serviceName)
+	if err != nil {
+		t.Fatalf("resolve service from sync-only client registry: %v", err)
+	}
+
+	directAddr := reserveTCPAddr(t, "127.0.0.1:0")
+	directCtx, directCancel := context.WithCancel(rootCtx)
+	directDone := make(chan error, 1)
+	go func() {
+		directDone <- serviceproxy.ServeLocalForward(directCtx, directAddr, serviceRec, client.id, func(ctx context.Context) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp6", serviceRec.Address)
+		})
+	}()
+	assertEchoEventually(t, directAddr, "sync-only client direct service path")
+	directCancel()
+	waitForShutdown(t, directDone)
+
+	nodes, _ := bootstrap.registry.Snapshot()
+	for _, rec := range nodes {
+		if rec.NodeName == client.name {
+			t.Fatalf("sync-only client should not publish an endpoint record, but bootstrap learned %q", client.name)
+		}
+	}
+}
+
 func TestBootstrapLossStillAllowsRepublish(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping bootstrap-loss integration test in short mode")
@@ -861,6 +928,8 @@ type nodeOptions struct {
 	name                string
 	bootstraps          []string
 	services            map[string]string
+	advertiseAddr       string
+	disableAdvertise    bool
 	hiddenServices      map[string]bool
 	hiddenLookupSecrets map[string]string
 	hiddenIntroNodes    map[string][]string
@@ -889,6 +958,10 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 	}
 
 	listenAddr := reserveTCPAddr(t, "[::1]:0")
+	advertiseAddr := opts.advertiseAddr
+	if advertiseAddr == "" && !opts.disableAdvertise {
+		advertiseAddr = listenAddr
+	}
 	configPath := filepath.Join(opts.dir, "config.json")
 	store, err := config.NewStore(configPath)
 	if err != nil {
@@ -898,7 +971,7 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		Node: config.NodeConfig{
 			Name:           opts.name,
 			ListenAddr:     listenAddr,
-			AdvertiseAddr:  listenAddr,
+			AdvertiseAddr:  advertiseAddr,
 			HideEndpoint:   opts.hideEndpoint,
 			DataDir:        dataDir,
 			BootstrapAddrs: append([]string(nil), opts.bootstraps...),
@@ -924,7 +997,7 @@ func startVX6NodeWithOptions(t *testing.T, parent context.Context, opts nodeOpti
 		Name:           opts.name,
 		NodeID:         id.NodeID,
 		ListenAddr:     listenAddr,
-		AdvertiseAddr:  listenAddr,
+		AdvertiseAddr:  advertiseAddr,
 		HideEndpoint:   opts.hideEndpoint,
 		DataDir:        dataDir,
 		ConfigPath:     configPath,

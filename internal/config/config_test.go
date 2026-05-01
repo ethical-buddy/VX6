@@ -4,6 +4,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/vx6/vx6/internal/identity"
+	"github.com/vx6/vx6/internal/record"
 )
 
 func TestStoreRoundTrip(t *testing.T) {
@@ -211,5 +215,107 @@ func TestAddPeerValidatesNameAndAddress(t *testing.T) {
 	}
 	if err := store.AddPeer("beta", "[2001:db8::2]:4242"); err != nil {
 		t.Fatalf("expected valid peer add to succeed, got %v", err)
+	}
+}
+
+func TestStoreNormalizesBootstrapEntriesAndAddresses(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Node.BootstrapAddrs = []string{
+		"[2001:db8::2]:4242",
+		"[2001:db8::4]:4242",
+		"[2001:db8::2]:4242",
+	}
+	cfg.Node.Bootstraps = []BootstrapEntry{
+		{NodeID: "vx6_boot1", NodeName: "bootstrap", Address: "[2001:db8::1]:4242"},
+		{NodeID: "vx6_boot2", NodeName: "relay-seed", Address: "[2001:db8::3]:4242"},
+		{NodeID: "vx6_boot1", NodeName: "bootstrap", Address: "[2001:db8::1]:4242"},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if want := []string{
+		"[2001:db8::1]:4242",
+		"[2001:db8::2]:4242",
+		"[2001:db8::3]:4242",
+		"[2001:db8::4]:4242",
+	}; !reflect.DeepEqual(BootstrapAddresses(loaded.Node), want) {
+		t.Fatalf("unexpected bootstrap address list %#v", BootstrapAddresses(loaded.Node))
+	}
+
+	entries, err := store.ListBootstrapEntries()
+	if err != nil {
+		t.Fatalf("list bootstrap entries: %v", err)
+	}
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 normalized bootstrap entries, got %d", len(entries))
+	}
+}
+
+func TestUpsertBootstrapRecordRefreshesAddressByNodeIdentity(t *testing.T) {
+	t.Parallel()
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	cfg, err := store.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Node.Bootstraps = []BootstrapEntry{
+		{
+			NodeID:   id.NodeID,
+			NodeName: "bootstrap",
+			Address:  "[2001:db8::10]:4242",
+		},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	rec, err := record.NewEndpointRecord(id, "bootstrap", "[2001:db8::99]:4242", 20*time.Minute, time.Now())
+	if err != nil {
+		t.Fatalf("new endpoint record: %v", err)
+	}
+	if err := store.UpsertBootstrapRecord(rec); err != nil {
+		t.Fatalf("upsert bootstrap record: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if len(loaded.Node.Bootstraps) != 1 {
+		t.Fatalf("expected 1 bootstrap entry, got %d", len(loaded.Node.Bootstraps))
+	}
+	entry := loaded.Node.Bootstraps[0]
+	if entry.Address != rec.Address {
+		t.Fatalf("expected bootstrap address %q, got %q", rec.Address, entry.Address)
+	}
+	if entry.NodeID != rec.NodeID {
+		t.Fatalf("expected bootstrap node id %q, got %q", rec.NodeID, entry.NodeID)
+	}
+	if entry.NodeName != rec.NodeName {
+		t.Fatalf("expected bootstrap node name %q, got %q", rec.NodeName, entry.NodeName)
 	}
 }

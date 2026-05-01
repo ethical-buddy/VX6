@@ -32,18 +32,25 @@ type File struct {
 }
 
 type NodeConfig struct {
-	Name                 string   `json:"name"`
-	ListenAddr           string   `json:"listen_addr"`
-	AdvertiseAddr        string   `json:"advertise_addr"`
-	TransportMode        string   `json:"transport_mode,omitempty"`
-	HideEndpoint         bool     `json:"hide_endpoint"`
-	RelayMode            string   `json:"relay_mode,omitempty"`
-	RelayResourcePercent int      `json:"relay_resource_percent,omitempty"`
-	DataDir              string   `json:"data_dir"`
-	DownloadDir          string   `json:"download_dir"`
-	BootstrapAddrs       []string `json:"bootstrap_addrs"`
-	FileReceiveMode      string   `json:"file_receive_mode,omitempty"`
-	AllowedFileSenders   []string `json:"allowed_file_senders,omitempty"`
+	Name                 string           `json:"name"`
+	ListenAddr           string           `json:"listen_addr"`
+	AdvertiseAddr        string           `json:"advertise_addr"`
+	TransportMode        string           `json:"transport_mode,omitempty"`
+	HideEndpoint         bool             `json:"hide_endpoint"`
+	RelayMode            string           `json:"relay_mode,omitempty"`
+	RelayResourcePercent int              `json:"relay_resource_percent,omitempty"`
+	DataDir              string           `json:"data_dir"`
+	DownloadDir          string           `json:"download_dir"`
+	BootstrapAddrs       []string         `json:"bootstrap_addrs"`
+	Bootstraps           []BootstrapEntry `json:"bootstraps,omitempty"`
+	FileReceiveMode      string           `json:"file_receive_mode,omitempty"`
+	AllowedFileSenders   []string         `json:"allowed_file_senders,omitempty"`
+}
+
+type BootstrapEntry struct {
+	NodeID   string `json:"node_id,omitempty"`
+	NodeName string `json:"node_name,omitempty"`
+	Address  string `json:"address"`
 }
 
 type PeerEntry struct {
@@ -205,14 +212,7 @@ func (s *Store) AddBootstrap(address string) error {
 		return err
 	}
 
-	for _, existing := range cfg.Node.BootstrapAddrs {
-		if existing == address {
-			return s.Save(cfg)
-		}
-	}
-
-	cfg.Node.BootstrapAddrs = append(cfg.Node.BootstrapAddrs, address)
-	sort.Strings(cfg.Node.BootstrapAddrs)
+	cfg.Node.Bootstraps = upsertBootstrapEntry(cfg.Node.Bootstraps, BootstrapEntry{Address: address})
 	return s.Save(cfg)
 }
 
@@ -222,9 +222,40 @@ func (s *Store) ListBootstraps() ([]string, error) {
 		return nil, err
 	}
 
-	out := append([]string(nil), cfg.Node.BootstrapAddrs...)
-	sort.Strings(out)
+	out := BootstrapAddresses(cfg.Node)
 	return out, nil
+}
+
+func (s *Store) ListBootstrapEntries() ([]BootstrapEntry, error) {
+	cfg, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	out := append([]BootstrapEntry(nil), cfg.Node.Bootstraps...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].NodeName != out[j].NodeName {
+			return out[i].NodeName < out[j].NodeName
+		}
+		if out[i].NodeID != out[j].NodeID {
+			return out[i].NodeID < out[j].NodeID
+		}
+		return out[i].Address < out[j].Address
+	})
+	return out, nil
+}
+
+func (s *Store) UpsertBootstrapRecord(rec record.EndpointRecord) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+	updated, changed := mergeBootstrapRecord(cfg.Node.Bootstraps, rec)
+	if !changed {
+		return nil
+	}
+	cfg.Node.Bootstraps = updated
+	cfg.Node.BootstrapAddrs = nil
+	return s.Save(cfg)
 }
 
 func (s *Store) AddService(name, target string, isHidden bool) error {
@@ -312,9 +343,8 @@ func normalize(cfg *File) {
 	if cfg.Node.DownloadDir == "" {
 		cfg.Node.DownloadDir = defaultDownloadDirValue()
 	}
-	if cfg.Node.BootstrapAddrs == nil {
-		cfg.Node.BootstrapAddrs = []string{}
-	}
+	cfg.Node.Bootstraps = normalizeBootstrapEntries(cfg.Node.Bootstraps, cfg.Node.BootstrapAddrs)
+	cfg.Node.BootstrapAddrs = BootstrapAddresses(cfg.Node)
 	cfg.Node.FileReceiveMode = NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
 	cfg.Node.AllowedFileSenders = uniqueSortedStrings(cfg.Node.AllowedFileSenders)
 	if cfg.Node.FileReceiveMode != FileReceiveTrusted {
@@ -357,6 +387,127 @@ func normalize(cfg *File) {
 		}
 		cfg.Services[name] = svc
 	}
+}
+
+func BootstrapAddresses(node NodeConfig) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(node.Bootstraps)+len(node.BootstrapAddrs))
+	add := func(addr string) {
+		if addr == "" {
+			return
+		}
+		if _, ok := seen[addr]; ok {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	for _, entry := range node.Bootstraps {
+		add(strings.TrimSpace(entry.Address))
+	}
+	for _, addr := range node.BootstrapAddrs {
+		add(strings.TrimSpace(addr))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeBootstrapEntries(entries []BootstrapEntry, legacyAddrs []string) []BootstrapEntry {
+	out := make([]BootstrapEntry, 0, len(entries)+len(legacyAddrs))
+	for _, entry := range entries {
+		if normalized, ok := normalizeBootstrapEntry(entry); ok {
+			out = upsertBootstrapEntry(out, normalized)
+		}
+	}
+	for _, addr := range legacyAddrs {
+		if normalized, ok := normalizeBootstrapEntry(BootstrapEntry{Address: addr}); ok {
+			out = upsertBootstrapEntry(out, normalized)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].NodeName != out[j].NodeName {
+			return out[i].NodeName < out[j].NodeName
+		}
+		if out[i].NodeID != out[j].NodeID {
+			return out[i].NodeID < out[j].NodeID
+		}
+		return out[i].Address < out[j].Address
+	})
+	return out
+}
+
+func normalizeBootstrapEntry(entry BootstrapEntry) (BootstrapEntry, bool) {
+	entry.NodeID = strings.TrimSpace(entry.NodeID)
+	entry.NodeName = strings.TrimSpace(entry.NodeName)
+	entry.Address = strings.TrimSpace(entry.Address)
+	if entry.Address == "" {
+		return BootstrapEntry{}, false
+	}
+	if err := transfer.ValidateIPv6Address(entry.Address); err != nil {
+		return BootstrapEntry{}, false
+	}
+	if entry.NodeName != "" && record.ValidateNodeName(entry.NodeName) != nil {
+		entry.NodeName = ""
+	}
+	return entry, true
+}
+
+func upsertBootstrapEntry(entries []BootstrapEntry, entry BootstrapEntry) []BootstrapEntry {
+	if normalized, ok := normalizeBootstrapEntry(entry); ok {
+		entry = normalized
+	} else {
+		return entries
+	}
+	for i := range entries {
+		if bootstrapEntriesMatch(entries[i], entry) {
+			if entry.NodeID != "" {
+				entries[i].NodeID = entry.NodeID
+			}
+			if entry.NodeName != "" {
+				entries[i].NodeName = entry.NodeName
+			}
+			entries[i].Address = entry.Address
+			return entries
+		}
+	}
+	return append(entries, entry)
+}
+
+func mergeBootstrapRecord(entries []BootstrapEntry, rec record.EndpointRecord) ([]BootstrapEntry, bool) {
+	for i := range entries {
+		if bootstrapRecordMatches(entries[i], rec) {
+			updated := entries[i]
+			updated.NodeID = rec.NodeID
+			updated.NodeName = rec.NodeName
+			updated.Address = rec.Address
+			if updated == entries[i] {
+				return entries, false
+			}
+			entries[i] = updated
+			return entries, true
+		}
+	}
+	return entries, false
+}
+
+func bootstrapEntriesMatch(a, b BootstrapEntry) bool {
+	if a.NodeID != "" && b.NodeID != "" && a.NodeID == b.NodeID {
+		return true
+	}
+	if a.NodeName != "" && b.NodeName != "" && a.NodeName == b.NodeName {
+		return true
+	}
+	return a.Address != "" && a.Address == b.Address
+}
+
+func bootstrapRecordMatches(entry BootstrapEntry, rec record.EndpointRecord) bool {
+	if entry.NodeID != "" && entry.NodeID == rec.NodeID {
+		return true
+	}
+	if entry.NodeName != "" && entry.NodeName == rec.NodeName {
+		return true
+	}
+	return entry.Address != "" && entry.Address == rec.Address
 }
 
 func NormalizeFileReceiveMode(mode string) string {
