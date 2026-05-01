@@ -3,7 +3,10 @@ package netutil
 import (
 	"fmt"
 	"net"
+	"strings"
 )
+
+var routeIPv6Probe = pickRouteIPv6
 
 func DetectAdvertiseAddress(port string) (string, error) {
 	addrs, err := net.InterfaceAddrs()
@@ -28,12 +31,34 @@ func RefreshAdvertiseAddress(configured, listenAddr string) (string, bool, error
 }
 
 func RefreshAdvertiseAddressWithAddrs(configured, listenAddr string, addrs []net.Addr) (string, bool, error) {
+	return RefreshAdvertiseAddressWithAddrsAndTargets(configured, listenAddr, addrs, nil, true)
+}
+
+func RefreshAdvertiseAddressWithAddrsAndTargets(configured, listenAddr string, addrs []net.Addr, targets []string, explicit bool) (string, bool, error) {
 	port, err := advertisePort(configured, listenAddr)
 	if err != nil {
 		return "", false, err
 	}
 
-	if configured != "" {
+	if !explicit {
+		if ip, ok := publishableListenIPv6(listenAddr); ok {
+			refreshed := net.JoinHostPort(ip.String(), port)
+			return refreshed, refreshed != configured, nil
+		}
+		if isSpecificUnpublishableListenHost(listenAddr) {
+			return "", false, fmt.Errorf("listen address is not publishable")
+		}
+		if ip, ok := routeIPv6Probe(targets); ok {
+			refreshed := net.JoinHostPort(ip.String(), port)
+			return refreshed, refreshed != configured, nil
+		}
+		if configured != "" {
+			host, _, err := net.SplitHostPort(configured)
+			if err == nil && shouldKeepConfiguredIPv6(addrs, host) {
+				return configured, false, nil
+			}
+		}
+	} else if configured != "" {
 		host, _, err := net.SplitHostPort(configured)
 		if err != nil {
 			return "", false, fmt.Errorf("parse configured advertise address: %w", err)
@@ -52,6 +77,58 @@ func RefreshAdvertiseAddressWithAddrs(configured, listenAddr string, addrs []net
 	return refreshed, refreshed != configured, nil
 }
 
+func publishableListenIPv6(listenAddr string) (net.IP, bool) {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return nil, false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if !isValidGlobalIPv6(ip) {
+		return nil, false
+	}
+	return ip, true
+}
+
+func isSpecificUnpublishableListenHost(listenAddr string) bool {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	return !ip.IsUnspecified() && !isValidGlobalIPv6(ip)
+}
+
+func pickRouteIPv6(targets []string) (net.IP, bool) {
+	for _, target := range targets {
+		host, port, err := net.SplitHostPort(strings.TrimSpace(target))
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(strings.Trim(host, "[]"))
+		if !isValidGlobalIPv6(ip) {
+			continue
+		}
+		portNum, err := net.LookupPort("tcp", port)
+		if err != nil {
+			continue
+		}
+		conn, err := net.DialUDP("udp6", nil, &net.UDPAddr{IP: ip, Port: portNum})
+		if err != nil {
+			continue
+		}
+		localAddr, _ := conn.LocalAddr().(*net.UDPAddr)
+		_ = conn.Close()
+		if localAddr == nil || !isValidGlobalIPv6(localAddr.IP) {
+			continue
+		}
+		return localAddr.IP, true
+	}
+	return nil, false
+}
+
 func PickGlobalIPv6(addrs []net.Addr) (net.IP, error) {
 	for _, addr := range addrs {
 		ipNet, ok := addr.(*net.IPNet)
@@ -59,13 +136,7 @@ func PickGlobalIPv6(addrs []net.Addr) (net.IP, error) {
 			continue
 		}
 		ip := ipNet.IP
-		if ip == nil || ip.To4() != nil {
-			continue
-		}
-		if !ip.IsGlobalUnicast() {
-			continue
-		}
-		if ip.IsLinkLocalUnicast() || isULA(ip) {
+		if !isValidGlobalIPv6(ip) {
 			continue
 		}
 		return ip, nil
@@ -92,7 +163,7 @@ func advertisePort(configured, listenAddr string) (string, error) {
 
 func hasGlobalIPv6(addrs []net.Addr, host string) bool {
 	ip := net.ParseIP(host)
-	if ip == nil {
+	if !isValidGlobalIPv6(ip) {
 		return false
 	}
 	for _, addr := range addrs {
@@ -100,10 +171,7 @@ func hasGlobalIPv6(addrs []net.Addr, host string) bool {
 		if !ok {
 			continue
 		}
-		if ipNet.IP == nil || ipNet.IP.To4() != nil {
-			continue
-		}
-		if !ipNet.IP.IsGlobalUnicast() || ipNet.IP.IsLinkLocalUnicast() || isULA(ipNet.IP) {
+		if !isValidGlobalIPv6(ipNet.IP) {
 			continue
 		}
 		if ipNet.IP.Equal(ip) {
@@ -126,4 +194,14 @@ func shouldKeepConfiguredIPv6(addrs []net.Addr, host string) bool {
 
 func isULA(ip net.IP) bool {
 	return len(ip) > 0 && (ip[0]&0xfe) == 0xfc
+}
+
+func isValidGlobalIPv6(ip net.IP) bool {
+	if ip == nil || ip.To4() != nil {
+		return false
+	}
+	if !ip.IsGlobalUnicast() {
+		return false
+	}
+	return !ip.IsLinkLocalUnicast() && !isULA(ip)
 }
