@@ -180,8 +180,10 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
-	if cfg.AdvertiseAddr != "" {
+	if shouldRunBootstrapTasks(cfg) {
 		go runBootstrapTasks(ctx, log, cfg)
+	}
+	if cfg.AdvertiseAddr != "" {
 		go runLocalDiscovery(ctx, log, cfg)
 	}
 
@@ -324,6 +326,20 @@ func endpointPublishMode(hidden bool) string {
 	return "published"
 }
 
+func shouldRunBootstrapTasks(cfg Config) bool {
+	if cfg.AdvertiseAddr != "" {
+		return true
+	}
+	if len(cfg.BootstrapAddrs) > 0 {
+		return true
+	}
+	if cfg.Registry == nil {
+		return false
+	}
+	nodes, _ := cfg.Registry.Snapshot()
+	return len(nodes) > 0
+}
+
 func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 	const multicastAddr = "[ff02::1]:4243"
 	addr, _ := net.ResolveUDPAddr("udp6", multicastAddr)
@@ -368,23 +384,42 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 			dnsSeeds = append(dnsSeeds, fmt.Sprintf("[%s]:4242", ip.String()))
 		}
 	}
+	syncOnlyLogged := false
 
 	publishAndSync := func() {
 		liveCfg := runtimeConfig(cfg)
-		rec, err := record.NewEndpointRecord(liveCfg.Identity, liveCfg.Name, liveCfg.AdvertiseAddr, 20*time.Minute, time.Now())
-		if err != nil {
-			return
+		var (
+			rec           record.EndpointRecord
+			endpointReady bool
+		)
+		if liveCfg.AdvertiseAddr != "" {
+			var err error
+			rec, err = record.NewEndpointRecord(liveCfg.Identity, liveCfg.Name, liveCfg.AdvertiseAddr, 20*time.Minute, time.Now())
+			if err != nil {
+				fmt.Fprintf(log, "[SYNC] Skipping endpoint publish for %s: %v\n", liveCfg.Name, err)
+			} else {
+				endpointReady = true
+			}
+		} else if !syncOnlyLogged {
+			fmt.Fprintf(log, "[SYNC] Running discovery sync without a publishable advertise address for %s\n", liveCfg.Name)
+			syncOnlyLogged = true
 		}
-		if !liveCfg.HideEndpoint {
+		if endpointReady {
+			syncOnlyLogged = false
+		}
+		if endpointReady && !liveCfg.HideEndpoint {
 			_ = liveCfg.Registry.Import([]record.EndpointRecord{rec}, nil)
 		}
 
 		nodes, _ := liveCfg.Registry.Snapshot()
 		seedDHTRouting(liveCfg.DHT, liveCfg.BootstrapAddrs, nodes)
-		targets := syncMesh(ctx, log, liveCfg, rec, dnsSeeds, nodes)
+		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), dnsSeeds, nodes)
 
 		nodes, _ = liveCfg.Registry.Snapshot()
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
+		if !endpointReady {
+			return
+		}
 		serviceRecords, hiddenTopologies, hiddenLookupSecrets := buildServiceRecords(ctx, liveCfg, nodes)
 		publishServicesToTargets(ctx, liveCfg, log, targets, serviceRecords)
 		hiddenTargets := make([]hidden.OwnerRegistrationTarget, 0)
@@ -688,7 +723,15 @@ func nodeAddresses(nodes []record.EndpointRecord) []string {
 	return out
 }
 
-func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec record.EndpointRecord, dnsSeeds []string, initialNodes []record.EndpointRecord) map[string]struct{} {
+func endpointRecordRef(ok bool, rec record.EndpointRecord) *record.EndpointRecord {
+	if !ok {
+		return nil
+	}
+	out := rec
+	return &out
+}
+
+func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, dnsSeeds []string, initialNodes []record.EndpointRecord) map[string]struct{} {
 	targets := map[string]struct{}{}
 	reachable := map[string]struct{}{}
 	for _, addr := range dnsSeeds {
@@ -747,7 +790,7 @@ type syncResult struct {
 	err      error
 }
 
-func syncTargetBatch(ctx context.Context, log io.Writer, cfg Config, rec record.EndpointRecord, targets []string) []syncResult {
+func syncTargetBatch(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, targets []string) []syncResult {
 	results := make([]syncResult, 0, len(targets))
 	if len(targets) == 0 {
 		return results
@@ -785,7 +828,7 @@ func syncTargetBatch(ctx context.Context, log io.Writer, cfg Config, rec record.
 	return results
 }
 
-func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec record.EndpointRecord, addr string) syncResult {
+func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, addr string) syncResult {
 	result := syncResult{addr: addr}
 	if addr == "" {
 		return result
@@ -798,9 +841,9 @@ func syncTarget(ctx context.Context, log io.Writer, cfg Config, rec record.Endpo
 	}
 
 	fmt.Fprintf(log, "[SYNC] Connecting to target: %s\n", addr)
-	if !cfg.HideEndpoint {
+	if rec != nil && !cfg.HideEndpoint {
 		publishCtx, cancel := withSyncTimeout(ctx)
-		_, err := discovery.Publish(publishCtx, addr, rec)
+		_, err := discovery.Publish(publishCtx, addr, *rec)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(log, "[SYNC] Publish to %s failed: %v\n", addr, err)
