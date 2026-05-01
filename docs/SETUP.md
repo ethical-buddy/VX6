@@ -52,7 +52,7 @@ vx6 init --name alice --listen '[::]:4242'
 Optional:
 
 - add `--advertise` if you already know the public IPv6 address
-- add `--bootstrap` to seed discovery from a known node
+- add `--peer` to seed discovery from a known node
 - add `--hidden-node` if you do not want to publish an endpoint record
 - add `--downloads-dir` if you want received files somewhere else
 

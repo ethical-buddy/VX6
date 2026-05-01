@@ -65,8 +65,6 @@ func Run(ctx context.Context, args []string) error {
 		return runReload(args[1:])
 	case "peer":
 		return runPeer(args[1:])
-	case "bootstrap":
-		return runBootstrap(args[1:])
 	case "service":
 		return runService(args[1:])
 	case "identity":
@@ -89,7 +87,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "DHT-backed metadata lookup, and optional 5-hop proxy forwarding.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--bootstrap [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
+	fmt.Fprintln(w, "  vx6 init --name NAME [--listen [::]:4242] [--advertise [ipv6]:port] [--transport auto|tcp] [--relay on|off] [--relay-percent N] [--peer [ipv6]:port] [--hidden-node] [--data-dir DIR] [--downloads-dir DIR]")
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
@@ -101,10 +99,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 receive disable")
 	fmt.Fprintln(w, "  vx6 service")
 	fmt.Fprintln(w, "  vx6 peer")
-	fmt.Fprintln(w, "  vx6 bootstrap")
 	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
-	fmt.Fprintln(w, "  vx6 peer add --name NAME --addr [ipv6]:port")
-	fmt.Fprintln(w, "  vx6 bootstrap add --addr [ipv6]:port")
+	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME]")
 	fmt.Fprintln(w, "  vx6 identity")
 	fmt.Fprintln(w, "  vx6 status")
 	fmt.Fprintln(w, "  vx6 debug registry")
@@ -116,20 +112,20 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6-gui")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Working features:")
-	fmt.Fprintln(w, "  - Signed endpoint and service discovery via bootstrap registry")
+	fmt.Fprintln(w, "  - Signed endpoint and service discovery via peer-to-peer registry sync")
 	fmt.Fprintln(w, "  - DHT-backed endpoint/service key lookup")
 	fmt.Fprintln(w, "  - Encrypted file transfer with local receive permissions")
 	fmt.Fprintln(w, "  - Direct TCP service sharing")
 	fmt.Fprintln(w, "  - 5-hop proxy forwarding for direct services and files")
 	fmt.Fprintln(w, "  - Plain-TCP hidden services via 3 active intros, 2 standby intros, guards, and rendezvous relay")
-	fmt.Fprintln(w, "  - Direct IPv6 service sharing without bootstrap using --addr")
+	fmt.Fprintln(w, "  - Direct IPv6 service sharing without peer sync using --addr")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Experimental / not complete:")
 	fmt.Fprintln(w, "  - eBPF loader and attach path (embedded bytecode is present and tested)")
 	fmt.Fprintln(w, "  - QUIC transport is not active in this build; all network traffic uses TCP")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Examples:")
-	fmt.Fprintln(w, "  vx6 init --name alice --listen '[::]:4242' --bootstrap '[::1]:4242'")
+	fmt.Fprintln(w, "  vx6 init --name alice --listen '[::]:4242' --peer '[::1]:4242'")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 init --name ghost --advertise '[2001:db8::10]:4242' --hidden-node")
 	fmt.Fprintln(w, "  vx6 service add --name ssh --target 127.0.0.1:22")
@@ -168,8 +164,8 @@ func runInit(args []string) error {
 	relayPercent := fs.Int("relay-percent", 33, "maximum share of local relay capacity reserved for transit work")
 	dataDir := fs.String("data-dir", defaultDataDirValue(), "directory for VX6 runtime state")
 	downloadDir := fs.String("downloads-dir", defaultDownloadDirValue(), "directory for received files")
-	var bootstraps stringListFlag
-	fs.Var(&bootstraps, "bootstrap", "bootstrap IPv6 address in [addr]:port form; repeatable")
+	var peers stringListFlag
+	fs.Var(&peers, "peer", "known peer IPv6 address in [addr]:port form; repeatable")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -202,9 +198,9 @@ func runInit(args []string) error {
 	if normalizedRelayMode == "" {
 		return fmt.Errorf("invalid relay mode %q", *relayMode)
 	}
-	for _, addr := range bootstraps {
+	for _, addr := range peers {
 		if err := transfer.ValidateIPv6Address(addr); err != nil {
-			return fmt.Errorf("invalid bootstrap address %q: %w", addr, err)
+			return fmt.Errorf("invalid peer address %q: %w", addr, err)
 		}
 	}
 
@@ -226,9 +222,11 @@ func runInit(args []string) error {
 	cfg.Node.DataDir = *dataDir
 	cfg.Node.DownloadDir = *downloadDir
 	cfg.Node.FileReceiveMode = config.NormalizeFileReceiveMode(cfg.Node.FileReceiveMode)
-	if len(bootstraps) > 0 {
+	if len(peers) > 0 {
+		cfg.Node.KnownPeers = nil
+		cfg.Node.KnownPeerAddrs = append([]string(nil), peers...)
 		cfg.Node.Bootstraps = nil
-		cfg.Node.BootstrapAddrs = append([]string(nil), bootstraps...)
+		cfg.Node.BootstrapAddrs = nil
 	}
 	if err := store.Save(cfg); err != nil {
 		return err
@@ -513,7 +511,7 @@ func runNode(ctx context.Context, args []string) error {
 		FileReceiveMode:      cfgFile.Node.FileReceiveMode,
 		AllowedFileSenders:   append([]string(nil), cfgFile.Node.AllowedFileSenders...),
 		DHT:                  dht.NewServerWithIdentity(id),
-		BootstrapAddrs:       config.BootstrapAddresses(cfgFile.Node),
+		PeerAddrs:            config.ConfiguredPeerAddresses(cfgFile),
 		Services:             services,
 		Registry:             registry,
 		Reload:               reloadCh,
@@ -788,17 +786,20 @@ func runPeer(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *name == "" {
-			*name = prompt("Peer Name")
-		}
-		if err := record.ValidateNodeName(*name); err != nil {
-			return err
-		}
 		if *addr == "" {
 			*addr = prompt("Peer Address")
 		}
+		if *addr == "" {
+			return errors.New("peer add requires --addr")
+		}
 		store, err := config.NewStore("")
 		if err != nil {
+			return err
+		}
+		if *name == "" {
+			return store.AddKnownPeerAddress(*addr)
+		}
+		if err := record.ValidateNodeName(*name); err != nil {
 			return err
 		}
 		return store.AddPeer(*name, *addr)
@@ -816,52 +817,32 @@ func runPeer(args []string) error {
 	if err != nil {
 		return err
 	}
+	knownPeers, err := store.ListKnownPeerEntries()
+	if err != nil {
+		return err
+	}
+	printSectionHeader("KNOWN PEERS", len(knownPeers))
+	for _, entry := range knownPeers {
+		switch {
+		case entry.NodeName != "" && entry.NodeID != "":
+			fmt.Printf("  %-39s %s (%s)\n", entry.Address, entry.NodeName, entry.NodeID)
+		case entry.NodeName != "":
+			fmt.Printf("  %-39s %s\n", entry.Address, entry.NodeName)
+		case entry.NodeID != "":
+			fmt.Printf("  %-39s %s\n", entry.Address, entry.NodeID)
+		default:
+			fmt.Printf("  %s\n", entry.Address)
+		}
+	}
+	if len(knownPeers) == 0 {
+		fmt.Println("  (none)")
+	}
 	printSectionHeader("PEER DIRECTORY", len(names))
 	for _, n := range names {
 		fmt.Printf("  %-15s %s\n", n, peerDirectoryState(peers[n].Address))
 	}
 	if len(names) == 0 {
 		fmt.Println("  (none)")
-	}
-	return nil
-}
-
-func runBootstrap(args []string) error {
-	if len(args) >= 1 && args[0] == "add" {
-		fs := flag.NewFlagSet("bootstrap add", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		addr := fs.String("addr", "", "bootstrap address")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if *addr == "" {
-			*addr = prompt("Bootstrap Address")
-		}
-		store, err := config.NewStore("")
-		if err != nil {
-			return err
-		}
-		return store.AddBootstrap(*addr)
-	}
-	store, err := config.NewStore("")
-	if err != nil {
-		return err
-	}
-	entries, err := store.ListBootstrapEntries()
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		switch {
-		case entry.NodeName != "" && entry.NodeID != "":
-			fmt.Printf("%s\tname=%s\tnode_id=%s\n", entry.Address, entry.NodeName, entry.NodeID)
-		case entry.NodeName != "":
-			fmt.Printf("%s\tname=%s\n", entry.Address, entry.NodeName)
-		case entry.NodeID != "":
-			fmt.Printf("%s\tnode_id=%s\n", entry.Address, entry.NodeID)
-		default:
-			fmt.Println(entry.Address)
-		}
 	}
 	return nil
 }
@@ -1750,11 +1731,8 @@ func discoveryCandidates(cfg config.File) []string {
 		out = append(out, addr)
 	}
 
-	for _, addr := range config.BootstrapAddresses(cfg.Node) {
+	for _, addr := range config.ConfiguredPeerAddresses(cfg) {
 		add(addr)
-	}
-	for _, peer := range cfg.Peers {
-		add(peer.Address)
 	}
 	if registry, err := loadLocalRegistry(cfg.Node.DataDir); err == nil {
 		nodes, _ := registry.Snapshot()
@@ -1769,16 +1747,10 @@ func newDHTClient(cfg config.File) *dht.Server {
 	client := dht.NewServer("cli-observer")
 	var registryNodes []record.EndpointRecord
 
-	for _, addr := range config.BootstrapAddresses(cfg.Node) {
+	for _, addr := range config.ConfiguredPeerAddresses(cfg) {
 		if addr != "" {
 			client.RT.AddNode(proto.NodeInfo{ID: "seed:" + addr, Addr: addr})
 		}
-	}
-	for name, peer := range cfg.Peers {
-		if peer.Address == "" {
-			continue
-		}
-		client.RT.AddNode(proto.NodeInfo{ID: "peer:" + name + ":" + peer.Address, Addr: peer.Address})
 	}
 	if registry, err := loadLocalRegistry(cfg.Node.DataDir); err == nil {
 		nodes, _ := registry.Snapshot()

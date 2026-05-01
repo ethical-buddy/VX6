@@ -218,7 +218,7 @@ func TestAddPeerValidatesNameAndAddress(t *testing.T) {
 	}
 }
 
-func TestStoreNormalizesBootstrapEntriesAndAddresses(t *testing.T) {
+func TestStoreNormalizesKnownPeerEntriesAndAddresses(t *testing.T) {
 	t.Parallel()
 
 	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
@@ -230,12 +230,12 @@ func TestStoreNormalizesBootstrapEntriesAndAddresses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	cfg.Node.BootstrapAddrs = []string{
+	cfg.Node.KnownPeerAddrs = []string{
 		"[2001:db8::2]:4242",
 		"[2001:db8::4]:4242",
 		"[2001:db8::2]:4242",
 	}
-	cfg.Node.Bootstraps = []BootstrapEntry{
+	cfg.Node.KnownPeers = []KnownPeerEntry{
 		{NodeID: "vx6_boot1", NodeName: "bootstrap", Address: "[2001:db8::1]:4242"},
 		{NodeID: "vx6_boot2", NodeName: "relay-seed", Address: "[2001:db8::3]:4242"},
 		{NodeID: "vx6_boot1", NodeName: "bootstrap", Address: "[2001:db8::1]:4242"},
@@ -253,20 +253,20 @@ func TestStoreNormalizesBootstrapEntriesAndAddresses(t *testing.T) {
 		"[2001:db8::2]:4242",
 		"[2001:db8::3]:4242",
 		"[2001:db8::4]:4242",
-	}; !reflect.DeepEqual(BootstrapAddresses(loaded.Node), want) {
-		t.Fatalf("unexpected bootstrap address list %#v", BootstrapAddresses(loaded.Node))
+	}; !reflect.DeepEqual(KnownPeerAddresses(loaded.Node), want) {
+		t.Fatalf("unexpected known peer address list %#v", KnownPeerAddresses(loaded.Node))
 	}
 
-	entries, err := store.ListBootstrapEntries()
+	entries, err := store.ListKnownPeerEntries()
 	if err != nil {
-		t.Fatalf("list bootstrap entries: %v", err)
+		t.Fatalf("list known peer entries: %v", err)
 	}
 	if len(entries) != 4 {
-		t.Fatalf("expected 4 normalized bootstrap entries, got %d", len(entries))
+		t.Fatalf("expected 4 normalized known peer entries, got %d", len(entries))
 	}
 }
 
-func TestUpsertBootstrapRecordRefreshesAddressByNodeIdentity(t *testing.T) {
+func TestUpsertKnownPeerRecordRefreshesAddressByNodeIdentity(t *testing.T) {
 	t.Parallel()
 
 	store, err := NewStore(filepath.Join(t.TempDir(), "config.json"))
@@ -282,7 +282,7 @@ func TestUpsertBootstrapRecordRefreshesAddressByNodeIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load config: %v", err)
 	}
-	cfg.Node.Bootstraps = []BootstrapEntry{
+	cfg.Node.KnownPeers = []KnownPeerEntry{
 		{
 			NodeID:   id.NodeID,
 			NodeName: "bootstrap",
@@ -297,25 +297,25 @@ func TestUpsertBootstrapRecordRefreshesAddressByNodeIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new endpoint record: %v", err)
 	}
-	if err := store.UpsertBootstrapRecord(rec); err != nil {
-		t.Fatalf("upsert bootstrap record: %v", err)
+	if err := store.UpsertKnownPeerRecord(rec); err != nil {
+		t.Fatalf("upsert known peer record: %v", err)
 	}
 
 	loaded, err := store.Load()
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if len(loaded.Node.Bootstraps) != 1 {
-		t.Fatalf("expected 1 bootstrap entry, got %d", len(loaded.Node.Bootstraps))
+	if len(loaded.Node.KnownPeers) != 1 {
+		t.Fatalf("expected 1 known peer entry, got %d", len(loaded.Node.KnownPeers))
 	}
-	entry := loaded.Node.Bootstraps[0]
+	entry := loaded.Node.KnownPeers[0]
 	if entry.Address != rec.Address {
-		t.Fatalf("expected bootstrap address %q, got %q", rec.Address, entry.Address)
+		t.Fatalf("expected known peer address %q, got %q", rec.Address, entry.Address)
 	}
 	if entry.NodeID != rec.NodeID {
-		t.Fatalf("expected bootstrap node id %q, got %q", rec.NodeID, entry.NodeID)
+		t.Fatalf("expected known peer node id %q, got %q", rec.NodeID, entry.NodeID)
 	}
 	if entry.NodeName != rec.NodeName {
-		t.Fatalf("expected bootstrap node name %q, got %q", rec.NodeName, entry.NodeName)
+		t.Fatalf("expected known peer node name %q, got %q", rec.NodeName, entry.NodeName)
 	}
 }

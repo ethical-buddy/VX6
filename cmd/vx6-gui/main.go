@@ -100,7 +100,7 @@ var (
 				{Name: "name", Label: "Node Name", Placeholder: "alice"},
 				{Name: "listen", Label: "Listen Address", Default: "[::]:4242"},
 				{Name: "advertise", Label: "Advertise Address", Placeholder: "[2001:db8::10]:4242"},
-				{Name: "bootstrap", Label: "Bootstrap Nodes", Placeholder: "[2001:db8::1]:4242, [2001:db8::2]:4242"},
+				{Name: "peer", Label: "Known Peers", Placeholder: "[2001:db8::1]:4242, [2001:db8::2]:4242"},
 				{Name: "hidden_node", Label: "Hide Endpoint Record", Type: "checkbox"},
 				{Name: "relay", Label: "Relay Mode", Default: "on"},
 				{Name: "relay_percent", Label: "Relay Limit Percent", Default: "33"},
@@ -176,12 +176,12 @@ var (
 			},
 		},
 		{
-			ID:          "bootstrap_list",
-			Title:       "Bootstrap List",
-			Description: "Show configured bootstrap nodes.",
+			ID:          "known_peer_list",
+			Title:       "Known Peer List",
+			Description: "Show configured known peer addresses.",
 			Fields:      []fieldSpec{{Name: "config_path", Label: "Config Path", Placeholder: "/path/to/config.json"}},
 			BuildArgs: func(v url.Values) ([]string, error) {
-				return []string{"bootstrap"}, nil
+				return []string{"peer"}, nil
 			},
 		},
 		{
@@ -203,19 +203,19 @@ var (
 			},
 		},
 		{
-			ID:          "bootstrap_add",
-			Title:       "Add Bootstrap",
-			Description: "Add a bootstrap node address.",
+			ID:          "known_peer_add",
+			Title:       "Add Known Peer",
+			Description: "Add a known peer address for startup sync.",
 			Fields: []fieldSpec{
 				{Name: "config_path", Label: "Config Path", Placeholder: "/path/to/config.json"},
-				{Name: "addr", Label: "Bootstrap Address", Placeholder: "[2001:db8::1]:4242"},
+				{Name: "addr", Label: "Peer Address", Placeholder: "[2001:db8::1]:4242"},
 			},
 			BuildArgs: func(v url.Values) ([]string, error) {
 				addr := requiredValue(v, "addr")
 				if addr == "" {
-					return nil, errors.New("bootstrap address is required")
+					return nil, errors.New("peer address is required")
 				}
-				return []string{"bootstrap", "add", "--addr", addr}, nil
+				return []string{"peer", "add", "--addr", addr}, nil
 			},
 		},
 		{
@@ -533,8 +533,8 @@ func buildInitArgs(v url.Values) ([]string, error) {
 	args := []string{"init", "--name", name}
 	appendFlagValue(&args, "--listen", v.Get("listen"))
 	appendFlagValue(&args, "--advertise", v.Get("advertise"))
-	for _, addr := range splitCSV(v.Get("bootstrap")) {
-		args = append(args, "--bootstrap", addr)
+	for _, addr := range splitCSV(v.Get("peer")) {
+		args = append(args, "--peer", addr)
 	}
 	if isChecked(v, "hidden_node") {
 		args = append(args, "--hidden-node")

@@ -9,7 +9,7 @@
 - `vx6 identity`
 - `vx6 list`
 - `vx6 peer`
-- `vx6 bootstrap`
+- `vx6 peer`
 - `vx6 service`
 - `vx6 connect`
 - `vx6 send`

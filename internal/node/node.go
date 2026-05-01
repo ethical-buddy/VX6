@@ -60,15 +60,13 @@ type Config struct {
 	ConfigPath           string
 	ControlInfoPath      string
 	RefreshServices      ServiceRefresher
-	BootstrapAddrs       []string
+	PeerAddrs            []string
 	Services             map[string]string
 	Identity             identity.Identity
 	Registry             *discovery.Registry
 	DHT                  *dht.Server
 	Reload               chan struct{}
 }
-
-const SeedBootstrapDomain = "bootstrap.vx6.dev"
 
 func Run(ctx context.Context, log io.Writer, cfg Config) error {
 	if cfg.Name == "" {
@@ -184,11 +182,11 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
-	if shouldRunBootstrapTasks(cfg) {
+	if shouldRunPeerSyncTasks(cfg) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runBootstrapTasks(ctx, log, cfg)
+			runPeerSyncTasks(ctx, log, cfg)
 		}()
 	}
 	if cfg.AdvertiseAddr != "" {
@@ -335,11 +333,11 @@ func endpointPublishMode(hidden bool) string {
 	return "published"
 }
 
-func shouldRunBootstrapTasks(cfg Config) bool {
+func shouldRunPeerSyncTasks(cfg Config) bool {
 	if cfg.AdvertiseAddr != "" {
 		return true
 	}
-	if len(cfg.BootstrapAddrs) > 0 {
+	if len(cfg.PeerAddrs) > 0 {
 		return true
 	}
 	if cfg.Registry == nil {
@@ -385,14 +383,7 @@ func runLocalDiscovery(ctx context.Context, log io.Writer, cfg Config) {
 	}
 }
 
-func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
-	ips, _ := net.LookupIP(SeedBootstrapDomain)
-	dnsSeeds := []string{}
-	for _, ip := range ips {
-		if ip.To4() == nil {
-			dnsSeeds = append(dnsSeeds, fmt.Sprintf("[%s]:4242", ip.String()))
-		}
-	}
+func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 	syncOnlyLogged := false
 
 	publishAndSync := func() {
@@ -421,11 +412,11 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 		}
 
 		nodes, _ := liveCfg.Registry.Snapshot()
-		seedDHTRouting(liveCfg.DHT, liveCfg.BootstrapAddrs, nodes)
-		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), dnsSeeds, nodes)
+		seedDHTRouting(liveCfg.DHT, liveCfg.PeerAddrs, nodes)
+		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), nodes)
 
 		nodes, _ = liveCfg.Registry.Snapshot()
-		persistBootstrapMetadata(liveCfg.ConfigPath, nodes)
+		persistKnownPeerMetadata(liveCfg.ConfigPath, nodes)
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
 		if !endpointReady {
 			return
@@ -741,13 +732,10 @@ func endpointRecordRef(ok bool, rec record.EndpointRecord) *record.EndpointRecor
 	return &out
 }
 
-func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, dnsSeeds []string, initialNodes []record.EndpointRecord) map[string]struct{} {
+func syncMesh(ctx context.Context, log io.Writer, cfg Config, rec *record.EndpointRecord, initialNodes []record.EndpointRecord) map[string]struct{} {
 	targets := map[string]struct{}{}
 	reachable := map[string]struct{}{}
-	for _, addr := range dnsSeeds {
-		addSyncTarget(targets, cfg.AdvertiseAddr, addr)
-	}
-	for _, addr := range cfg.BootstrapAddrs {
+	for _, addr := range cfg.PeerAddrs {
 		addSyncTarget(targets, cfg.AdvertiseAddr, addr)
 	}
 	for _, nodeRec := range initialNodes {
@@ -981,7 +969,7 @@ func runtimeConfig(base Config) Config {
 	live.HideEndpoint = cfgFile.Node.HideEndpoint
 	live.RelayMode = cfgFile.Node.RelayMode
 	live.RelayResourcePercent = cfgFile.Node.RelayResourcePercent
-	live.BootstrapAddrs = config.BootstrapAddresses(cfgFile.Node)
+	live.PeerAddrs = config.ConfiguredPeerAddresses(cfgFile)
 	live.FileReceiveMode = cfgFile.Node.FileReceiveMode
 	live.AllowedFileSenders = append([]string(nil), cfgFile.Node.AllowedFileSenders...)
 	live.Services = serviceTargets(cfgFile.Services)
@@ -999,7 +987,7 @@ func runtimeServices(base Config) map[string]string {
 	return runtimeConfig(base).Services
 }
 
-func persistBootstrapMetadata(configPath string, records []record.EndpointRecord) {
+func persistKnownPeerMetadata(configPath string, records []record.EndpointRecord) {
 	if configPath == "" || len(records) == 0 {
 		return
 	}
@@ -1011,7 +999,7 @@ func persistBootstrapMetadata(configPath string, records []record.EndpointRecord
 		if rec.NodeID == "" || rec.NodeName == "" || rec.Address == "" {
 			continue
 		}
-		_ = store.UpsertBootstrapRecord(rec)
+		_ = store.UpsertKnownPeerRecord(rec)
 	}
 }
 
@@ -1052,7 +1040,7 @@ func refreshAdvertiseAddress(log io.Writer, cfg Config) Config {
 
 func advertiseTargets(cfg Config) []string {
 	seen := map[string]struct{}{}
-	out := make([]string, 0, len(cfg.BootstrapAddrs)+8)
+	out := make([]string, 0, len(cfg.PeerAddrs)+8)
 	add := func(addr string) {
 		if addr == "" || addr == cfg.ListenAddr {
 			return
@@ -1063,7 +1051,7 @@ func advertiseTargets(cfg Config) []string {
 		seen[addr] = struct{}{}
 		out = append(out, addr)
 	}
-	for _, addr := range cfg.BootstrapAddrs {
+	for _, addr := range cfg.PeerAddrs {
 		add(addr)
 	}
 	if cfg.Registry != nil {
