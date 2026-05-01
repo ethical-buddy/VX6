@@ -178,22 +178,30 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 		defer controlServer.Close()
 	}
 
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	fmt.Fprintf(log, "vx6 node %q (%s) listening on %s\n", cfg.Name, cfg.NodeID, listener.Addr().String())
 
 	if shouldRunBootstrapTasks(cfg) {
-		go runBootstrapTasks(ctx, log, cfg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runBootstrapTasks(ctx, log, cfg)
+		}()
 	}
 	if cfg.AdvertiseAddr != "" {
-		go runLocalDiscovery(ctx, log, cfg)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runLocalDiscovery(ctx, log, cfg)
+		}()
 	}
 
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
 	}()
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
 
 	for {
 		conn, err := listener.Accept()
@@ -416,6 +424,7 @@ func runBootstrapTasks(ctx context.Context, log io.Writer, cfg Config) {
 		targets := syncMesh(ctx, log, liveCfg, endpointRecordRef(endpointReady, rec), dnsSeeds, nodes)
 
 		nodes, _ = liveCfg.Registry.Snapshot()
+		persistBootstrapMetadata(liveCfg.ConfigPath, nodes)
 		hidden.TrackAddresses(ctx, nodeAddresses(nodes), 30*time.Second)
 		if !endpointReady {
 			return
@@ -970,7 +979,7 @@ func runtimeConfig(base Config) Config {
 	live.HideEndpoint = cfgFile.Node.HideEndpoint
 	live.RelayMode = cfgFile.Node.RelayMode
 	live.RelayResourcePercent = cfgFile.Node.RelayResourcePercent
-	live.BootstrapAddrs = append([]string(nil), cfgFile.Node.BootstrapAddrs...)
+	live.BootstrapAddrs = config.BootstrapAddresses(cfgFile.Node)
 	live.FileReceiveMode = cfgFile.Node.FileReceiveMode
 	live.AllowedFileSenders = append([]string(nil), cfgFile.Node.AllowedFileSenders...)
 	live.Services = serviceTargets(cfgFile.Services)
@@ -986,6 +995,22 @@ func runtimeConfig(base Config) Config {
 
 func runtimeServices(base Config) map[string]string {
 	return runtimeConfig(base).Services
+}
+
+func persistBootstrapMetadata(configPath string, records []record.EndpointRecord) {
+	if configPath == "" || len(records) == 0 {
+		return
+	}
+	store, err := config.NewStore(configPath)
+	if err != nil {
+		return
+	}
+	for _, rec := range records {
+		if rec.NodeID == "" || rec.NodeName == "" || rec.Address == "" {
+			continue
+		}
+		_ = store.UpsertBootstrapRecord(rec)
+	}
 }
 
 func fileReceivePolicy(cfg Config) transfer.ReceivePolicy {
