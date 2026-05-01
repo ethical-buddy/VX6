@@ -48,6 +48,7 @@ type Config struct {
 	NodeID               string
 	ListenAddr           string
 	AdvertiseAddr        string
+	AdvertiseExplicit    bool
 	TransportMode        string
 	HideEndpoint         bool
 	RelayMode            string
@@ -954,7 +955,7 @@ func runtimeConfig(base Config) Config {
 		if len(live.Services) == 0 && base.RefreshServices != nil {
 			live.Services = base.RefreshServices()
 		}
-		if updated, _, err := netutil.RefreshAdvertiseAddress(live.AdvertiseAddr, live.ListenAddr); err == nil {
+		if updated, _, err := netutil.RefreshAdvertiseAddressWithAddrsAndTargets(live.AdvertiseAddr, live.ListenAddr, currentInterfaceAddrs(), advertiseTargets(live), live.AdvertiseExplicit); err == nil {
 			live.AdvertiseAddr = updated
 		}
 		return live
@@ -975,6 +976,7 @@ func runtimeConfig(base Config) Config {
 	if cfgFile.Node.AdvertiseAddr != "" {
 		live.AdvertiseAddr = cfgFile.Node.AdvertiseAddr
 	}
+	live.AdvertiseExplicit = cfgFile.Node.AdvertiseAddr != ""
 	live.TransportMode = cfgFile.Node.TransportMode
 	live.HideEndpoint = cfgFile.Node.HideEndpoint
 	live.RelayMode = cfgFile.Node.RelayMode
@@ -987,7 +989,7 @@ func runtimeConfig(base Config) Config {
 		live.Services = base.RefreshServices()
 	}
 	live.ReceiveDir = cfgFile.Node.DownloadDir
-	if updated, _, err := netutil.RefreshAdvertiseAddress(live.AdvertiseAddr, live.ListenAddr); err == nil {
+	if updated, _, err := netutil.RefreshAdvertiseAddressWithAddrsAndTargets(live.AdvertiseAddr, live.ListenAddr, currentInterfaceAddrs(), advertiseTargets(live), live.AdvertiseExplicit); err == nil {
 		live.AdvertiseAddr = updated
 	}
 	return live
@@ -1033,7 +1035,7 @@ func serviceTargets(entries map[string]config.ServiceEntry) map[string]string {
 }
 
 func refreshAdvertiseAddress(log io.Writer, cfg Config) Config {
-	updated, changed, err := netutil.RefreshAdvertiseAddress(cfg.AdvertiseAddr, cfg.ListenAddr)
+	updated, changed, err := netutil.RefreshAdvertiseAddressWithAddrsAndTargets(cfg.AdvertiseAddr, cfg.ListenAddr, currentInterfaceAddrs(), advertiseTargets(cfg), cfg.AdvertiseExplicit)
 	if err != nil || updated == "" {
 		return cfg
 	}
@@ -1046,6 +1048,39 @@ func refreshAdvertiseAddress(log io.Writer, cfg Config) Config {
 	}
 	cfg.AdvertiseAddr = updated
 	return cfg
+}
+
+func advertiseTargets(cfg Config) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(cfg.BootstrapAddrs)+8)
+	add := func(addr string) {
+		if addr == "" || addr == cfg.ListenAddr {
+			return
+		}
+		if _, ok := seen[addr]; ok {
+			return
+		}
+		seen[addr] = struct{}{}
+		out = append(out, addr)
+	}
+	for _, addr := range cfg.BootstrapAddrs {
+		add(addr)
+	}
+	if cfg.Registry != nil {
+		nodes, _ := cfg.Registry.Snapshot()
+		for _, rec := range nodes {
+			add(rec.Address)
+		}
+	}
+	return out
+}
+
+func currentInterfaceAddrs() []net.Addr {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	return addrs
 }
 
 func defaultReceiveDir(dataDir string) string {

@@ -500,6 +500,7 @@ func runNode(ctx context.Context, args []string) error {
 		NodeID:               id.NodeID,
 		ListenAddr:           *listenAddr,
 		AdvertiseAddr:        cfgFile.Node.AdvertiseAddr,
+		AdvertiseExplicit:    cfgFile.Node.AdvertiseAddr != "",
 		TransportMode:        cfgFile.Node.TransportMode,
 		HideEndpoint:         cfgFile.Node.HideEndpoint,
 		RelayMode:            cfgFile.Node.RelayMode,
