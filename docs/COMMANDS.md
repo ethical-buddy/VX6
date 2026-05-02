@@ -16,6 +16,7 @@
 - `vx6 receive`
 - `vx6 debug`
 - `vx6-gui`
+- `vx6-browser`
 
 ## Important Notes
 
@@ -54,4 +55,10 @@ Open GUI:
 
 ```bash
 vx6-gui
+```
+
+Open browser app:
+
+```bash
+vx6-browser
 ```

@@ -18,12 +18,14 @@ That builds:
 
 - `vx6`
 - `vx6-gui`
+- `vx6-browser`
 
 You can also build directly with Go:
 
 ```bash
 go build ./cmd/vx6
 go build ./cmd/vx6-gui
+go build -o ./vx6-browser ./cmd/vx6-gui
 ```
 
 ## Install
@@ -72,6 +74,14 @@ vx6-gui
 ```
 
 The GUI opens a local browser page and calls the `vx6` binary underneath.
+
+## Open the browser app
+
+```bash
+vx6-browser
+```
+
+The browser app uses the same `vx6` backend and local control surface.
 
 ## Linux-Specific Follow-Up
 

@@ -1,10 +1,11 @@
 # GUI
 
-VX6 now includes `vx6-gui`.
+VX6 now includes `vx6-gui` and `vx6-browser`.
 
 ## What It Is
 
 It is a local web UI that runs on your machine and calls the `vx6` binary underneath.
+`vx6-browser` uses the same backend but presents the browser shell branding and navigation model.
 
 That means:
 
@@ -24,6 +25,7 @@ That means:
 - file send
 - receive policy
 - DHT lookups
+- browser-style VX6 navigation
 - eBPF status
 - custom CLI argument execution
 

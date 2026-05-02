@@ -8,6 +8,8 @@ This file explains what the important files and directories do.
   - CLI entrypoint
 - `cmd/vx6-gui/main.go`
   - local web GUI front-end that wraps the CLI binary
+- `cmd/vx6-gui/browser_state.go`
+  - local VX6 browser navigation and history state shared by `vx6-gui` and `vx6-browser`
 
 ## Core Runtime
 

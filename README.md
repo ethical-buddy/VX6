@@ -7,7 +7,7 @@ HackitiseLabs Pvt. Ltd.<br>
 
 <h1 align="center">VX6</h1>
 
-<p align="center"> <strong>linux / windows / unix peer-to-peer service networking for real local apps.</strong><br> signed discovery, encrypted sessions, dht-backed lookup, relay paths, hidden services, file transfer, and a small gui. </p> <p align="center"> this branch is the <strong>linux / windows / unix</strong> release branch.<br> build <code>vx6</code> and <code>vx6-gui</code> from here for linux, windows, and unix systems. </p>
+<p align="center"> <strong>linux / windows / unix peer-to-peer service networking for real local apps.</strong><br> signed discovery, encrypted sessions, dht-backed lookup, relay paths, hidden services, file transfer, and a browser shell. </p> <p align="center"> this branch is the <strong>linux / windows / unix</strong> release branch.<br> build <code>vx6</code>, <code>vx6-gui</code>, and <code>vx6-browser</code> from here for linux, windows, and unix systems. </p>
 
 ## What VX6 Is
 
@@ -46,6 +46,7 @@ Typical binaries here are:
 
 - `vx6`
 - `vx6-gui`
+- `vx6-browser`
 
 ## Connection Modes
 
@@ -76,6 +77,7 @@ VX6 currently supports three access styles:
 - runtime status and reload over a local control channel
 - TCP-based transport across the whole system
 - `vx6-gui` as a local web UI over the same CLI/runtime
+- `vx6-browser` as a VX6-owned browser shell over the same CLI/runtime
 
 ## What Is Still In Progress
 
@@ -96,6 +98,7 @@ Current Linux expectations:
 
 - build `vx6`
 - build `vx6-gui`
+- build `vx6-browser`
 - run the full current VX6 protocol feature set
 - use TCP transport
 - use the local runtime control channel
@@ -114,6 +117,7 @@ That branch is intended for:
 
 - `vx6.exe`
 - `vx6-gui.exe`
+- `vx6-browser.exe`
 - Windows 11
 - Windows Server class deployments
 
@@ -143,7 +147,7 @@ The config surface may still mention `quic` for forward compatibility, but the c
 
 ## GUI
 
-`vx6-gui` is included in this branch.
+`vx6-gui` and `vx6-browser` are included in this branch.
 
 It is a local web UI that:
 
@@ -166,6 +170,7 @@ Or:
 ```bash
 go build ./cmd/vx6
 go build ./cmd/vx6-gui
+go build -o ./vx6-browser ./cmd/vx6-gui
 ```
 
 ### Initialize a node
@@ -196,6 +201,12 @@ vx6 status
 
 ```bash
 vx6-gui
+```
+
+### Open the browser app
+
+```bash
+vx6-browser
 ```
 
 ## Documentation

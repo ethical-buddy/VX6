@@ -56,3 +56,42 @@ func TestBuildDHTGetArgsRequiresSelector(t *testing.T) {
 		t.Fatal("expected selector error")
 	}
 }
+
+func TestBrowserTargetToArgsStatus(t *testing.T) {
+	title, args, canonical, err := browserTargetToArgs("vx6://status")
+	if err != nil {
+		t.Fatalf("resolve browser target: %v", err)
+	}
+	if title != "Status" {
+		t.Fatalf("unexpected title %q", title)
+	}
+	if !reflect.DeepEqual(args, []string{"status"}) {
+		t.Fatalf("unexpected args %#v", args)
+	}
+	if canonical != "vx6://status" {
+		t.Fatalf("unexpected canonical target %q", canonical)
+	}
+}
+
+func TestBrowserTargetToArgsService(t *testing.T) {
+	title, args, canonical, err := browserTargetToArgs("vx6://service/alice.web")
+	if err != nil {
+		t.Fatalf("resolve browser target: %v", err)
+	}
+	if title != "DHT Lookup" {
+		t.Fatalf("unexpected title %q", title)
+	}
+	want := []string{"debug", "dht-get", "--service", "alice.web"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected args %#v", args)
+	}
+	if canonical != "vx6://service/alice.web" {
+		t.Fatalf("unexpected canonical target %q", canonical)
+	}
+}
+
+func TestBrowserTargetToArgsRejectsUnknown(t *testing.T) {
+	if _, _, _, err := browserTargetToArgs("vx6://unknown/page"); err == nil {
+		t.Fatal("expected browser target error")
+	}
+}
