@@ -36,7 +36,7 @@ That means:
 ## Still In Progress
 
 - seamless hidden mid-stream failover
-- stronger DHT store admission
+- stronger DHT store admission for high-trust deployments
 - real QUIC transport
 - real eBPF/XDP fast path for the current encrypted relay plane
 - polished Windows and macOS packaging and service lifecycle work

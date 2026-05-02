@@ -16,6 +16,7 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - conflict detection
 - bounded replication
 - refresh tracking
+- conservative store admission with signed trusted writes, stale-write rejection, and per-source throttling
 - ASN-aware diversity when a local ASN map is present
 - hidden descriptor caching and cover lookups
 - blinded rotating hidden keys
@@ -23,9 +24,9 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 
 ## What It Does Not Do Yet
 
-- strong anti-Sybil store admission
 - disk-backed large-scale value storage
 - full Tor-grade traffic-analysis resistance
+- operator-managed publish tokens for high-trust deployments
 
 ## Hidden Descriptor Notes
 

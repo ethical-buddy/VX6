@@ -3,7 +3,7 @@
 This file is a short task list for follow-up PRs.
 
 ## Protocol
-- DHT write admission is still too open. Add write tokens or closer-to-key publish checks so strangers cannot flood trusted records.
+- DHT store admission is now conservative, but operator-configurable publish tokens and closer-to-key admission could still strengthen high-trust deployments.
 - DHT ASN diversity now works with offline maps, but we still need better operator tooling to generate and refresh those maps.
 - Hidden-service lookup still has timing and volume leakage. Add more cover traffic and more regular polling.
 - Hidden failover is improved, but an active stream still does not migrate perfectly when a relay dies. Add stronger reconnect and session handoff.
@@ -33,7 +33,7 @@ This file is a short task list for follow-up PRs.
 - Add a `vx6 doctor` command that reports firewall, advertise address, and peer sync health.
 
 ## Small PR Slices
-- PR 1: DHT write admission and tests.
+- PR 1: DHT store admission refinements and tests.
 - PR 2: Hidden-service traffic shaping and tests.
 - PR 3: Windows installer and firewall setup.
 - PR 4: macOS/BSD adapter files.
