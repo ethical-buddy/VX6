@@ -2,21 +2,12 @@
 <b>SPONSORED BY</b><br>
 HackitiseLabs Pvt. Ltd.<br>
 <a href="https://hackitiselabs.in">hackitiselabs.in</a> | 
-<br>Dailker<br>
-<a href="https://github.com/dailker">GitHub</a>
+<a href="https://github.com/dailker">@dailker (Ilker)</a>
 </p>
 
 <h1 align="center">VX6</h1>
 
-<p align="center">
-  <strong>Linux-first peer-to-peer service networking for real local applications.</strong><br>
-  Signed discovery, encrypted sessions, DHT-backed lookup, relay paths, hidden services, file transfer, and a small GUI.
-</p>
-
-<p align="center">
-  This branch is the <strong>Linux-first</strong> release branch.<br>
-  Build <code>vx6</code> and <code>vx6-gui</code> from here for Linux hosts and Linux-centered deployments.
-</p>
+<p align="center"> <strong>linux / windows / unix peer-to-peer service networking for real local apps.</strong><br> signed discovery, encrypted sessions, dht-backed lookup, relay paths, hidden services, file transfer, and a small gui. </p> <p align="center"> this branch is the <strong>linux / windows / unix</strong> release branch.<br> build <code>vx6</code> and <code>vx6-gui</code> from here for linux, windows, and unix systems. </p>
 
 ## What VX6 Is
 
@@ -46,17 +37,15 @@ Good fits include:
 
 This branch is meant for:
 
-- Linux builds
-- Linux test deployments
-- Linux-first production-style staging
-- the reference protocol and security behavior for VX6
+- Windows & UNIX/Linux builds
+- Test deployments
+- Production-style staging
+- The reference protocol and security behavior for VX6
 
 Typical binaries here are:
 
 - `vx6`
 - `vx6-gui`
-
-Windows support should follow the same protocol and feature behavior, but the Windows-oriented release branch is `Windows-compatible`.
 
 ## Connection Modes
 
@@ -119,7 +108,7 @@ Important:
 
 ### Windows
 
-Windows is expected to follow the same protocol and service behavior, but the Windows-oriented branch is `Windows-compatible`.
+Windows is expected to follow the same protocol and service behavior, its conditionally seperated to build lightweight in specified OS.
 
 That branch is intended for:
 
@@ -225,6 +214,7 @@ vx6-gui
 - [Systemd](./docs/systemd.md)
 - [Status](./docs/STATUS.md)
 - [File Map](./docs/FILE_MAP.md)
+- [Changes Directory](./docs/changes/)
 
 ## Release Position
 
