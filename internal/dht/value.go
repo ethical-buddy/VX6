@@ -22,6 +22,7 @@ var (
 
 const (
 	minTrustedSupportingSources = 2
+	minTrustedASNGroups         = 2
 	minTrustedNetworkGroups     = 2
 	minTrustedProviderGroups    = 2
 	minTrustedConfirmationScore = 4
@@ -39,6 +40,7 @@ type LookupResult struct {
 	PublisherCount    int
 	NetworkDiversity  int
 	ProviderDiversity int
+	ASNDiversity      int
 	BranchDiversity   int
 	TrustWeight       int
 	Version           uint64
@@ -72,6 +74,8 @@ type candidateObservation struct {
 	exactSources   map[string]sourceObservation
 	providers      map[string]struct{}
 	exactProviders map[string]struct{}
+	asns           map[string]struct{}
+	exactASNs      map[string]struct{}
 	networks       map[string]struct{}
 	exactNetworks  map[string]struct{}
 	branches       map[int]struct{}
@@ -172,7 +176,7 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		for _, candidate := range c.verified {
 			result := candidate.lookupResult(queried, c.rejected)
 			if !candidate.confirmed() {
-				return result, fmt.Errorf("%w: exact=%d branches=%d providers=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactBranches), len(candidate.exactProviders), len(candidate.exactNetworks), candidate.exactWeight)
+				return result, fmt.Errorf("%w: exact=%d branches=%d asns=%d providers=%d networks=%d weight=%d", ErrInsufficientConfirmation, len(candidate.exactSources), len(candidate.exactBranches), len(candidate.exactASNs), len(candidate.exactProviders), len(candidate.exactNetworks), candidate.exactWeight)
 			}
 			return result, nil
 		}
@@ -225,6 +229,8 @@ func newCandidateObservation(value validatedValue) *candidateObservation {
 		exactSources:   map[string]sourceObservation{},
 		providers:      map[string]struct{}{},
 		exactProviders: map[string]struct{}{},
+		asns:           map[string]struct{}{},
+		exactASNs:      map[string]struct{}{},
 		networks:       map[string]struct{}{},
 		exactNetworks:  map[string]struct{}{},
 		branches:       map[int]struct{}{},
@@ -239,6 +245,9 @@ func (c *candidateObservation) addSource(source sourceObservation) {
 	}
 	if provider := source.providerKey(); provider != "" {
 		c.providers[provider] = struct{}{}
+	}
+	if asn := source.asnKey(); asn != "" {
+		c.asns[asn] = struct{}{}
 	}
 	if network := source.networkKey(); network != "" {
 		c.networks[network] = struct{}{}
@@ -255,6 +264,9 @@ func (c *candidateObservation) addExactSource(source sourceObservation, value va
 	}
 	if provider := source.providerKey(); provider != "" {
 		c.exactProviders[provider] = struct{}{}
+	}
+	if asn := source.asnKey(); asn != "" {
+		c.exactASNs[asn] = struct{}{}
 	}
 	if network := source.networkKey(); network != "" {
 		c.exactNetworks[network] = struct{}{}
@@ -280,8 +292,14 @@ func (c *candidateObservation) confirmed() bool {
 	if !c.onlyLoopbackNetworks() && len(c.exactBranches) < minTrustedLookupBranches {
 		return false
 	}
-	if !c.onlyLoopbackNetworks() && len(c.exactProviders) < minTrustedProviderGroups {
-		return false
+	if !c.onlyLoopbackNetworks() {
+		if len(c.exactASNs) > 0 {
+			if len(c.exactASNs) < minTrustedASNGroups && len(c.exactProviders) < minTrustedProviderGroups {
+				return false
+			}
+		} else if len(c.exactProviders) < minTrustedProviderGroups {
+			return false
+		}
 	}
 	if len(c.exactNetworks) >= minTrustedNetworkGroups {
 		return true
@@ -312,6 +330,7 @@ func (c *candidateObservation) lookupResult(queried, rejected int) LookupResult 
 		PublisherCount:    len(c.publishers),
 		NetworkDiversity:  len(c.exactNetworks),
 		ProviderDiversity: len(c.exactProviders),
+		ASNDiversity:      len(c.exactASNs),
 		BranchDiversity:   len(c.exactBranches),
 		TrustWeight:       c.exactWeight,
 		Version:           c.value.version,
@@ -335,6 +354,14 @@ func (s sourceObservation) providerKey() string {
 		return "provider4:" + v4.Mask(net.CIDRMask(16, 32)).String()
 	}
 	return "provider6:" + ip.Mask(net.CIDRMask(32, 128)).String()
+}
+
+func (s sourceObservation) asnKey() string {
+	asn, ok := ResolveASNForAddr(s.addr)
+	if !ok {
+		return ""
+	}
+	return "asn:" + asn
 }
 
 func (s sourceObservation) networkKey() string {

@@ -612,6 +612,7 @@ func runConnect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	_, _ = dht.ConfigureASNResolver(store.Path())
 	idStore, err := identity.NewStoreForConfig(store.Path())
 	if err != nil {
 		return err
@@ -1193,6 +1194,13 @@ func printRuntimeStatus(label string, status runtimectl.Status) {
 	if status.HiddenDescriptorOverlapKeys > 0 {
 		fmt.Printf("hidden_descriptor_overlap_keys\t%d\n", status.HiddenDescriptorOverlapKeys)
 	}
+	fmt.Printf("asn_resolver_loaded\t%v\n", status.ASNResolverLoaded)
+	if status.ASNResolverSource != "" {
+		fmt.Printf("asn_resolver_source\t%s\n", status.ASNResolverSource)
+	}
+	if status.ASNResolverEntries > 0 {
+		fmt.Printf("asn_resolver_entries\t%d\n", status.ASNResolverEntries)
+	}
 	fmt.Printf("dht_tracked_keys\t%d\n", status.DHTTrackedKeys)
 	fmt.Printf("dht_healthy_keys\t%d\n", status.DHTHealthyKeys)
 	fmt.Printf("dht_degraded_keys\t%d\n", status.DHTDegradedKeys)
@@ -1392,7 +1400,10 @@ func runDebugDHTGet(ctx context.Context, args []string) error {
 		return err
 	}
 
-	client := newDHTClient(cfg)
+	client, err := newDHTClient(cfg)
+	if err != nil {
+		return err
+	}
 	switch {
 	case *service != "":
 		if strings.Contains(*service, ".") {
@@ -1702,7 +1713,7 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 		}
 	}
 
-	if d := newDHTClient(cfg); d != nil {
+	if d, err := newDHTClient(cfg); err == nil && d != nil {
 		if value, err := d.RecursiveFindValue(ctx, dht.NodeNameKey(name)); err == nil && value != "" {
 			var rec record.EndpointRecord
 			if err := json.Unmarshal([]byte(value), &rec); err == nil {
@@ -1730,7 +1741,7 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 		}
 	}
 
-	if d := newDHTClient(cfg); d != nil {
+	if d, err := newDHTClient(cfg); err == nil && d != nil {
 		if strings.Contains(service, ".") {
 			if val, err := d.RecursiveFindValue(ctx, dht.ServiceKey(service)); err == nil && val != "" {
 				var r record.ServiceRecord
@@ -1792,7 +1803,10 @@ func serviceLookupKeys(service string) []string {
 }
 
 func lookupPrivateServicesForUser(ctx context.Context, cfg config.File, nodeName string) ([]record.ServiceRecord, error) {
-	client := newDHTClient(cfg)
+	client, err := newDHTClient(cfg)
+	if err != nil {
+		return nil, err
+	}
 	if client == nil {
 		return nil, errors.New("dht unavailable")
 	}
@@ -1838,7 +1852,8 @@ func discoveryCandidates(cfg config.File) []string {
 	return out
 }
 
-func newDHTClient(cfg config.File) *dht.Server {
+func newDHTClient(cfg config.File) (*dht.Server, error) {
+	_, _ = dht.ConfigureASNResolver(mustDefaultConfigPath())
 	client := dht.NewServer("cli-observer")
 	var registryNodes []record.EndpointRecord
 
@@ -1873,7 +1888,15 @@ func newDHTClient(cfg config.File) *dht.Server {
 			return exclude
 		},
 	})
-	return client
+	return client, nil
+}
+
+func mustDefaultConfigPath() string {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return ""
+	}
+	return path
 }
 
 func writePIDFile(path string, pid int) error {

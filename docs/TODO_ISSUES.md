@@ -4,7 +4,7 @@ This file is a short task list for follow-up PRs.
 
 ## Protocol
 - DHT write admission is still too open. Add write tokens or closer-to-key publish checks so strangers cannot flood trusted records.
-- DHT source diversity is still mostly prefix-based. Add better provider/ASN-aware diversity checks.
+- DHT ASN diversity now works with offline maps, but we still need better operator tooling to generate and refresh those maps.
 - Hidden-service lookup still has timing and volume leakage. Add more cover traffic and more regular polling.
 - Hidden failover is improved, but an active stream still does not migrate perfectly when a relay dies. Add stronger reconnect and session handoff.
 - DHT cache and stored records are still mostly memory-backed. Add bounded disk-backed storage for scale.

@@ -24,6 +24,7 @@
 - `transport=quic` is not active
 - hidden services use invite-based lookup
 - private services are not published as public `service/...` records
+- `vx6 status` reports whether an offline ASN map is loaded for DHT diversity
 
 ## Most Used Flows
 

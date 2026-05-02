@@ -12,6 +12,7 @@ VX6 is usable now for controlled testing and temporary internal deployment.
 - hidden services with encrypted descriptors
 - blinded hidden lookup keys
 - invite-secret based hidden lookup
+- ASN-aware DHT diversity when a local ASN map is provided
 - file transfer with local permission policy
 - runtime status and reload
 - GUI over the same CLI/runtime surface
@@ -39,6 +40,7 @@ That means:
 - real QUIC transport
 - real eBPF/XDP fast path for the current encrypted relay plane
 - polished Windows and macOS packaging and service lifecycle work
+- richer ASN map tooling and operator data sources
 
 ## Honest Summary
 

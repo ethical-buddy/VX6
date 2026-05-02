@@ -751,6 +751,7 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 
 	out := make([]proto.NodeInfo, 0, limit)
 	remaining := make([]proto.NodeInfo, 0, len(nodes))
+	seenASNs := map[string]struct{}{}
 	seenProviders := map[string]struct{}{}
 	seenNetworks := map[string]struct{}{}
 	selected := map[string]struct{}{}
@@ -761,6 +762,9 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 		}
 		selected[node.ID] = struct{}{}
 		out = append(out, node)
+		if asn := (sourceObservation{addr: node.Addr}).asnKey(); asn != "" {
+			seenASNs[asn] = struct{}{}
+		}
 		if provider := (sourceObservation{addr: node.Addr}).providerKey(); provider != "" {
 			seenProviders[provider] = struct{}{}
 		}
@@ -771,6 +775,23 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 	}
 
 	for _, node := range nodes {
+		asn := (sourceObservation{addr: node.Addr}).asnKey()
+		if asn == "" {
+			remaining = append(remaining, node)
+			continue
+		}
+		if _, ok := seenASNs[asn]; ok {
+			remaining = append(remaining, node)
+			continue
+		}
+		if appendNode(node) {
+			return out
+		}
+	}
+
+	secondPass := remaining
+	remaining = remaining[:0]
+	for _, node := range secondPass {
 		provider := (sourceObservation{addr: node.Addr}).providerKey()
 		if provider == "" {
 			remaining = append(remaining, node)
@@ -785,9 +806,9 @@ func selectReplicationNodes(nodes []proto.NodeInfo, limit int) []proto.NodeInfo 
 		}
 	}
 
-	secondPass := remaining
+	thirdPass := remaining
 	remaining = remaining[:0]
-	for _, node := range secondPass {
+	for _, node := range thirdPass {
 		network := (sourceObservation{addr: node.Addr}).networkKey()
 		if network == "" {
 			remaining = append(remaining, node)

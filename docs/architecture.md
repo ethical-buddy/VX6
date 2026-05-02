@@ -66,6 +66,8 @@ Important point:
 
 - not every node stores every record
 - each record is stored only on a small responsible set of nodes
+- diversity checks can use an optional offline ASN map when operators provide one
+- if no ASN map exists, the DHT falls back to the existing prefix-based diversity logic
 
 ## 6. Encryption
 

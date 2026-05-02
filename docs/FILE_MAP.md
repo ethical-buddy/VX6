@@ -20,7 +20,7 @@ This file explains what the important files and directories do.
 - `internal/node/node.go`
   - main node runtime and background publish/sync loop
 - `internal/runtimectl/runtimectl.go`
-  - local runtime control channel used by `status` and `reload`
+  - local runtime control channel used by `status` and `reload`, including live ASN resolver status
 
 ## Identity and Records
 
@@ -37,8 +37,10 @@ This file explains what the important files and directories do.
   - local registry and peer snapshot exchange
 - `internal/dht/dht.go`
   - main DHT server and lookup flow
+- `internal/dht/asn.go`
+  - optional offline ASN map loader, cache, and resolver status
 - `internal/dht/value.go`
-  - DHT lookup validation, trust weighting, and confirmation logic
+  - DHT lookup validation, trust weighting, confirmation logic, and ASN-aware diversity
 - `internal/dht/private_catalog.go`
   - private per-user catalog format
 - `internal/dht/hidden_descriptor.go`
@@ -87,3 +89,5 @@ This file explains what the important files and directories do.
   - unit tests
 - `internal/integration/swarm_test.go`
   - multi-node integration tests
+- `internal/dht/asn_test.go`
+  - ASN resolver and diversity tests

@@ -16,6 +16,7 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - conflict detection
 - bounded replication
 - refresh tracking
+- ASN-aware diversity when a local ASN map is present
 - hidden descriptor caching and cover lookups
 - blinded rotating hidden keys
 - encrypted hidden descriptor payloads
@@ -23,7 +24,6 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 ## What It Does Not Do Yet
 
 - strong anti-Sybil store admission
-- real ASN/provider diversity
 - disk-backed large-scale value storage
 - full Tor-grade traffic-analysis resistance
 
@@ -37,3 +37,19 @@ Hidden descriptors are stronger than plain alias lookup because:
 - descriptor store and lookup can be relayed anonymously
 
 Still, the responsible DHT holders can observe timing and volume on a blinded descriptor key. That is one of the main remaining privacy limits.
+
+## ASN Diversity
+
+VX6 can use an offline ASN map to improve DHT diversity checks.
+
+When the map is present:
+
+- lookup confirmation prefers independent ASNs first
+- replica selection spreads records across ASNs before falling back to prefix diversity
+
+When the map is missing or incomplete:
+
+- VX6 falls back to the current prefix-based provider grouping
+- the DHT still works normally
+
+The ASN map is optional and local. It is not fetched over the network.
