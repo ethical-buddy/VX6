@@ -7,11 +7,11 @@
 
 ## Why This Exists
 
-Right now, if you want to reach a VX6 service from a browser, you have to manually run `vx6 connect`, figure out which local port it forwarded to, and type `http://127.0.0.1:PORT` into your browser. That works for developers who live in the terminal, but it is not how most people use software.
+Right now, if we want to reach a VX6 service from a browser, we have to manually run `vx6 connect`, figure out which local port it forwarded to, and type `http://127.0.0.1:PORT` into the browser. That works for developers who live in the terminal, but it is not how most people use software.
 
-The VX6 browser closes that gap. It knows what `vx6://alice.dashboard` means. It handles the DHT lookup, the port forwarding, and the connection — and then it just loads the page. No manual steps. No exposed ports. No confusion about why `127.0.0.1:8080` stopped working after a reconnect.
+The VX6 browser closes that gap. It understands what `vx6://alice.dashboard` means, handles the DHT lookup, sets up port forwarding, and connects — then the page simply loads. No manual steps. No exposed ports. No confusion about why `127.0.0.1:8080` stopped working after a reconnect.
 
-It is also the right place to surface node health, peer status, and service discovery in a way that non-technical users can actually read.
+It is also the right place for us to surface node health, peer status, and service discovery in a way non-technical users can actually read.
 
 ---
 
@@ -27,7 +27,7 @@ It is also the right place to surface node health, peer status, and service disc
 
 ## What This Is Not
 
-This is not a replacement for Firefox or Chrome. It does not aim to render the full public web better than existing browsers. For regular `https://` URLs it just passes through to the OS webview. The VX6-specific behaviour is the contribution here.
+This is not a replacement for Firefox or Chrome. We are not trying to render the full public web better than existing browsers. For regular `https://` URLs it just passes through to the OS webview. The VX6-specific behaviour is the contribution here.
 
 ---
 
@@ -57,7 +57,7 @@ This is not a replacement for Firefox or Chrome. It does not aim to render the f
 └─────────────────────────────────────────────────────────┘
 ```
 
-Three layers. Each one can fail independently without taking the others down. The UI crashing does not stop the node. The node restarting does not lose your open tabs.
+Three layers. Each one can fail independently without taking the others down. If the UI crashes, the node keeps running. If the node restarts, we do not lose open tabs.
 
 ---
 
@@ -65,27 +65,27 @@ Three layers. Each one can fail independently without taking the others down. Th
 
 ### Shell — Tauri
 
-Tauri is the right choice here for a few concrete reasons.
+We believe Tauri is the right choice here for a few concrete reasons.
 
 VX6 already has a Go runtime that handles all the heavy networking. The browser shell does not need to reimplement any of that — it just needs to talk to it. Tauri's Rust backend gives a thin, fast bridge to the OS without shipping a second copy of Chromium. The final installer ends up around 10–15 MB instead of 150 MB.
 
-The other reason is that Tauri's IPC model maps cleanly onto the VX6 control socket pattern. You write a Rust command, it opens a socket to the Go runtime, it returns JSON to the frontend. That is a very short, auditable path.
+The other reason is that Tauri's IPC model maps cleanly onto the VX6 control socket pattern. We write a Rust command, it opens a socket to the Go runtime, and returns JSON to the frontend. That is a short, auditable path.
 
 Electron is a valid alternative if the team has stronger JavaScript/Node experience and binary size is not a concern. The architecture described here applies to both — swap "Tauri command" for "ipcMain handler" and "Rust" for "Node.js" and everything else stays the same.
 
 ### Rendering — OS Native Webview
 
-| Platform | Webview Engine | Notes |
-|---|---|---|
-| Linux | WebKitGTK | Version varies by distro — test on Ubuntu LTS and Arch |
-| macOS | WKWebView | Safari engine — consistent across macOS versions we care about |
-| Windows | Edge WebView2 | Requires WebView2 runtime — handle missing runtime at install time |
+| Platform | Webview Engine | Notes                                                              |
+| -------- | -------------- | ------------------------------------------------------------------ |
+| Linux    | WebKitGTK      | Version varies by distro — test on Ubuntu LTS and Arch             |
+| macOS    | WKWebView      | Safari engine — consistent across macOS versions we care about     |
+| Windows  | Edge WebView2  | Requires WebView2 runtime — handle missing runtime at install time |
 
 We do not ship Chromium. We use what the OS provides. This means there will be minor rendering differences across platforms — that is acceptable for a network tool. If pixel-perfect cross-platform rendering becomes a hard requirement later, Chromium embedding (via CEF) can be revisited.
 
 ### Frontend — Svelte (recommended) or React
 
-Svelte produces smaller bundles and has less runtime overhead. For a browser shell where the UI is relatively modest (address bar, tabs, sidebar), this matters. React is fine if the contributors are more comfortable there — the architecture does not depend on the choice.
+Svelte produces smaller bundles and has less runtime overhead. For a browser shell where the UI is relatively modest (address bar, tabs, sidebar), this matters. React is fine if contributors are more comfortable there — the architecture does not depend on the choice.
 
 ### Build & Packaging — Tauri CLI + GitHub Actions
 
@@ -149,7 +149,7 @@ A small module in the Rust backend that:
 - Releases ports when tabs close or connections drop
 - Never reuses a port until it has been confirmed released
 
-This must be a proper allocator, not just a counter. If you increment a counter and the previous forwarder on that port has not fully closed yet, the new connection will fail silently.
+This must be a proper allocator, not just a counter. If we increment a counter and the previous forwarder on that port has not fully closed yet, the new connection will fail silently.
 
 ### 4. Storage Scoping Layer
 
@@ -210,14 +210,14 @@ Clicking a service navigates to `vx6://service-name`. This is how users discover
 
 Custom error pages for each failure mode — not the webview's default "ERR_CONNECTION_REFUSED":
 
-| Error | Cause | What to Show |
-|---|---|---|
-| `vx6://service-not-found` | DHT lookup returned nothing | "No service with this name was found on the network. Check the name or try again." |
-| `vx6://service-unreachable` | Service found but connection failed | "This service is known but not currently reachable. The peer may be offline." |
-| `vx6://timeout` | Resolution or connection took too long | "Connection timed out. The network may be degraded." |
-| `vx6://invite-required` | Hidden service needs an invite secret | Form to enter the invite secret |
-| `vx6://signature-invalid` | DHT record failed signature check | "This service record could not be verified. It may have been tampered with." |
-| `vx6://node-offline` | Local VX6 node is not running | "The VX6 node is not running." + restart button |
+| Error                       | Cause                                  | What to Show                                                                       |
+| --------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------- |
+| `vx6://service-not-found`   | DHT lookup returned nothing            | "No service with this name was found on the network. Check the name or try again." |
+| `vx6://service-unreachable` | Service found but connection failed    | "This service is known but not currently reachable. The peer may be offline."      |
+| `vx6://timeout`             | Resolution or connection took too long | "Connection timed out. The network may be degraded."                               |
+| `vx6://invite-required`     | Hidden service needs an invite secret  | Form to enter the invite secret                                                    |
+| `vx6://signature-invalid`   | DHT record failed signature check      | "This service record could not be verified. It may have been tampered with."       |
+| `vx6://node-offline`        | Local VX6 node is not running          | "The VX6 node is not running." + restart button                                    |
 
 The signature-invalid error is important to surface explicitly. It should not silently fall back to "unreachable" — the user needs to know the difference between a missing service and a potentially compromised one.
 
@@ -315,17 +315,17 @@ Each job compiles the `vx6` Go binary for its target, then runs `tauri build` wi
 
 ### Output Formats
 
-| Platform | Format | Notes |
-|---|---|---|
-| Linux x86_64 | `.deb`, `.AppImage`, `.rpm` | AppImage is the most portable — no install required |
-| Linux arm64 | `.deb`, `.AppImage` | For Raspberry Pi and ARM servers |
-| macOS x86_64 | `.dmg`, `.app` | Intel Macs |
-| macOS arm64 | `.dmg`, `.app` | Apple Silicon |
-| Windows x86_64 | `.msi`, `.exe` (NSIS) | MSI for enterprise, NSIS for general users |
+| Platform       | Format                      | Notes                                               |
+| -------------- | --------------------------- | --------------------------------------------------- |
+| Linux x86_64   | `.deb`, `.AppImage`, `.rpm` | AppImage is the most portable — no install required |
+| Linux arm64    | `.deb`, `.AppImage`         | For Raspberry Pi and ARM servers                    |
+| macOS x86_64   | `.dmg`, `.app`              | Intel Macs                                          |
+| macOS arm64    | `.dmg`, `.app`              | Apple Silicon                                       |
+| Windows x86_64 | `.msi`, `.exe` (NSIS)       | MSI for enterprise, NSIS for general users          |
 
 ### Code Signing
 
-**macOS** requires signing and notarization. Without it, every user gets a Gatekeeper warning on first launch. You need an Apple Developer account and the notarization step in CI. This is non-negotiable for any release that goes to users outside the dev team.
+**macOS** requires signing and notarization. Without it, every user gets a Gatekeeper warning on first launch. We need an Apple Developer account and the notarization step in CI. This is non-negotiable for any release that goes to users outside the dev team.
 
 **Windows** SmartScreen will show a warning for unsigned executables. A code signing certificate reduces (but does not eliminate) this. EV certificates suppress the warning immediately; standard OV certificates need to accumulate reputation first.
 
@@ -345,9 +345,9 @@ Edge WebView2 may not be installed on older Windows 10 machines. The installer m
 
 ### Auto-Update
 
-Ship with auto-update enabled from the first release. The update check should happen on launch, and updates should install in the background with a "restart to apply" prompt. Tauri's updater plugin handles the mechanism — you need to host a `latest.json` update manifest at a stable URL and sign update artifacts with a separate keypair.
+We should ship with auto-update enabled from the first release. The update check should happen on launch, and updates should install in the background with a "restart to apply" prompt. Tauri's updater plugin handles the mechanism — we need to host a `latest.json` update manifest at a stable URL and sign update artifacts with a separate keypair.
 
-Define the update keypair before the first release and keep it offline. Losing it means you cannot ship signed updates.
+Define the update keypair before the first release and keep it offline. Losing it means we cannot ship signed updates.
 
 ---
 
@@ -466,4 +466,4 @@ If you find something in this document that is wrong, incomplete, or that you di
 
 ---
 
-*Document version: draft-01 — May 2026*
+_Document version: draft-01 — May 2026_
