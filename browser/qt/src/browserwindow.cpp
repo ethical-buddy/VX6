@@ -142,6 +142,8 @@ void BrowserWindow::buildDock()
     layout->setSpacing(10);
 
     auto *reloadBtn = new QPushButton("Reload Node", dockBody);
+    auto *startBtn = new QPushButton("Start Node", dockBody);
+    auto *stopBtn = new QPushButton("Stop Node", dockBody);
     auto *statusBtn = new QPushButton("Refresh Status", dockBody);
     auto *permBtn = new QPushButton("Firewall / Admin Notes", dockBody);
     m_shortcuts = new QListWidget(dockBody);
@@ -160,6 +162,8 @@ void BrowserWindow::buildDock()
     m_logView->setPlaceholderText("VX6 runtime and browser activity appear here.");
     m_logView->setStyleSheet("QTextEdit { background: #0c1426; color: #dfe7f9; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; }");
 
+    layout->addWidget(startBtn);
+    layout->addWidget(stopBtn);
     layout->addWidget(reloadBtn);
     layout->addWidget(statusBtn);
     layout->addWidget(permBtn);
@@ -169,6 +173,8 @@ void BrowserWindow::buildDock()
     m_logDock->setWidget(dockBody);
     addDockWidget(Qt::RightDockWidgetArea, m_logDock);
 
+    connect(startBtn, &QPushButton::clicked, this, &BrowserWindow::startNode);
+    connect(stopBtn, &QPushButton::clicked, this, &BrowserWindow::stopNode);
     connect(reloadBtn, &QPushButton::clicked, this, &BrowserWindow::reloadNode);
     connect(statusBtn, &QPushButton::clicked, this, &BrowserWindow::refreshStatus);
     connect(permBtn, &QPushButton::clicked, this, [this] {
@@ -289,6 +295,18 @@ void BrowserWindow::reloadNode()
     if (auto *view = currentView()) {
         view->reload();
     }
+}
+
+void BrowserWindow::startNode()
+{
+    appendLog(m_backend->startNode());
+    refreshStatus();
+}
+
+void BrowserWindow::stopNode()
+{
+    appendLog(m_backend->stopNode());
+    refreshStatus();
 }
 
 void BrowserWindow::refreshStatus()

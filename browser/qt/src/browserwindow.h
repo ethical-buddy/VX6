@@ -29,6 +29,8 @@ private slots:
     void currentTabChanged(int index);
     void toggleLogs();
     void reloadNode();
+    void startNode();
+    void stopNode();
     void refreshStatus();
     void bookmarkCurrent();
 
