@@ -3,7 +3,7 @@
 This file is a short task list for follow-up PRs.
 
 ## Protocol
-- DHT store admission is now conservative, but operator-configurable publish tokens and closer-to-key admission could still strengthen high-trust deployments.
+- DHT store admission is now conservative, with authoritative publisher checks for trusted records. Operator-configurable publish tokens and closer-to-key admission could still strengthen high-trust deployments.
 - DHT ASN diversity now works with offline maps, but we still need better operator tooling to generate and refresh those maps.
 - Hidden-service lookup still has timing and volume leakage. Add more cover traffic and more regular polling.
 - Hidden failover is improved, but an active stream still does not migrate perfectly when a relay dies. Add stronger reconnect and session handoff.
@@ -22,7 +22,7 @@ This file is a short task list for follow-up PRs.
 - Add OS-specific adapter files only for paths, signals, firewall, and service manager behavior.
 - Add macOS support files for launch/startup and firewall guidance.
 - Add BSD support files for service startup and firewall guidance.
-- Add one browser wrapper client that talks to the same local VX6 runtime API on every OS.
+- Add a fuller browser product on top of `browser/qt` that talks to the same local VX6 runtime API on every OS.
 
 ## Windows
 - Add a proper Windows installer that can create firewall rules during install.
@@ -37,4 +37,4 @@ This file is a short task list for follow-up PRs.
 - PR 2: Hidden-service traffic shaping and tests.
 - PR 3: Windows installer and firewall setup.
 - PR 4: macOS/BSD adapter files.
-- PR 5: Browser wrapper client and local API.
+- PR 5: Browser frontend hardening and local API polish.

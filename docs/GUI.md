@@ -1,19 +1,25 @@
-# GUI
+# GUI and Browser Frontend
 
-VX6 now includes `vx6-gui` and `vx6-browser`.
+VX6 now has two local frontends:
 
-## What It Is
+- `vx6-gui`
+- `browser/qt`, which builds the Qt browser shell
 
-It is a local web UI that runs on your machine and calls the `vx6` binary underneath.
-`vx6-browser` uses the same backend but presents the browser shell branding and navigation model.
+## What They Are
+
+Both frontends run locally and call the `vx6` binary underneath.
+Neither one contains protocol logic of its own.
 
 That means:
 
-- the GUI stays aligned with the CLI
-- the protocol logic remains in one place
-- Windows and Linux can use the same feature surface
+- the core protocol stays in one place
+- the GUI and browser stay aligned with the CLI
+- Windows, Linux, and macOS can share the same VX6 behavior
 
-## What It Exposes
+## `vx6-gui`
+
+This is the command-style local control UI.
+It exposes:
 
 - node initialization
 - node start
@@ -25,10 +31,22 @@ That means:
 - file send
 - receive policy
 - DHT lookups
-- browser-style VX6 navigation
 - eBPF status
 - custom CLI argument execution
 
+## `browser/qt`
+
+This is the browser-style VX6 shell built with Qt WebEngine.
+It exposes:
+
+- a colorful VX6 home dashboard
+- tabbed navigation
+- `vx6://` internal pages
+- browser-style lookup for services, nodes, and raw keys
+- a side drawer for runtime logs and reload actions
+- first-run Windows/macOS permission guidance
+
 ## Why It Was Built This Way
 
-This release is still stabilizing. A thin GUI over the CLI is safer than duplicating VX6 logic in a separate desktop app.
+This release is still stabilizing.
+A thin frontend over the CLI is safer than duplicating VX6 logic in a separate desktop app.
