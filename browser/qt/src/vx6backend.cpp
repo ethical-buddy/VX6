@@ -10,6 +10,13 @@
 VX6Backend::VX6Backend(QString vx6Binary, QString configPath, QObject *parent)
     : QObject(parent), m_vx6Binary(std::move(vx6Binary)), m_configPath(std::move(configPath))
 {
+    m_nodeProcess.setProcessChannelMode(QProcess::MergedChannels);
+    connect(&m_nodeProcess, &QProcess::readyReadStandardOutput, this, &VX6Backend::appendProcessOutput);
+    connect(&m_nodeProcess, &QProcess::readyReadStandardError, this, &VX6Backend::appendProcessOutput);
+    connect(&m_nodeProcess, &QProcess::finished, this, [this](int, QProcess::ExitStatus) {
+        emit logLine(QStringLiteral("vx6 node stopped"));
+        updateNodeState();
+    });
 }
 
 QString VX6Backend::vx6Binary() const
@@ -384,6 +391,65 @@ QString VX6Backend::lookupPageHtml(const QString &title, const QStringList &args
         "<div class=\"section\"><h2>%2 Output</h2>%3</div>")
         .arg(subtitle.toHtmlEscaped(), title.toHtmlEscaped(), commandBlock(output));
     return makePageShell(title, subtitle, body, "#c792ea");
+}
+
+bool VX6Backend::nodeRunning() const
+{
+    return m_nodeProcess.state() != QProcess::NotRunning;
+}
+
+QString VX6Backend::startNode()
+{
+    if (nodeRunning()) {
+        return QStringLiteral("vx6 node already running");
+    }
+
+    m_nodeProcess.setProgram(resolveBinaryPath());
+    m_nodeProcess.setArguments({"node"});
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString cfg = resolveConfigPath();
+    if (!cfg.isEmpty()) {
+        env.insert(QStringLiteral("VX6_CONFIG_PATH"), cfg);
+    }
+    m_nodeProcess.setProcessEnvironment(env);
+    m_nodeProcess.start();
+    if (!m_nodeProcess.waitForStarted(5000)) {
+        return QStringLiteral("failed to start vx6 node: %1").arg(resolveBinaryPath());
+    }
+
+    updateNodeState();
+    emit logLine(QStringLiteral("vx6 node started"));
+    return QStringLiteral("vx6 node started");
+}
+
+QString VX6Backend::stopNode()
+{
+    if (!nodeRunning()) {
+        return QStringLiteral("vx6 node is not running");
+    }
+
+    m_nodeProcess.terminate();
+    if (!m_nodeProcess.waitForFinished(3000)) {
+        m_nodeProcess.kill();
+        m_nodeProcess.waitForFinished(2000);
+    }
+    updateNodeState();
+    return QStringLiteral("vx6 node stopped");
+}
+
+void VX6Backend::appendProcessOutput()
+{
+    const QString out = QString::fromUtf8(m_nodeProcess.readAllStandardOutput());
+    const QString err = QString::fromUtf8(m_nodeProcess.readAllStandardError());
+    const QString text = (out + err).trimmed();
+    if (!text.isEmpty()) {
+        emit logLine(text);
+    }
+}
+
+void VX6Backend::updateNodeState()
+{
+    emit logLine(QStringLiteral("vx6 node state: %1").arg(nodeRunning() ? "running" : "stopped"));
 }
 
 QString VX6Backend::permissionPromptHtml() const

@@ -23,6 +23,7 @@ The executable is `vx6-browser`.
 - opens VX6 internal pages through `vx6://`
 - renders a colorful home dashboard with VX6 actions
 - shows a right-side log drawer for node output and reload actions
+- includes node start and stop controls in the side drawer
 - keeps one system identity and one key, with no profile switching UI
 
 ## VX6 pages
@@ -45,3 +46,6 @@ The executable is `vx6-browser`.
 - BSD is intentionally left for later if build/runtime gaps appear.
 - The browser asks for first-run firewall/admin guidance on Windows and macOS.
 
+## Planning Notes
+
+See [PLAN.md](./PLAN.md) for the browser roadmap, contribution rules, build steps, and test matrix.

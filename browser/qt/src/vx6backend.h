@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 
@@ -27,6 +28,10 @@ public:
     QString identityPageHtml() const;
     QString lookupPageHtml(const QString &title, const QStringList &args, const QString &subtitle) const;
 
+    bool nodeRunning() const;
+    QString startNode();
+    QString stopNode();
+
     QString runVX6(const QStringList &args, bool *ok = nullptr) const;
     QString resolveConfigPath() const;
     QString resolveBinaryPath() const;
@@ -35,6 +40,9 @@ signals:
     void logLine(const QString &line) const;
 
 private:
+    void appendProcessOutput();
+    void updateNodeState();
+
     QString makePageShell(const QString &title, const QString &headline, const QString &body, const QString &accent) const;
     QString dashboardCard(const QString &href, const QString &title, const QString &description, const QString &accent) const;
     QString commandBlock(const QString &output) const;
@@ -43,4 +51,5 @@ private:
 
     QString m_vx6Binary;
     QString m_configPath;
+    mutable QProcess m_nodeProcess;
 };
