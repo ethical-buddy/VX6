@@ -429,6 +429,13 @@ func (s *Server) admitStoreValue(remoteAddr, key, value string, now time.Time) e
 		return err
 	}
 	if trusted {
+		incomingValue, err := validateLookupValue(key, value, now)
+		if err != nil {
+			return err
+		}
+		if incomingValue.verified && incomingValue.enveloped && !incomingValue.authoritativePublisher {
+			return fmt.Errorf("trusted store rejected for non-authoritative publisher on key %q", key)
+		}
 		if err := s.rejectStaleStoreValue(key, value, now); err != nil {
 			return err
 		}
