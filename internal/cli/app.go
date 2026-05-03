@@ -48,7 +48,7 @@ func Run(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "init":
-		return runInit(args[1:])
+		return runInit(ctx, args[1:])
 	case "list":
 		return runList(ctx, args[1:])
 	case "send":
@@ -68,7 +68,7 @@ func Run(ctx context.Context, args []string) error {
 	case "service":
 		return runService(args[1:])
 	case "identity":
-		return runIdentity(args[1:])
+		return runIdentity(ctx, args[1:])
 	case "debug":
 		return runDebug(ctx, args[1:])
 	case "-h", "--help", "help":
@@ -91,6 +91,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 node")
 	fmt.Fprintln(w, "  vx6 reload")
 	fmt.Fprintln(w, "  vx6 service add --name NAME --target 127.0.0.1:22 [--private] [--hidden --alias NAME --profile fast|balanced --intro-mode random|manual|hybrid --intro NODE]")
+	fmt.Fprintln(w, "  vx6 service remove --name NAME")
 	fmt.Fprintln(w, "  vx6 connect --service NAME [--listen 127.0.0.1:2222] [--proxy] [--addr [ipv6]:port]")
 	fmt.Fprintln(w, "  vx6 send --file PATH (--to PEER | --addr [ipv6]:port) [--proxy]")
 	fmt.Fprintln(w, "  vx6 receive status")
@@ -102,6 +103,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  vx6 list [--user USER] [--hidden]")
 	fmt.Fprintln(w, "  vx6 peer add --addr [ipv6]:port [--name NAME]")
 	fmt.Fprintln(w, "  vx6 identity")
+	fmt.Fprintln(w, "  vx6 identity rename --name NAME")
 	fmt.Fprintln(w, "  vx6 status")
 	fmt.Fprintln(w, "  vx6 debug registry")
 	fmt.Fprintln(w, "  vx6 debug dht-get (--service NODE.SERVICE | --node NAME | --node-id ID | --key KEY)")
@@ -127,9 +129,11 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  vx6 init --name alice --listen '[::]:4242' --peer '[::1]:4242'")
 	fmt.Fprintln(w, "  vx6 reload")
+	fmt.Fprintln(w, "  vx6 identity rename --name ally")
 	fmt.Fprintln(w, "  vx6 init --name ghost --advertise '[2001:db8::10]:4242' --hidden-node")
 	fmt.Fprintln(w, "  vx6 service add --name ssh --target 127.0.0.1:22")
 	fmt.Fprintln(w, "  vx6 service add --name admin --target 127.0.0.1:22 --hidden --alias hs-admin --intro-mode random")
+	fmt.Fprintln(w, "  vx6 service remove --name ssh")
 	fmt.Fprintln(w, "  vx6 connect --service alice.ssh --listen 127.0.0.1:2222")
 	fmt.Fprintln(w, "  vx6 connect --service ssh --addr '[2001:db8::10]:4242' --listen 127.0.0.1:2222")
 	fmt.Fprintln(w, "  vx6 connect --service alice.ssh --listen 127.0.0.1:2222 --proxy")
@@ -151,7 +155,7 @@ func prompt(label string) string {
 	return ""
 }
 
-func runInit(args []string) error {
+func runInit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -229,9 +233,6 @@ func runInit(args []string) error {
 		cfg.Node.Bootstraps = nil
 		cfg.Node.BootstrapAddrs = nil
 	}
-	if err := store.Save(cfg); err != nil {
-		return err
-	}
 
 	idStore, err := identity.NewStoreForConfig(store.Path())
 	if err != nil {
@@ -239,6 +240,12 @@ func runInit(args []string) error {
 	}
 	id, _, err := idStore.Ensure()
 	if err != nil {
+		return err
+	}
+	if err := waitForNodeNameAvailability(ctx, cfg, *name, id.NodeID, time.Minute); err != nil {
+		return err
+	}
+	if err := store.Save(cfg); err != nil {
 		return err
 	}
 	fmt.Printf("node_initialized\t%s\t%s\n", *name, id.NodeID)
@@ -769,6 +776,29 @@ func runService(args []string) error {
 		}
 		return nil
 	}
+	if len(args) >= 1 && args[0] == "remove" {
+		fs := flag.NewFlagSet("service remove", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		name := fs.String("name", "", "local service name")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" {
+			*name = prompt("Service Name")
+		}
+		if *name == "" {
+			return errors.New("service remove requires --name")
+		}
+		store, err := config.NewStore("")
+		if err != nil {
+			return err
+		}
+		if err := store.RemoveService(*name); err != nil {
+			return err
+		}
+		fmt.Printf("service_removed\t%s\n", *name)
+		return nil
+	}
 	store, err := config.NewStore("")
 	if err != nil {
 		return err
@@ -1134,6 +1164,7 @@ func runStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		printRuntimeStatus("OFFLINE", runtimectl.Status{
 			NodeName:        cfg.Node.Name,
+			AdvertiseAddr:   cfg.Node.AdvertiseAddr,
 			EndpointPublish: endpointPublishMode(cfg.Node.HideEndpoint),
 			TransportConfig: cfg.Node.TransportMode,
 			TransportActive: vxtransport.EffectiveMode(cfg.Node.TransportMode),
@@ -1154,6 +1185,7 @@ func runStatus(ctx context.Context, args []string) error {
 	}
 	printRuntimeStatus("ONLINE", runtimectl.Status{
 		NodeName:         cfg.Node.Name,
+		AdvertiseAddr:    cfg.Node.AdvertiseAddr,
 		EndpointPublish:  endpointPublishMode(cfg.Node.HideEndpoint),
 		TransportConfig:  cfg.Node.TransportMode,
 		TransportActive:  vxtransport.EffectiveMode(cfg.Node.TransportMode),
@@ -1169,6 +1201,9 @@ func printRuntimeStatus(label string, status runtimectl.Status) {
 	fmt.Printf("status\t%s\n", label)
 	if status.NodeName != "" {
 		fmt.Printf("node_name\t%s\n", status.NodeName)
+	}
+	if status.AdvertiseAddr != "" {
+		fmt.Printf("advertise_addr\t%s\n", status.AdvertiseAddr)
 	}
 	if status.EndpointPublish != "" {
 		fmt.Printf("endpoint_publish\t%s\n", status.EndpointPublish)
@@ -1228,11 +1263,19 @@ func statusProbeAddr(cfg config.File) string {
 	return probe
 }
 
-func runIdentity(args []string) error {
+func runIdentity(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("identity", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if len(fs.Args()) > 0 {
+		switch fs.Args()[0] {
+		case "rename":
+			return runIdentityRename(ctx, fs.Args()[1:])
+		default:
+			return fmt.Errorf("unknown identity subcommand %q", fs.Args()[0])
+		}
 	}
 	store, err := config.NewStore("")
 	if err != nil {
@@ -1252,12 +1295,55 @@ func runIdentity(args []string) error {
 	}
 	fmt.Printf("node_name\t%s\n", cfg.Node.Name)
 	fmt.Printf("node_id\t%s\n", id.NodeID)
+	fmt.Printf("advertise_addr\t%s\n", cfg.Node.AdvertiseAddr)
 	fmt.Printf("endpoint_publish\t%s\n", endpointPublishMode(cfg.Node.HideEndpoint))
 	fmt.Printf("transport_config\t%s\n", cfg.Node.TransportMode)
 	fmt.Printf("transport_active\t%s\n", vxtransport.EffectiveMode(cfg.Node.TransportMode))
 	fmt.Printf("relay_mode\t%s\n", cfg.Node.RelayMode)
 	fmt.Printf("relay_percent\t%d\n", cfg.Node.RelayResourcePercent)
 	fmt.Printf("config_path\t%s\n", store.Path())
+	return nil
+}
+
+func runIdentityRename(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("identity rename", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "new node name")
+	waitFlag := fs.Duration("wait", time.Minute, "how long to probe for name clashes before accepting the rename")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("identity rename requires --name")
+	}
+	if err := record.ValidateNodeName(*name); err != nil {
+		return err
+	}
+
+	store, err := config.NewStore("")
+	if err != nil {
+		return err
+	}
+	cfg, err := store.Load()
+	if err != nil {
+		return err
+	}
+	idStore, err := identity.NewStoreForConfig(store.Path())
+	if err != nil {
+		return err
+	}
+	id, err := idStore.Load()
+	if err != nil {
+		return err
+	}
+	if err := waitForNodeNameAvailability(ctx, cfg, *name, id.NodeID, *waitFlag); err != nil {
+		return err
+	}
+	cfg.Node.Name = *name
+	if err := store.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("node_renamed\t%s\t%s\n", id.NodeID, *name)
 	return nil
 }
 
@@ -1423,20 +1509,52 @@ func runDebugDHTGet(ctx context.Context, args []string) error {
 		*key = dht.NodeIDKey(*nodeID)
 	}
 
-	value, err := client.RecursiveFindValue(ctx, *key)
+	result, err := client.RecursiveFindValueDetailed(ctx, *key)
 	if err != nil {
+		if errors.Is(err, dht.ErrConflictingValues) {
+			printDHTConflictCandidates(*key, result.ConflictValues)
+			return err
+		}
 		return err
 	}
 
+	if len(result.ConflictValues) > 1 {
+		printDHTConflictCandidates(*key, result.ConflictValues)
+		return fmt.Errorf("conflicting values returned for %s", *key)
+	}
+
 	var pretty any
-	if err := json.Unmarshal([]byte(value), &pretty); err == nil {
+	if err := json.Unmarshal([]byte(result.Value), &pretty); err == nil {
 		formatted, _ := json.MarshalIndent(pretty, "", "  ")
 		fmt.Printf("%s\n", formatted)
 		return nil
 	}
 
-	fmt.Println(value)
+	fmt.Println(result.Value)
 	return nil
+}
+
+func printDHTConflictCandidates(key string, rawValues []string) {
+	if len(rawValues) == 0 {
+		fmt.Printf("conflict\tkey=%s\tcandidates=0\n", key)
+		return
+	}
+	fmt.Printf("conflict\tkey=%s\tcandidates=%d\n", key, len(rawValues))
+	for i, raw := range rawValues {
+		fmt.Printf("  [%d] %s\n", i+1, summarizeConflictValue(raw))
+	}
+}
+
+func summarizeConflictValue(raw string) string {
+	var ep record.EndpointRecord
+	if err := json.Unmarshal([]byte(raw), &ep); err == nil && ep.NodeID != "" {
+		return fmt.Sprintf("node=%s id=%s addr=%s", ep.NodeName, ep.NodeID, ep.Address)
+	}
+	var svc record.ServiceRecord
+	if err := json.Unmarshal([]byte(raw), &svc); err == nil && svc.NodeID != "" {
+		return fmt.Sprintf("service=%s node=%s hidden=%v private=%v", record.ServiceLookupKey(svc), svc.NodeName, svc.IsHidden, svc.IsPrivate)
+	}
+	return raw
 }
 
 func runDebugDHTStatus(ctx context.Context, args []string) error {
@@ -1714,9 +1832,17 @@ func resolveNodeDistributed(ctx context.Context, cfg config.File, name string) (
 	}
 
 	if d, err := newDHTClient(cfg); err == nil && d != nil {
-		if value, err := d.RecursiveFindValue(ctx, dht.NodeNameKey(name)); err == nil && value != "" {
+		result, err := d.RecursiveFindValueDetailed(ctx, dht.NodeNameKey(name))
+		if errors.Is(err, dht.ErrConflictingValues) || len(result.ConflictValues) > 1 {
+			choice, choiceErr := chooseEndpointConflict(name, result.ConflictValues)
+			if choiceErr == nil {
+				return choice, nil
+			}
+			return record.EndpointRecord{}, choiceErr
+		}
+		if err == nil && result.Value != "" {
 			var rec record.EndpointRecord
-			if err := json.Unmarshal([]byte(value), &rec); err == nil {
+			if err := json.Unmarshal([]byte(result.Value), &rec); err == nil {
 				if verifyErr := record.VerifyEndpointRecord(rec, time.Now()); verifyErr == nil {
 					return rec, nil
 				}
@@ -1743,9 +1869,17 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 
 	if d, err := newDHTClient(cfg); err == nil && d != nil {
 		if strings.Contains(service, ".") {
-			if val, err := d.RecursiveFindValue(ctx, dht.ServiceKey(service)); err == nil && val != "" {
+			result, err := d.RecursiveFindValueDetailed(ctx, dht.ServiceKey(service))
+			if errors.Is(err, dht.ErrConflictingValues) || len(result.ConflictValues) > 1 {
+				choice, choiceErr := chooseServiceConflict(service, result.ConflictValues)
+				if choiceErr == nil {
+					return choice, nil
+				}
+				return record.ServiceRecord{}, choiceErr
+			}
+			if err == nil && result.Value != "" {
 				var r record.ServiceRecord
-				if err := json.Unmarshal([]byte(val), &r); err == nil {
+				if err := json.Unmarshal([]byte(result.Value), &r); err == nil {
 					if verifyErr := record.VerifyServiceRecord(r, time.Now()); verifyErr == nil {
 						return r, nil
 					}
@@ -1768,6 +1902,196 @@ func resolveServiceDistributed(ctx context.Context, cfg config.File, service str
 		}
 	}
 	return record.ServiceRecord{}, errors.New("not found")
+}
+
+func waitForNodeNameAvailability(ctx context.Context, cfg config.File, name, ownNodeID string, wait time.Duration) error {
+	if wait <= 0 {
+		wait = time.Minute
+	}
+	if len(discoveryCandidates(cfg)) == 0 {
+		fmt.Printf("name_check\tname=%s\tstatus=skipped\treason=no-network-entrance\n", name)
+		return nil
+	}
+
+	client, err := newDHTClient(cfg)
+	if err != nil {
+		return err
+	}
+	if client == nil {
+		return nil
+	}
+
+	deadline := time.Now().Add(wait)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	fmt.Printf("name_check\tname=%s\tstatus=initialising\twait=%s\n", name, wait.Round(time.Second))
+
+	for {
+		result, err := client.RecursiveFindValueDetailed(ctx, dht.NodeNameKey(name))
+		candidates := collectNodeNameCandidates(result, ownNodeID)
+		if len(candidates) > 0 {
+			printNameConflictCandidates(name, candidates)
+			return fmt.Errorf("node name %q is already in use", name)
+		}
+		if err == nil && result.Value != "" {
+			var rec record.EndpointRecord
+			if json.Unmarshal([]byte(result.Value), &rec) == nil && rec.NodeID != ownNodeID {
+				printNameConflictCandidates(name, []record.EndpointRecord{rec})
+				return fmt.Errorf("node name %q is already in use", name)
+			}
+		}
+
+		if time.Now().After(deadline) {
+			fmt.Printf("name_check\tname=%s\tstatus=available\n", name)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func collectNodeNameCandidates(result dht.LookupResult, ownNodeID string) []record.EndpointRecord {
+	seen := map[string]struct{}{}
+	candidates := make([]record.EndpointRecord, 0, len(result.ConflictValues)+1)
+	add := func(raw string) {
+		var rec record.EndpointRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			return
+		}
+		if rec.NodeName == "" || rec.NodeID == ownNodeID {
+			return
+		}
+		key := rec.NodeID + "|" + rec.NodeName + "|" + rec.Address
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, rec)
+	}
+	if result.Value != "" {
+		add(result.Value)
+	}
+	for _, raw := range result.ConflictValues {
+		add(raw)
+	}
+	return candidates
+}
+
+func printNameConflictCandidates(name string, candidates []record.EndpointRecord) {
+	if len(candidates) == 0 {
+		return
+	}
+	fmt.Printf("name_conflict\tname=%s\tcandidates=%d\n", name, len(candidates))
+	for i, rec := range candidates {
+		fmt.Printf("  [%d] node=%s id=%s addr=%s\n", i+1, rec.NodeName, rec.NodeID, rec.Address)
+	}
+}
+
+func chooseEndpointConflict(name string, rawValues []string) (record.EndpointRecord, error) {
+	candidates := decodeEndpointCandidates(rawValues)
+	if len(candidates) == 0 {
+		return record.EndpointRecord{}, fmt.Errorf("name conflict detected for %q but no valid endpoint candidates were returned", name)
+	}
+	choice, err := chooseConflictIndex(fmt.Sprintf("node name %q", name), candidatesToStrings(candidates))
+	if err != nil {
+		return record.EndpointRecord{}, err
+	}
+	return candidates[choice], nil
+}
+
+func chooseServiceConflict(service string, rawValues []string) (record.ServiceRecord, error) {
+	candidates := decodeServiceCandidates(rawValues)
+	if len(candidates) == 0 {
+		return record.ServiceRecord{}, fmt.Errorf("service conflict detected for %q but no valid service candidates were returned", service)
+	}
+	choice, err := chooseConflictIndex(fmt.Sprintf("service %q", service), serviceCandidatesToStrings(candidates))
+	if err != nil {
+		return record.ServiceRecord{}, err
+	}
+	return candidates[choice], nil
+}
+
+func chooseConflictIndex(label string, options []string) (int, error) {
+	if len(options) == 0 {
+		return -1, fmt.Errorf("no conflict candidates for %s", label)
+	}
+	fmt.Printf("\n%s has multiple matches:\n", label)
+	for i, opt := range options {
+		fmt.Printf("  [%d] %s\n", i+1, opt)
+	}
+	for {
+		answer := prompt("Choose a match by number")
+		if answer == "" {
+			return -1, fmt.Errorf("%s selection cancelled", label)
+		}
+		idx, err := strconv.Atoi(answer)
+		if err != nil || idx < 1 || idx > len(options) {
+			fmt.Println("Invalid choice; enter a number from the list above.")
+			continue
+		}
+		return idx - 1, nil
+	}
+}
+
+func decodeEndpointCandidates(rawValues []string) []record.EndpointRecord {
+	candidates := make([]record.EndpointRecord, 0, len(rawValues))
+	seen := map[string]struct{}{}
+	for _, raw := range rawValues {
+		var rec record.EndpointRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			continue
+		}
+		if err := record.VerifyEndpointRecord(rec, time.Now()); err != nil {
+			continue
+		}
+		key := rec.NodeID + "|" + rec.NodeName + "|" + rec.Address
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, rec)
+	}
+	return candidates
+}
+
+func decodeServiceCandidates(rawValues []string) []record.ServiceRecord {
+	candidates := make([]record.ServiceRecord, 0, len(rawValues))
+	seen := map[string]struct{}{}
+	for _, raw := range rawValues {
+		var rec record.ServiceRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			continue
+		}
+		if err := record.VerifyServiceRecord(rec, time.Now()); err != nil {
+			continue
+		}
+		key := rec.NodeID + "|" + rec.NodeName + "|" + rec.ServiceName + "|" + rec.Address
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		candidates = append(candidates, rec)
+	}
+	return candidates
+}
+
+func candidatesToStrings(candidates []record.EndpointRecord) []string {
+	out := make([]string, 0, len(candidates))
+	for _, rec := range candidates {
+		out = append(out, fmt.Sprintf("node=%s id=%s addr=%s", rec.NodeName, rec.NodeID, rec.Address))
+	}
+	return out
+}
+
+func serviceCandidatesToStrings(candidates []record.ServiceRecord) []string {
+	out := make([]string, 0, len(candidates))
+	for _, rec := range candidates {
+		out = append(out, fmt.Sprintf("service=%s node=%s id=%s hidden=%v private=%v", record.ServiceLookupKey(rec), rec.NodeName, rec.NodeID, rec.IsHidden, rec.IsPrivate))
+	}
+	return out
 }
 
 func resolvePrivateServiceFromCatalog(ctx context.Context, client *dht.Server, service string) (record.ServiceRecord, error) {

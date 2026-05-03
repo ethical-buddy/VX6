@@ -274,6 +274,15 @@ func (s *Store) AddService(name, target string, isHidden bool) error {
 	return s.Save(cfg)
 }
 
+func (s *Store) RemoveService(name string) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+	delete(cfg.Services, name)
+	return s.Save(cfg)
+}
+
 func (s *Store) SetService(name string, entry ServiceEntry) error {
 	cfg, err := s.Load()
 	if err != nil {

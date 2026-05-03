@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -229,7 +230,7 @@ func TestRunIdentityOmitsAddresses(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := runIdentity(nil); err != nil {
+		if err := runIdentity(context.Background(), nil); err != nil {
 			t.Fatalf("run identity: %v", err)
 		}
 	})

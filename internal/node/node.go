@@ -151,6 +151,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			}
 			return runtimectl.Status{
 				NodeName:                        liveCfg.Name,
+				AdvertiseAddr:                   liveCfg.AdvertiseAddr,
 				EndpointPublish:                 endpointPublishMode(liveCfg.HideEndpoint),
 				TransportConfig:                 liveCfg.TransportMode,
 				TransportActive:                 vxtransport.EffectiveMode(liveCfg.TransportMode),
@@ -476,6 +477,7 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 		publishRecordsToTargets(ctx, liveCfg, log, targets, rec, serviceRecords)
 
 		publishDHTRecords(ctx, liveCfg.DHT, liveCfg.Identity, rec, serviceRecords, hiddenLookupSecrets, liveCfg.HideEndpoint)
+		warnOnNodeNameConflict(ctx, log, liveCfg)
 	}
 
 	publishAndSync()
@@ -498,6 +500,49 @@ func runPeerSyncTasks(ctx context.Context, log io.Writer, cfg Config) {
 				}
 			}
 		}
+	}
+}
+
+func warnOnNodeNameConflict(ctx context.Context, log io.Writer, cfg Config) {
+	if cfg.DHT == nil || cfg.Name == "" {
+		return
+	}
+	result, err := cfg.DHT.RecursiveFindValueDetailed(ctx, dht.NodeNameKey(cfg.Name))
+	if err != nil && !errors.Is(err, dht.ErrConflictingValues) {
+		return
+	}
+	candidates := make([]record.EndpointRecord, 0, 2)
+	if result.Value != "" {
+		var rec record.EndpointRecord
+		if err := json.Unmarshal([]byte(result.Value), &rec); err == nil && rec.NodeName == cfg.Name {
+			candidates = append(candidates, rec)
+		}
+	}
+	for _, raw := range result.ConflictValues {
+		var rec record.EndpointRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			continue
+		}
+		if rec.NodeName != cfg.Name {
+			continue
+		}
+		seen := false
+		for _, existing := range candidates {
+			if existing.NodeID == rec.NodeID && existing.Address == rec.Address {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			candidates = append(candidates, rec)
+		}
+	}
+	if len(candidates) <= 1 {
+		return
+	}
+	fmt.Fprintf(log, "[NAME-CONFLICT] node name %q is claimed by %d identities; one operator should rename\n", cfg.Name, len(candidates))
+	for _, rec := range candidates {
+		fmt.Fprintf(log, "[NAME-CONFLICT] candidate\tname=%s\tid=%s\taddr=%s\n", rec.NodeName, rec.NodeID, rec.Address)
 	}
 }
 

@@ -614,6 +614,45 @@ func TestStoreRejectsConflictingVerifiedFamilyAndTracksConflict(t *testing.T) {
 	}
 }
 
+func TestRecursiveFindValueDetailedReportsConflictCandidates(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := NewServer("client-node")
+	left := NewServer("left-node")
+	right := NewServer("right-node")
+
+	leftAddr := startDHTListener(t, ctx, left)
+	rightAddr := startDHTListener(t, ctx, right)
+
+	client.RT.AddNode(proto.NodeInfo{ID: "left-node", Addr: leftAddr})
+	client.RT.AddNode(proto.NodeInfo{ID: "right-node", Addr: rightAddr})
+
+	leftID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate left identity: %v", err)
+	}
+	rightID, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("generate right identity: %v", err)
+	}
+
+	leftRec := mustEndpointRecordForIdentity(t, leftID, "shared", "[2001:db8::51]:4242", time.Now())
+	rightRec := mustEndpointRecordForIdentity(t, rightID, "shared", "[2001:db8::52]:4242", time.Now().Add(time.Second))
+	left.StoreLocal(NodeNameKey("shared"), mustSignedValue(t, leftID, NodeNameKey("shared"), mustJSON(t, leftRec), time.Now()))
+	right.StoreLocal(NodeNameKey("shared"), mustSignedValue(t, rightID, NodeNameKey("shared"), mustJSON(t, rightRec), time.Now().Add(time.Second)))
+
+	result, err := client.RecursiveFindValueDetailed(ctx, NodeNameKey("shared"))
+	if err == nil || !errors.Is(err, ErrConflictingValues) {
+		t.Fatalf("expected conflicting value error, got result=%+v err=%v", result, err)
+	}
+	if len(result.ConflictValues) < 2 {
+		t.Fatalf("expected conflict candidates in result, got %+v", result)
+	}
+}
+
 func TestSelectReplicationNodesPrefersDistinctProvidersAndNetworks(t *testing.T) {
 	t.Parallel()
 
