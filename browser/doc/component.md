@@ -68,7 +68,7 @@ createtab creates the web engine view and page, connects the url and title updat
 
 ## navigation helpers
 
-openhome, opentab, and navigateto manage address resolution and loading. normalizetarget formats raw input into a valid vx6 or http url.
+openhome, newtab, and navigateto manage address resolution and loading. normalizetarget formats raw input into a valid vx6 or http url.
 
 ## node operations
 
