@@ -9,14 +9,13 @@
 - `vx6 identity`
 - `vx6 list`
 - `vx6 peer`
-- `vx6 peer`
 - `vx6 service`
 - `vx6 connect`
 - `vx6 send`
 - `vx6 receive`
 - `vx6 debug`
 - `vx6-gui`
-- `vx6-browser`
+- `browser/qt/build/vx6-browser`
 
 ## Important Notes
 
@@ -25,6 +24,8 @@
 - hidden services use invite-based lookup
 - private services are not published as public `service/...` records
 - `vx6 status` reports whether an offline ASN map is loaded for DHT diversity
+- trusted DHT stores now require authoritative signed envelopes
+- the Qt browser frontend is built from `browser/qt`, not the Go root tree
 
 ## Most Used Flows
 
@@ -61,5 +62,5 @@ vx6-gui
 Open browser app:
 
 ```bash
-vx6-browser
+browser/qt/build/vx6-browser
 ```

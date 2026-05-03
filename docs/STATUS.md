@@ -4,18 +4,22 @@ VX6 is usable now for controlled testing and temporary internal deployment.
 
 ## Working Today
 
-- TCP transport
-- signed discovery
-- direct service access
-- public service lookup
-- private service catalogs
-- hidden services with encrypted descriptors
-- blinded hidden lookup keys
-- invite-secret based hidden lookup
+- TCP transport across the current release
+- signed discovery and signed service publication
+- direct service access to known VX6 addresses
+- public service lookup through the DHT
+- private service catalogs for user-scoped visibility
+- hidden services with:
+  - encrypted descriptors
+  - blinded lookup keys
+  - invite secrets
+  - anonymous descriptor store and lookup paths
 - ASN-aware DHT diversity when a local ASN map is provided
+- conservative DHT store admission for trusted records
 - file transfer with local permission policy
 - runtime status and reload
-- GUI over the same CLI/runtime surface
+- `vx6-gui` over the same CLI/runtime surface
+- `browser/qt` as a separate Qt WebEngine frontend over the same VX6 binary
 
 ## Linux Position
 
@@ -30,17 +34,18 @@ That means:
 
 ## Other Platforms
 
-- Windows should follow the same protocol and feature behavior through the `Windows-compatible` branch
+- Windows uses the same protocol and feature behavior through the shared core and Windows runtime adapters
 - macOS packaging and runtime polish are still behind Linux
 
 ## Still In Progress
 
 - seamless hidden mid-stream failover
-- stronger DHT store admission
+- stronger DHT hardening under adversarial WAN and churn
 - real QUIC transport
 - real eBPF/XDP fast path for the current encrypted relay plane
 - polished Windows and macOS packaging and service lifecycle work
 - richer ASN map tooling and operator data sources
+- a fuller browser product layered on top of the new Qt browser shell
 
 ## Honest Summary
 

@@ -9,7 +9,20 @@ This file explains what the important files and directories do.
 - `cmd/vx6-gui/main.go`
   - local web GUI front-end that wraps the CLI binary
 - `cmd/vx6-gui/browser_state.go`
-  - local VX6 browser navigation and history state shared by `vx6-gui` and `vx6-browser`
+  - local VX6 navigation and history state shared by the GUI shell
+
+## Browser Frontend
+
+- `browser/qt/`
+  - Qt WebEngine browser shell built on top of the same VX6 binary
+- `browser/qt/src/main.cpp`
+  - browser app entrypoint and VX6 custom scheme registration
+- `browser/qt/src/browserwindow.cpp`
+  - tabbed browser window, address bar, side log drawer, and VX6 home dashboard
+- `browser/qt/src/vx6backend.cpp`
+  - backend adapter that runs the VX6 binary and turns its output into browser pages
+- `browser/qt/src/vx6schemehandler.cpp`
+  - handler for `vx6://` pages inside Qt WebEngine
 
 ## Core Runtime
 
@@ -51,6 +64,8 @@ This file explains what the important files and directories do.
   - anonymous relay transport for hidden descriptor DHT traffic
 - `internal/dht/replica_status.go`
   - publish health tracking and DHT status summaries
+- `internal/dht/store_admission_test.go`
+  - admission tests for trusted writes, stale values, and source throttling
 - `internal/dht/table.go`
   - routing table implementation
 

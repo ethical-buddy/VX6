@@ -24,6 +24,7 @@ vx6 service add --name admin --target 127.0.0.1:9000 --private
 ```
 
 Private services are resolved through a per-user private catalog, not through the public `service/...` keyspace.
+That keeps private services out of the normal shared listing while still letting the owning user expose them intentionally.
 
 ## Hidden Service
 
@@ -36,6 +37,21 @@ vx6 service add --name admin --target 127.0.0.1:9000 --hidden --alias ghost-admi
 VX6 prints a hidden invite that includes the secret lookup part.
 
 Clients use that invite when resolving the hidden service.
+The invite secret is what keeps the blinded hidden lookup key from being guessable by plain alias alone.
+
+## Browser Frontend
+
+Open the Qt browser frontend:
+
+```bash
+browser/qt/build/vx6-browser
+```
+
+Use it when you want a browser-style home page with:
+
+- VX6 internal pages
+- logs and reload actions in a side drawer
+- the same backend behavior as the CLI and GUI
 
 ## File Transfer
 

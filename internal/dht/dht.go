@@ -30,6 +30,7 @@ type Server struct {
 	hiddenCache   map[string]cachedHiddenService
 	hiddenWarmers map[string]struct{}
 	hiddenRates   map[string]rateWindow
+	storeRates    map[string]rateWindow
 	mu            sync.RWMutex
 }
 
@@ -195,6 +196,7 @@ func NewServer(selfID string) *Server {
 		hiddenCache:   make(map[string]cachedHiddenService),
 		hiddenWarmers: make(map[string]struct{}),
 		hiddenRates:   make(map[string]rateWindow),
+		storeRates:    make(map[string]rateWindow),
 	}
 }
 
@@ -272,7 +274,7 @@ func (s *Server) HandleDHT(ctx context.Context, conn net.Conn, req proto.DHTRequ
 			resp.Value = val
 		}
 	case "store":
-		if err := s.admitStoreValue(req.Target, req.Data, time.Now()); err != nil {
+		if err := s.admitStoreValue(conn.RemoteAddr().String(), req.Target, req.Data, time.Now()); err != nil {
 			// Invalid or conflicting writes are ignored to keep the DHT conservative
 			// under poisoning attempts.
 			break
@@ -297,30 +299,6 @@ func (s *Server) StoreLocal(key, value string) {
 	if validated, err := validateLookupValue(key, value, time.Now()); err == nil {
 		s.versions[key] = StoredValueState{Current: storedVersionFromValidated(validated)}
 	}
-}
-
-func (s *Server) admitStoreValue(key, value string, now time.Time) error {
-	if !isTrustedLookupKey(key) {
-		return nil
-	}
-	env, ok, err := maybeDecodeEnvelope(value)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("trusted key %q requires a signed DHT envelope", key)
-	}
-	validated, err := validateLookupValue(key, value, now)
-	if err != nil {
-		return err
-	}
-	if !validated.verified {
-		return fmt.Errorf("trusted key %q requires a verified value", key)
-	}
-	if validated.originNodeID == "" || env.PublisherNodeID != validated.originNodeID {
-		return fmt.Errorf("trusted key %q requires authoritative publisher %q", key, validated.originNodeID)
-	}
-	return nil
 }
 
 // RecursiveFindNode searches the network for a specific NodeID.
@@ -443,6 +421,118 @@ func (s *Server) prepareStoreValue(key, value string, now time.Time) (string, er
 		return value, nil
 	}
 	return wrapSignedEnvelope(publisher, key, value, info, now)
+}
+
+func (s *Server) admitStoreValue(remoteAddr, key, value string, now time.Time) error {
+	trusted := isTrustedLookupKey(key)
+	if err := s.allowStoreRequest(remoteAddr, key, trusted, now); err != nil {
+		return err
+	}
+	if trusted {
+		incomingValue, err := validateLookupValue(key, value, now)
+		if err != nil {
+			return err
+		}
+		if incomingValue.verified && incomingValue.enveloped && !incomingValue.authoritativePublisher {
+			return fmt.Errorf("trusted store rejected for non-authoritative publisher on key %q", key)
+		}
+		if err := s.rejectStaleStoreValue(key, value, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) allowStoreRequest(remoteAddr, key string, trusted bool, now time.Time) error {
+	var (
+		window time.Duration
+		limit  int
+	)
+	if trusted {
+		window = hiddenDescriptorStoreRateWindow
+		limit = hiddenDescriptorStoreRateLimit
+	} else {
+		window = hiddenDescriptorStoreRateWindow
+		limit = hiddenDescriptorStoreRateLimit * 2
+	}
+
+	host := remoteAddr
+	if parsedHost, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(host, "[]")
+	keyClass := "store\n" + host + "\n" + key
+	familyKey := "store-family\n" + host + "\n" + storeFamily(key)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for existing, counter := range s.storeRates {
+		if now.Sub(counter.WindowStart) > window*2 {
+			delete(s.storeRates, existing)
+		}
+	}
+	if !s.allowRateWindowLocked(keyClass, now, window, limit) {
+		return fmt.Errorf("store rate limit exceeded for key %q from %s", key, host)
+	}
+	if !s.allowRateWindowLocked(familyKey, now, window, limit*2) {
+		return fmt.Errorf("store family rate limit exceeded for key %q from %s", key, host)
+	}
+	return nil
+}
+
+func (s *Server) allowRateWindowLocked(key string, now time.Time, window time.Duration, limit int) bool {
+	counter := s.storeRates[key]
+	if counter.WindowStart.IsZero() || now.Sub(counter.WindowStart) >= window {
+		s.storeRates[key] = rateWindow{WindowStart: now, Count: 1}
+		return true
+	}
+	if counter.Count >= limit {
+		return false
+	}
+	counter.Count++
+	s.storeRates[key] = counter
+	return true
+}
+
+func (s *Server) rejectStaleStoreValue(key, value string, now time.Time) error {
+	incomingValue, err := validateLookupValue(key, value, now)
+	if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	current := s.Values[key]
+	s.mu.RUnlock()
+	if current == "" {
+		return nil
+	}
+	currentValue, err := validateLookupValue(key, current, now)
+	if err != nil || !currentValue.verified || !incomingValue.verified {
+		return nil
+	}
+	if currentValue.family != incomingValue.family {
+		return nil
+	}
+	if !isNewerValue(incomingValue, currentValue) {
+		return fmt.Errorf("stale store rejected for key %q", key)
+	}
+	return nil
+}
+
+func storeFamily(key string) string {
+	switch {
+	case strings.HasPrefix(key, "node/name/"):
+		return "node"
+	case strings.HasPrefix(key, "node/id/"):
+		return "node"
+	case strings.HasPrefix(key, "service/"):
+		return "service"
+	case strings.HasPrefix(key, "private-catalog/"):
+		return "private-catalog"
+	case strings.HasPrefix(key, "hidden-desc/v1/"):
+		return "hidden-desc"
+	default:
+		return "other"
+	}
 }
 
 func (s *Server) storeValidated(key, value string, now time.Time) (string, bool, error) {

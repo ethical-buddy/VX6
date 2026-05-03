@@ -321,7 +321,7 @@ func TestAdmitStoreValueRejectsUnsignedTrustedKey(t *testing.T) {
 	}
 	server := NewServerWithIdentity(id)
 	rec := mustServiceRecordForIdentity(t, id, "owner", "api", "[2001:db8::61]:4242", false, "", now)
-	if err := server.admitStoreValue(ServiceKey("owner.api"), mustJSON(t, rec), now); err == nil {
+	if err := server.admitStoreValue("[2001:db8::10]:4242", ServiceKey("owner.api"), mustJSON(t, rec), now); err == nil {
 		t.Fatal("expected unsigned trusted store to be rejected")
 	}
 }
@@ -350,7 +350,7 @@ func TestAdmitStoreValueRejectsNonAuthoritativePublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap signed envelope: %v", err)
 	}
-	if err := server.admitStoreValue(ServiceKey("owner.api"), wrapped, now); err == nil {
+	if err := server.admitStoreValue("[2001:db8::10]:4242", ServiceKey("owner.api"), wrapped, now); err == nil {
 		t.Fatal("expected non-authoritative publisher to be rejected")
 	}
 }
