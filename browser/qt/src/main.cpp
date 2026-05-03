@@ -9,7 +9,7 @@
 static void registerVX6Scheme()
 {
     QWebEngineUrlScheme scheme("vx6");
-    scheme.setSyntax(QWebEngineUrlScheme::Syntax::HostAndPort);
+    scheme.setSyntax(QWebEngineUrlScheme::Syntax::Host);
     scheme.setFlags(QWebEngineUrlScheme::SecureScheme);
     QWebEngineUrlScheme::registerScheme(scheme);
 }
