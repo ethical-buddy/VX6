@@ -48,6 +48,9 @@ type Status struct {
 	DHTRefreshIntervalSeconds       int64  `json:"dht_refresh_interval_seconds,omitempty"`
 	HiddenDescriptorRotationSeconds int64  `json:"hidden_descriptor_rotation_seconds,omitempty"`
 	HiddenDescriptorOverlapKeys     int    `json:"hidden_descriptor_overlap_keys,omitempty"`
+	ASNResolverLoaded               bool   `json:"asn_resolver_loaded,omitempty"`
+	ASNResolverSource               string `json:"asn_resolver_source,omitempty"`
+	ASNResolverEntries              int    `json:"asn_resolver_entries,omitempty"`
 }
 
 type Request struct {

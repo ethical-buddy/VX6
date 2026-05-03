@@ -3,7 +3,7 @@
 ## Highest Priority
 
 - hidden live-session failover
-- DHT store admission hardening
+- DHT store admission hardening and rate shaping
 - stronger provider and path diversity
 - long-run abuse and churn testing
 - Windows runtime compatibility without protocol drift

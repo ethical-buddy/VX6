@@ -7,7 +7,7 @@ HackitiseLabs Pvt. Ltd.<br>
 
 <h1 align="center">VX6</h1>
 
-<p align="center"> <strong>linux / windows / unix peer-to-peer service networking for real local apps.</strong><br> signed discovery, encrypted sessions, dht-backed lookup, relay paths, hidden services, file transfer, and a small gui. </p> <p align="center"> this branch is the <strong>linux / windows / unix</strong> release branch.<br> build <code>vx6</code> and <code>vx6-gui</code> from here for linux, windows, and unix systems. </p>
+<p align="center"> <strong>linux / windows / unix peer-to-peer service networking for real local apps.</strong><br> signed discovery, encrypted sessions, dht-backed lookup, relay paths, hidden services, file transfer, and a browser-ready frontend. </p> <p align="center"> this branch is the <strong>linux-first</strong> release branch.<br> build <code>vx6</code> and <code>vx6-gui</code> from the Go tree, and build the Qt browser frontend from <code>browser/qt</code>. </p>
 
 ## What VX6 Is
 
@@ -22,6 +22,11 @@ The model is simple:
 - the remote machine reaches the service through its own local forwarder
 
 That means you do not have to redesign your application just to share it across a peer network.
+
+VX6 is split into two layers:
+
+- the Go core, which owns identity, discovery, DHT, relays, hidden services, and transfers
+- the browser/frontend layer, which presents those features in a local app UI without changing the core protocol
 
 Good fits include:
 
@@ -46,6 +51,7 @@ Typical binaries here are:
 
 - `vx6`
 - `vx6-gui`
+- `vx6-browser` from `browser/qt`
 
 ## Connection Modes
 
@@ -76,12 +82,13 @@ VX6 currently supports three access styles:
 - runtime status and reload over a local control channel
 - TCP-based transport across the whole system
 - `vx6-gui` as a local web UI over the same CLI/runtime
+- `browser/qt` as a separate Qt WebEngine browser frontend that talks to the same VX6 binary
 
 ## What Is Still In Progress
 
 - real QUIC transport
 - seamless mid-stream hidden TCP failover after relay loss
-- stronger anti-Sybil DHT store admission
+- stronger anti-Sybil and WAN-tuned DHT behavior
 - a proven active eBPF/XDP fast path for the current encrypted relay plane
 - production-grade Windows installer and service automation
 - production-grade macOS packaging
@@ -96,6 +103,7 @@ Current Linux expectations:
 
 - build `vx6`
 - build `vx6-gui`
+- build `vx6-browser`
 - run the full current VX6 protocol feature set
 - use TCP transport
 - use the local runtime control channel
@@ -108,12 +116,13 @@ Important:
 
 ### Windows
 
-Windows is expected to follow the same protocol and service behavior, its conditionally seperated to build lightweight in specified OS.
+Windows follows the same protocol and service behavior through the shared Go core and Windows-specific runtime files.
 
 That branch is intended for:
 
 - `vx6.exe`
 - `vx6-gui.exe`
+- `vx6-browser` built from the Qt browser directory
 - Windows 11
 - Windows Server class deployments
 
@@ -143,13 +152,23 @@ The config surface may still mention `quic` for forward compatibility, but the c
 
 ## GUI
 
-`vx6-gui` is included in this branch.
+`vx6-gui` is the local command-driven control UI.
+`browser/qt` is the browser-ready Qt WebEngine frontend.
 
-It is a local web UI that:
+They are both thin frontends over the same VX6 core, so the protocol logic stays in one place.
+
+`vx6-gui`:
 
 - starts on your own machine
 - calls the `vx6` binary underneath
 - exposes the same core features through forms instead of shell commands
+
+`browser/qt`:
+
+- opens a colorful browser-style home page
+- supports `vx6://` internal pages
+- keeps runtime logs in a side panel
+- is designed so a future fuller browser can sit on top of the same backend
 
 This keeps the GUI aligned with the CLI and avoids splitting the protocol logic into two different apps.
 
@@ -166,6 +185,8 @@ Or:
 ```bash
 go build ./cmd/vx6
 go build ./cmd/vx6-gui
+cmake -S browser/qt -B browser/qt/build
+cmake --build browser/qt/build
 ```
 
 ### Initialize a node
@@ -198,6 +219,12 @@ vx6 status
 vx6-gui
 ```
 
+### Open the browser app
+
+```bash
+browser/qt/build/vx6-browser
+```
+
 ## Documentation
 
 - [Setup](./docs/SETUP.md)
@@ -210,6 +237,7 @@ vx6-gui
 - [Services](./docs/services.md)
 - [Identity](./docs/identity.md)
 - [GUI](./docs/GUI.md)
+- [Browser Frontend](./browser/qt/README.md)
 - [eBPF Status](./docs/ebpf.md)
 - [Systemd](./docs/systemd.md)
 - [Status](./docs/STATUS.md)

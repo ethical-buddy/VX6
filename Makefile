@@ -11,6 +11,7 @@ EBPF_SRC := internal/ebpf/onion_relay.c
 EBPF_OBJ := internal/onion/onion_relay.o
 VX6_BIN := vx6
 VX6_GUI_BIN := vx6-gui
+VX6_BROWSER_BIN := vx6-browser
 
 build:
 	@set -e; \
@@ -40,7 +41,9 @@ build:
 	echo "building vx6 with $$GO_BIN"; \
 	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_BIN) ./cmd/vx6; \
 	echo "building vx6-gui with $$GO_BIN"; \
-	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_GUI_BIN) ./cmd/vx6-gui
+	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_GUI_BIN) ./cmd/vx6-gui; \
+	echo "building vx6-browser with $$GO_BIN"; \
+	GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_BROWSER_BIN) ./cmd/vx6-gui
 
 build-ebpf: ebpf build
 
@@ -120,12 +123,12 @@ ebpf:
 	fi
 
 clean:
-	rm -f $(VX6_BIN) $(VX6_GUI_BIN)
+	rm -f $(VX6_BIN) $(VX6_GUI_BIN) $(VX6_BROWSER_BIN)
 
 install:
 	@set -e; \
-	if [ -f $(VX6_BIN) ] && [ -f $(VX6_GUI_BIN) ]; then \
-		echo "installing existing ./$(VX6_BIN) and ./$(VX6_GUI_BIN)"; \
+	if [ -f $(VX6_BIN) ] && [ -f $(VX6_GUI_BIN) ] && [ -f $(VX6_BROWSER_BIN) ]; then \
+		echo "installing existing ./$(VX6_BIN), ./$(VX6_GUI_BIN), and ./$(VX6_BROWSER_BIN)"; \
 	else \
 		echo "release binaries not found in the current directory"; \
 		echo "trying to build them before install"; \
@@ -143,13 +146,14 @@ install:
 		done; \
 		if [ -z "$$GO_BIN" ]; then \
 			echo "go toolchain not found"; \
-			echo "if you already built VX6, place the executables at ./$(VX6_BIN) and ./$(VX6_GUI_BIN) and rerun:"; \
+			echo "if you already built VX6, place the executables at ./$(VX6_BIN), ./$(VX6_GUI_BIN), and ./$(VX6_BROWSER_BIN) and rerun:"; \
 			echo "  sudo make install"; \
 			echo "otherwise build with:"; \
 			echo "  make build"; \
 			echo "or:"; \
 			echo "  /usr/local/go/bin/go build -o ./$(VX6_BIN) ./cmd/vx6"; \
 			echo "  /usr/local/go/bin/go build -o ./$(VX6_GUI_BIN) ./cmd/vx6-gui"; \
+			echo "  /usr/local/go/bin/go build -o ./$(VX6_BROWSER_BIN) ./cmd/vx6-gui"; \
 			exit 1; \
 		fi; \
 		mkdir -p "$(GOCACHE)" "$(GOMODCACHE)"; \
@@ -157,9 +161,12 @@ install:
 		GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_BIN) ./cmd/vx6; \
 		echo "building vx6-gui with $$GO_BIN before install"; \
 		GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_GUI_BIN) ./cmd/vx6-gui; \
+		echo "building vx6-browser with $$GO_BIN before install"; \
+		GOCACHE="$(GOCACHE)" GOMODCACHE="$(GOMODCACHE)" "$$GO_BIN" build -ldflags "-X main.Version=$(VERSION)" -o $(VX6_BROWSER_BIN) ./cmd/vx6-gui; \
 	fi
 	install -Dm755 $(VX6_BIN) $(DESTDIR)$(BINDIR)/vx6
 	install -Dm755 $(VX6_GUI_BIN) $(DESTDIR)$(BINDIR)/vx6-gui
+	install -Dm755 $(VX6_BROWSER_BIN) $(DESTDIR)$(BINDIR)/vx6-browser
 	install -Dm644 deployments/systemd/vx6.service $(DESTDIR)$(PREFIX)/lib/systemd/user/vx6.service
 
 test:

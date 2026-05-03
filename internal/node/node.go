@@ -143,6 +143,7 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 			nodeCount := 0
 			serviceCount := 0
 			dhtSummary := dhtStatusSummary(liveCfg.DHT)
+			asnStatus := dht.ASNResolverStatusSnapshot()
 			if cfg.Registry != nil {
 				nodes, services := cfg.Registry.Snapshot()
 				nodeCount = len(nodes)
@@ -169,6 +170,9 @@ func Run(ctx context.Context, log io.Writer, cfg Config) error {
 				DHTRefreshIntervalSeconds:       int64(dhtSummary.RefreshInterval.Seconds()),
 				HiddenDescriptorRotationSeconds: int64(dhtSummary.HiddenRotation.Seconds()),
 				HiddenDescriptorOverlapKeys:     dhtSummary.HiddenPublishOverlapKey,
+				ASNResolverLoaded:               asnStatus.Loaded,
+				ASNResolverSource:               asnStatus.Source,
+				ASNResolverEntries:              asnStatus.Entries,
 			}
 		})
 		if err != nil {

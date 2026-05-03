@@ -3,6 +3,7 @@
 ## Requirements
 
 - Go 1.22 or newer if you are building from source
+- Qt 6 WebEngine if you are building the browser frontend from `browser/qt`
 - IPv6 enabled on the Linux machines that will run VX6
 - firewall rules that allow the VX6 listen port
 
@@ -18,12 +19,20 @@ That builds:
 
 - `vx6`
 - `vx6-gui`
+- the Go binaries in the root tree
 
 You can also build directly with Go:
 
 ```bash
 go build ./cmd/vx6
 go build ./cmd/vx6-gui
+```
+
+Build the Qt browser frontend separately:
+
+```bash
+cmake -S browser/qt -B browser/qt/build
+cmake --build browser/qt/build
 ```
 
 ## Install
@@ -72,6 +81,14 @@ vx6-gui
 ```
 
 The GUI opens a local browser page and calls the `vx6` binary underneath.
+
+## Open the browser frontend
+
+```bash
+browser/qt/build/vx6-browser
+```
+
+The browser frontend uses the same `vx6` backend and local control surface.
 
 ## Linux-Specific Follow-Up
 

@@ -74,15 +74,23 @@ type commandResult struct {
 }
 
 type server struct {
-	vx6Bin string
-	mu     sync.Mutex
-	last   *commandResult
-	tasks  map[string]*taskInfo
+	appName           string
+	vx6Bin            string
+	mu                sync.Mutex
+	last              *commandResult
+	tasks             map[string]*taskInfo
+	browserConfigPath string
+	browserCurrent    string
+	browserHistory    []browserEntry
+	browserIndex      int
+	browserBookmarks  []string
 }
 
 type pageData struct {
+	AppName string
 	VX6Bin  string
 	Actions []actionSpec
+	Browser browserView
 	Last    *commandResult
 	Tasks   []*taskInfo
 }
@@ -346,27 +354,29 @@ func main() {
 	}
 
 	srv := &server{
-		vx6Bin: vx6Bin,
-		tasks:  map[string]*taskInfo{},
+		appName: appDisplayName(),
+		vx6Bin:  vx6Bin,
+		tasks:   map[string]*taskInfo{},
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", srv.handleIndex)
+	mux.HandleFunc("/browser", srv.handleBrowser)
 	mux.HandleFunc("/run", srv.handleRun)
 	mux.HandleFunc("/stop", srv.handleStop)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "vx6-gui listen failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s listen failed: %v\n", appBinaryName(), err)
 		os.Exit(1)
 	}
 	url := "http://" + ln.Addr().String()
-	fmt.Printf("vx6-gui\t%s\n", url)
+	fmt.Printf("%s\t%s\n", appBinaryName(), url)
 	go func() {
 		_ = openBrowser(url)
 	}()
 	if err := http.Serve(ln, mux); err != nil {
-		fmt.Fprintf(os.Stderr, "vx6-gui server stopped: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s server stopped: %v\n", appBinaryName(), err)
 		os.Exit(1)
 	}
 }
@@ -387,8 +397,10 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	})
 
 	data := pageData{
+		AppName: s.appName,
 		VX6Bin:  s.vx6Bin,
 		Actions: availableActions(),
+		Browser: s.browserSnapshot(),
 		Last:    s.last,
 		Tasks:   tasks,
 	}
@@ -420,6 +432,38 @@ func (s *server) handleRun(w http.ResponseWriter, r *http.Request) {
 		out, err := s.runNow(configPath, args)
 		s.setLast(spec.Title, args, out, err == nil)
 	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *server) handleBrowser(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	switch strings.TrimSpace(r.Form.Get("op")) {
+	case "open":
+		target := strings.TrimSpace(r.Form.Get("target"))
+		configPath := strings.TrimSpace(r.Form.Get("config_path"))
+		if err := s.navigateBrowser(configPath, target); err != nil {
+			s.setLast("VX6 Browser", nil, err.Error(), false)
+		}
+	case "back":
+		if !s.browserBack() {
+			s.setLast("VX6 Browser", nil, "no previous browser page", false)
+		}
+	case "forward":
+		if !s.browserForward() {
+			s.setLast("VX6 Browser", nil, "no forward browser page", false)
+		}
+	case "bookmark":
+		if !s.bookmarkBrowserTarget() {
+			s.setLast("VX6 Browser", nil, "no browser page to bookmark", false)
+		}
+	default:
+		s.setLast("VX6 Browser", nil, "unknown browser action", false)
+	}
+
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -717,6 +761,22 @@ func detectVX6Binary() string {
 	return "vx6"
 }
 
+func appDisplayName() string {
+	base := strings.ToLower(filepath.Base(os.Args[0]))
+	if strings.Contains(base, "browser") {
+		return "VX6 Browser"
+	}
+	return "VX6 GUI"
+}
+
+func appBinaryName() string {
+	base := strings.TrimSpace(filepath.Base(os.Args[0]))
+	if base == "" {
+		return "vx6-gui"
+	}
+	return base
+}
+
 func availableActions() []actionSpec {
 	if runtime.GOOS == "linux" {
 		return actions
@@ -757,7 +817,7 @@ const pageHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VX6 GUI</title>
+  <title>{{.AppName}}</title>
   <style>
     :root { color-scheme: light; --bg:#f6f5ef; --fg:#1d1d1b; --muted:#5f5a53; --panel:#fffdfa; --line:#ddd4c7; --accent:#0f766e; --warn:#9a3412; }
     body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:linear-gradient(180deg,#f8f5ee 0%,#efe8da 100%); color:var(--fg); }
@@ -768,6 +828,10 @@ const pageHTML = `<!doctype html>
     .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:18px; }
     .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:18px; box-shadow:0 8px 24px rgba(61,43,21,0.06); }
     .muted { color:var(--muted); }
+    .toolbar { display:grid; gap:10px; }
+    .toolbar-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .toolbar-row input[type="text"] { flex:1 1 320px; }
+    .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border:1px solid var(--line); border-radius:999px; background:#fff; }
     .result.ok { border-left:4px solid var(--accent); }
     .result.bad { border-left:4px solid var(--warn); }
     form { display:grid; gap:10px; }
@@ -783,14 +847,62 @@ const pageHTML = `<!doctype html>
 </head>
 <body>
   <header>
-    <h1>VX6 GUI</h1>
-    <p class="muted">Web front-end for the current <code>vx6</code> binary. Stable transport is TCP. Hidden services, DHT, and node control use the same CLI behavior underneath.</p>
+    <h1>{{.AppName}}</h1>
+    <p class="muted">Local front-end for the current <code>vx6</code> binary. Stable transport is TCP. Hidden services, DHT, and node control use the same CLI behavior underneath.</p>
     <p class="muted">CLI binary: <code>{{.VX6Bin}}</code></p>
   </header>
   <main>
+    <section class="card">
+      <h2>Browser</h2>
+      <form class="toolbar" method="post" action="/browser">
+        <div class="toolbar-row">
+          <input type="text" name="config_path" value="{{.Browser.ConfigPath}}" placeholder="Config Path (optional)">
+          <input type="text" name="target" value="{{.Browser.CurrentTarget}}" placeholder="vx6://status">
+          <button type="submit" name="op" value="open">Open</button>
+          <button type="submit" name="op" value="back">Back</button>
+          <button type="submit" name="op" value="forward">Forward</button>
+          <button type="submit" name="op" value="bookmark">Bookmark</button>
+        </div>
+      </form>
+      <p class="muted">VX6 pages: <code>vx6://status</code>, <code>vx6://dht</code>, <code>vx6://registry</code>, <code>vx6://services</code>, <code>vx6://peers</code>, <code>vx6://identity</code>, <code>vx6://service/alice.web</code>, <code>vx6://node/alice</code>, <code>vx6://key/service/alice.web</code></p>
+      {{if .Browser.CurrentTitle}}
+      <div class="inline">
+        <span class="chip"><strong>Current</strong> <code>{{.Browser.CurrentTarget}}</code></span>
+        <span class="muted">{{.Browser.CurrentTitle}}</span>
+      </div>
+      {{end}}
+      {{if .Browser.Bookmarks}}
+      <div>
+        <p class="muted">Bookmarks</p>
+        <div class="toolbar-row">
+          {{range .Browser.Bookmarks}}
+          <form method="post" action="/browser">
+            <input type="hidden" name="op" value="open">
+            <input type="hidden" name="target" value="{{.}}">
+            <button type="submit">{{.}}</button>
+          </form>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+      {{if .Browser.History}}
+      <div>
+        <p class="muted">History</p>
+        <div class="grid">
+          {{range .Browser.History}}
+          <div class="task">
+            <div class="inline"><strong>{{.Title}}</strong><span class="muted">{{if .Success}}ok{{else}}failed{{end}}</span></div>
+            <div class="muted"><code>{{.Target}}</code></div>
+          </div>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </section>
+
     {{if .Last}}
     <section class="card result {{if .Last.Success}}ok{{else}}bad{{end}}">
-      <h2>Last Command</h2>
+      <h2>Last Page</h2>
       <p><strong>{{.Last.Title}}</strong></p>
       <p class="muted"><code>{{range .Last.Args}}{{.}} {{end}}</code></p>
       <pre>{{.Last.Output}}</pre>

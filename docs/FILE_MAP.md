@@ -8,6 +8,21 @@ This file explains what the important files and directories do.
   - CLI entrypoint
 - `cmd/vx6-gui/main.go`
   - local web GUI front-end that wraps the CLI binary
+- `cmd/vx6-gui/browser_state.go`
+  - local VX6 navigation and history state shared by the GUI shell
+
+## Browser Frontend
+
+- `browser/qt/`
+  - Qt WebEngine browser shell built on top of the same VX6 binary
+- `browser/qt/src/main.cpp`
+  - browser app entrypoint and VX6 custom scheme registration
+- `browser/qt/src/browserwindow.cpp`
+  - tabbed browser window, address bar, side log drawer, and VX6 home dashboard
+- `browser/qt/src/vx6backend.cpp`
+  - backend adapter that runs the VX6 binary and turns its output into browser pages
+- `browser/qt/src/vx6schemehandler.cpp`
+  - handler for `vx6://` pages inside Qt WebEngine
 
 ## Core Runtime
 
@@ -18,7 +33,7 @@ This file explains what the important files and directories do.
 - `internal/node/node.go`
   - main node runtime and background publish/sync loop
 - `internal/runtimectl/runtimectl.go`
-  - local runtime control channel used by `status` and `reload`
+  - local runtime control channel used by `status` and `reload`, including live ASN resolver status
 
 ## Identity and Records
 
@@ -35,8 +50,10 @@ This file explains what the important files and directories do.
   - local registry and peer snapshot exchange
 - `internal/dht/dht.go`
   - main DHT server and lookup flow
+- `internal/dht/asn.go`
+  - optional offline ASN map loader, cache, and resolver status
 - `internal/dht/value.go`
-  - DHT lookup validation, trust weighting, and confirmation logic
+  - DHT lookup validation, trust weighting, confirmation logic, and ASN-aware diversity
 - `internal/dht/private_catalog.go`
   - private per-user catalog format
 - `internal/dht/hidden_descriptor.go`
@@ -47,6 +64,8 @@ This file explains what the important files and directories do.
   - anonymous relay transport for hidden descriptor DHT traffic
 - `internal/dht/replica_status.go`
   - publish health tracking and DHT status summaries
+- `internal/dht/store_admission_test.go`
+  - admission tests for trusted writes, stale values, and source throttling
 - `internal/dht/table.go`
   - routing table implementation
 
@@ -85,3 +104,5 @@ This file explains what the important files and directories do.
   - unit tests
 - `internal/integration/swarm_test.go`
   - multi-node integration tests
+- `internal/dht/asn_test.go`
+  - ASN resolver and diversity tests
