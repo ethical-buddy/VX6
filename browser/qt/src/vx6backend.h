@@ -25,7 +25,7 @@ public:
     QString servicesPageHtml() const;
     QString peersPageHtml() const;
     QString identityPageHtml() const;
-    QString lookupPageHtml(const QString &title, const QStringList &args, const QString &subtitle);
+    QString lookupPageHtml(const QString &title, const QStringList &args, const QString &subtitle) const;
 
     QString runVX6(const QStringList &args, bool *ok = nullptr) const;
     QString resolveConfigPath() const;

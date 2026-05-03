@@ -3,6 +3,7 @@
 #include "vx6backend.h"
 
 #include <QBuffer>
+#include <QWebEngineUrlRequestJob>
 #include <QUrl>
 
 VX6SchemeHandler::VX6SchemeHandler(VX6Backend *backend, QObject *parent)
@@ -55,4 +56,3 @@ void VX6SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
     buffer->open(QIODevice::ReadOnly);
     job->reply("text/html; charset=utf-8", buffer);
 }
-
