@@ -6,6 +6,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
+#include <QStringList>
 
 VX6Backend::VX6Backend(QString vx6Binary, QString configPath, QObject *parent)
     : QObject(parent), m_vx6Binary(std::move(vx6Binary)), m_configPath(std::move(configPath))
@@ -295,14 +296,13 @@ QString VX6Backend::homePageHtml() const
     cards += dashboardCard("vx6://dht", "DHT", "Open lookup, replication, and resolver health.", "#23c18f");
     cards += dashboardCard("vx6://registry", "Registry", "Inspect the discovery registry snapshot.", "#ffd166");
     cards += dashboardCard("vx6://services", "Services", "View local configured services.", "#f78c6b");
-    cards += dashboardCard("vx6://peers", "Peers", "View local peers and sync targets.", "#8f7cff");
-    cards += dashboardCard("vx6://identity", "Identity", "Show the node key and identity details.", "#4dd0e1");
-    cards += dashboardCard("vx6://permissions", "Permissions", "First-run firewall/admin guidance.", "#ff7eb6");
-    cards += dashboardCard("vx6://service/example", "Service Lookup", "Look up a service by name.", "#9bde7b");
-    cards += dashboardCard("vx6://node/example", "Node Lookup", "Look up a node by name.", "#ffb86b");
-    cards += dashboardCard("vx6://key/example", "Raw Key", "Inspect a raw DHT key.", "#c792ea");
 
     QString body;
+    body += QStringLiteral(
+        "<div class=\"panel\" style=\"margin-top:18px;\">"
+        "<div class=\"notice ok\"><strong>Control drawer:</strong> Use the left sliding panel for copy, rename, lookup, and service hosting. "
+        "The home screen stays focused on overview.</div>"
+        "</div>");
     body += QStringLiteral("<div class=\"grid\">%1</div>").arg(cards);
     body += QStringLiteral("<div class=\"section\"><h2>Live Status Snapshot</h2>%1</div>").arg(commandBlock(status));
     body += QStringLiteral("<div class=\"section\"><h2>DHT Snapshot</h2>%1</div>").arg(commandBlock(dht));
@@ -310,7 +310,7 @@ QString VX6Backend::homePageHtml() const
     body += QStringLiteral(
         "<div class=\"section\"><h2>Shortcuts</h2>"
         "<div class=\"hint\">Use <code>vx6://status</code>, <code>vx6://dht</code>, <code>vx6://services</code>, "
-        "<code>vx6://peers</code>, and <code>vx6://identity</code> as your default home actions.</div>"
+        "<code>vx6://peers</code>, and <code>vx6://identity</code> as your overview pages. Operational actions live in the left drawer.</div>"
         "</div>");
 
     return makePageShell("VX6 Home", "One system. One key. One VX6 runtime.", body, "#6ea8ff");
@@ -393,6 +393,52 @@ QString VX6Backend::lookupPageHtml(const QString &title, const QStringList &args
     return makePageShell(title, subtitle, body, "#c792ea");
 }
 
+QString VX6Backend::currentNodeName() const
+{
+    return statusValue(QStringLiteral("node_name"));
+}
+
+QString VX6Backend::currentNodeID() const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{"identity"}, &ok);
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        const int tab = line.indexOf('\t');
+        if (tab <= 0) {
+            continue;
+        }
+        const QString key = line.left(tab).trimmed();
+        const QString value = line.mid(tab + 1).trimmed();
+        if (key == "node_id") {
+            return value;
+        }
+    }
+    return QString();
+}
+
+QString VX6Backend::currentAdvertiseAddr() const
+{
+    return statusValue(QStringLiteral("advertise_addr"));
+}
+
+QString VX6Backend::statusValue(const QString &key) const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{"status"}, &ok);
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        const int tab = line.indexOf('\t');
+        if (tab <= 0) {
+            continue;
+        }
+        const QString foundKey = line.left(tab).trimmed();
+        const QString value = line.mid(tab + 1).trimmed();
+        if (foundKey == key) {
+            return value;
+        }
+    }
+    return QString();
+}
+
 bool VX6Backend::nodeRunning() const
 {
     return m_nodeProcess.state() != QProcess::NotRunning;
@@ -435,6 +481,62 @@ QString VX6Backend::stopNode()
     }
     updateNodeState();
     return QStringLiteral("vx6 node stopped");
+}
+
+QString VX6Backend::renameNode(const QString &name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("node rename failed: empty name");
+    }
+    bool ok = false;
+    const QString output = runVX6(QStringList{"identity", "rename", "--name", trimmed, "--wait", "1m"}, &ok);
+    if (ok) {
+        const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
+        return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::hostService(const QString &serviceName, int port)
+{
+    const QString trimmed = serviceName.trimmed();
+    if (trimmed.isEmpty() || port <= 0 || port > 65535) {
+        return QStringLiteral("service host failed: invalid name or port");
+    }
+    bool ok = false;
+    const QString target = QStringLiteral("127.0.0.1:%1").arg(port);
+    const QString output = runVX6(QStringList{"service", "add", "--name", trimmed, "--target", target}, &ok);
+    if (ok) {
+        const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
+        return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::stopHostedService(const QString &serviceName)
+{
+    const QString trimmed = serviceName.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("service stop failed: empty name");
+    }
+    bool ok = false;
+    const QString output = runVX6(QStringList{"service", "remove", "--name", trimmed}, &ok);
+    if (ok) {
+        const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
+        return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::lookupRaw(const QStringList &args, const QString &label) const
+{
+    bool ok = false;
+    const QString output = runVX6(args, &ok);
+    if (ok) {
+        return label.isEmpty() ? output : QStringLiteral("[%1]\n%2").arg(label, output);
+    }
+    return output;
 }
 
 void VX6Backend::appendProcessOutput()

@@ -37,6 +37,7 @@ type LookupResult struct {
 	QueriedNodes      int
 	RejectedValues    int
 	ConflictCount     int
+	ConflictValues    []string
 	PublisherCount    int
 	NetworkDiversity  int
 	ProviderDiversity int
@@ -162,15 +163,23 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 	if len(c.verified) > 0 {
 		if len(c.verified) > 1 {
 			families := make([]string, 0, len(c.verified))
+			conflicts := make([]string, 0, len(c.verified))
 			for family := range c.verified {
 				families = append(families, family)
 			}
+			for _, candidate := range c.verified {
+				if strings.TrimSpace(candidate.value.raw) != "" {
+					conflicts = append(conflicts, candidate.value.raw)
+				}
+			}
 			sort.Strings(families)
+			sort.Strings(conflicts)
 			return LookupResult{
 				Verified:       true,
 				QueriedNodes:   queried,
 				RejectedValues: c.rejected,
 				ConflictCount:  len(families),
+				ConflictValues: conflicts,
 			}, fmt.Errorf("%w: %s", ErrConflictingValues, strings.Join(families, ", "))
 		}
 		for _, candidate := range c.verified {
@@ -191,7 +200,11 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 
 	var best *candidateObservation
 	conflicts := 0
+	conflictValues := make([]string, 0, len(c.raw))
 	for _, candidate := range c.raw {
+		if strings.TrimSpace(candidate.value.raw) != "" {
+			conflictValues = append(conflictValues, candidate.value.raw)
+		}
 		if best == nil {
 			best = candidate
 			conflicts = 1
@@ -212,10 +225,12 @@ func (c *lookupCollector) Resolve(queried int) (LookupResult, error) {
 		}, fmt.Errorf("value not found in DHT")
 	}
 	if conflicts > 1 {
+		sort.Strings(conflictValues)
 		return LookupResult{
 			QueriedNodes:   queried,
 			RejectedValues: c.rejected,
 			ConflictCount:  conflicts,
+			ConflictValues: conflictValues,
 		}, fmt.Errorf("%w: conflicting unverified values for key %q", ErrConflictingValues, c.key)
 	}
 

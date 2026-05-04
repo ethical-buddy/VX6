@@ -14,6 +14,8 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 
 - multi-source lookup confirmation
 - conflict detection
+- conflict candidate reporting for same-name lookups
+- interactive user choice support in the CLI when multiple candidates are returned
 - bounded replication
 - refresh tracking
 - conservative store admission with signed trusted writes, authoritative publisher checks, stale-write rejection, and per-source throttling
@@ -70,3 +72,18 @@ That means:
 - repeat writes from the same source are rate limited
 
 This keeps the DHT from accepting arbitrary trusted writes just because they are signed.
+
+## Name Conflicts
+
+VX6 treats the node keypair and NodeID as the real identity.
+
+If two different nodes try to use the same human-readable node name:
+
+- the shared registry rejects the second publisher
+- DHT lookup can report every conflicting candidate instead of silently picking one
+- the CLI can show the full set of candidates and let the user choose which identity is correct
+- each running node periodically checks its own name key and logs a clash warning if another identity claims the same name
+
+This is intentional. Human names are labels. NodeID is the identity.
+
+At init time and during explicit rename, VX6 can also wait and probe the network before accepting a name. If another identity is already using that name, the CLI stops and shows the candidates instead of silently taking over the name.

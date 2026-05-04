@@ -27,6 +27,11 @@ The current browser app already provides:
 - address bar
 - back / forward / reload / home
 - bookmark action
+- a left control drawer for:
+  - copyable current IPv6
+  - node rename
+  - service / node / hidden lookup
+  - service hosting and stop controls
 - a side drawer for runtime logs
 - a side drawer for node control
 - a node start button
@@ -71,6 +76,7 @@ Important feature areas:
 - top bar: navigation and address entry
 - center: VX6 home dashboard and tabs
 - right side: logs, start/stop, reload, status, firewall guidance
+- left side: control drawer with the main operator actions
 - internal pages: status, DHT, registry, services, peers, identity, lookup pages
 
 ## What We Want Next
@@ -81,6 +87,7 @@ Planned follow-up work:
 
 - better tab/session persistence
 - nicer page transitions and a sliding right drawer animation
+- a polished left drawer animation and inline status badges
 - better inline error pages when VX6 lookup fails
 - richer service pages for public, private, and hidden records
 - a browser home page that can show local services and recent connections
@@ -240,4 +247,3 @@ Next we want:
 - stronger cross-platform packaging
 - better local browser behavior
 - more polished service pages
-

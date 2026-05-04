@@ -29,6 +29,7 @@ type Info struct {
 type Status struct {
 	PID                             int    `json:"pid"`
 	NodeName                        string `json:"node_name,omitempty"`
+	AdvertiseAddr                   string `json:"advertise_addr,omitempty"`
 	EndpointPublish                 string `json:"endpoint_publish,omitempty"`
 	TransportConfig                 string `json:"transport_config"`
 	TransportActive                 string `json:"transport_active"`

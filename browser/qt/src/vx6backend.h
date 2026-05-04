@@ -27,10 +27,17 @@ public:
     QString peersPageHtml() const;
     QString identityPageHtml() const;
     QString lookupPageHtml(const QString &title, const QStringList &args, const QString &subtitle) const;
+    QString currentNodeName() const;
+    QString currentNodeID() const;
+    QString currentAdvertiseAddr() const;
 
     bool nodeRunning() const;
     QString startNode();
     QString stopNode();
+    QString renameNode(const QString &name);
+    QString hostService(const QString &serviceName, int port);
+    QString stopHostedService(const QString &serviceName);
+    QString lookupRaw(const QStringList &args, const QString &label) const;
 
     QString runVX6(const QStringList &args, bool *ok = nullptr) const;
     QString resolveConfigPath() const;
@@ -42,6 +49,7 @@ signals:
 private:
     void appendProcessOutput();
     void updateNodeState();
+    QString statusValue(const QString &key) const;
 
     QString makePageShell(const QString &title, const QString &headline, const QString &body, const QString &accent) const;
     QString dashboardCard(const QString &href, const QString &title, const QString &description, const QString &accent) const;

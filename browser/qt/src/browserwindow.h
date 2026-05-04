@@ -5,8 +5,10 @@
 #include <QUrl>
 
 class QDockWidget;
+class QLabel;
 class QLineEdit;
 class QListWidget;
+class QSpinBox;
 class QTabWidget;
 class QTextEdit;
 class QWebEnginePage;
@@ -28,6 +30,14 @@ private slots:
     void closeTab(int index);
     void currentTabChanged(int index);
     void toggleLogs();
+    void copyCurrentIpv6();
+    void refreshControlPanel();
+    void renameNodeFromPanel();
+    void lookupServiceFromPanel();
+    void lookupNodeFromPanel();
+    void lookupHiddenFromPanel();
+    void hostServiceFromPanel();
+    void stopHostedServiceFromPanel();
     void reloadNode();
     void startNode();
     void stopNode();
@@ -37,6 +47,7 @@ private slots:
 private:
     void buildUi();
     void buildToolbar();
+    void buildControlDock();
     void buildDock();
     void registerBrowserCallbacks();
     void maybeShowPermissionPrompt();
@@ -50,6 +61,15 @@ private:
     QWebEngineProfile *m_profile;
     QTabWidget *m_tabs;
     QLineEdit *m_address;
+    QDockWidget *m_controlDock;
+    QLineEdit *m_ipv6Field;
+    QLineEdit *m_nodeNameField;
+    QLineEdit *m_nodeIdField;
+    QLineEdit *m_renameField;
+    QLineEdit *m_lookupField;
+    QLineEdit *m_hostNameField;
+    QSpinBox *m_hostPortField;
+    QTextEdit *m_lookupResult;
     QTextEdit *m_logView;
     QDockWidget *m_logDock;
     QListWidget *m_shortcuts;
