@@ -8,6 +8,8 @@ VX6 is usable now for controlled testing and temporary internal deployment.
 - signed discovery and signed service publication
 - direct service access to known VX6 addresses
 - public service lookup through the DHT
+- node-name clashes are detected and surfaced instead of being silently merged
+- init and rename now probe the network for name clashes before accepting a node name
 - private service catalogs for user-scoped visibility
 - hidden services with:
   - encrypted descriptors

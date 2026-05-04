@@ -22,6 +22,11 @@ The executable is `vx6-browser`.
 - opens normal `http://` and `https://` pages
 - opens VX6 internal pages through `vx6://`
 - renders a colorful home dashboard with VX6 actions
+- shows a left control drawer with:
+  - copyable current IPv6
+  - node rename
+  - service / node / hidden lookup
+  - service hosting and stop controls
 - shows a right-side log drawer for node output and reload actions
 - includes node start and stop controls in the side drawer
 - keeps one system identity and one key, with no profile switching UI
