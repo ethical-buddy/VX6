@@ -3,6 +3,7 @@ package dht
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"math/rand"
@@ -63,7 +64,68 @@ func (s *Server) refreshHiddenServiceNetwork(ctx context.Context, lookup string,
 	s.mu.RLock()
 	cfg := s.hidden
 	s.mu.RUnlock()
-	batch := buildHiddenLookupBatch(keys, now, cfg.FetchParallel, cfg.FetchBatchSize)
+	groups := cfg.ConsensusGroups
+	if groups <= 0 {
+		groups = 3
+	}
+	minMatches := cfg.ConsensusMinMatches
+	if minMatches <= 0 {
+		minMatches = 2
+	}
+	if minMatches > groups {
+		minMatches = groups
+	}
+
+	type consensusRecord struct {
+		record record.ServiceRecord
+		key    string
+		groups map[int]struct{}
+	}
+	seen := map[string]*consensusRecord{}
+	var lastErr error
+	for group := 0; group < groups; group++ {
+		candidates, err := s.fetchHiddenDescriptorGroup(ctx, lookup, now, keys, realKeySet, cfg)
+		if err != nil {
+			lastErr = err
+		}
+		for fp, candidate := range candidates {
+			entry, ok := seen[fp]
+			if !ok {
+				entry = &consensusRecord{
+					record: candidate.record,
+					key:    candidate.key,
+					groups: map[int]struct{}{},
+				}
+				seen[fp] = entry
+			}
+			entry.groups[group] = struct{}{}
+			if len(entry.groups) >= minMatches {
+				return entry.record, entry.key, nil
+			}
+		}
+	}
+	if len(seen) > 0 {
+		best := 0
+		for _, entry := range seen {
+			if len(entry.groups) > best {
+				best = len(entry.groups)
+			}
+		}
+		return record.ServiceRecord{}, "", fmt.Errorf("hidden descriptor consensus not reached: best_match_groups=%d required=%d", best, minMatches)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("hidden descriptor not found")
+	}
+	return record.ServiceRecord{}, "", lastErr
+}
+
+type hiddenDescriptorCandidate struct {
+	record record.ServiceRecord
+	key    string
+}
+
+func (s *Server) fetchHiddenDescriptorGroup(ctx context.Context, lookup string, now time.Time, realKeys []string, realKeySet map[string]struct{}, cfg HiddenDescriptorPrivacyConfig) (map[string]hiddenDescriptorCandidate, error) {
+	batch := buildHiddenLookupBatch(realKeys, now, cfg.FetchParallel, cfg.FetchBatchSize)
 	rand.Shuffle(len(batch), func(i, j int) { batch[i], batch[j] = batch[j], batch[i] })
 
 	type fetchResult struct {
@@ -88,12 +150,8 @@ func (s *Server) refreshHiddenServiceNetwork(ctx context.Context, lookup string,
 		close(results)
 	}()
 
-	var (
-		lastErr   error
-		bestRec   record.ServiceRecord
-		bestKey   string
-		haveMatch bool
-	)
+	out := map[string]hiddenDescriptorCandidate{}
+	var lastErr error
 	for result := range results {
 		if _, ok := realKeySet[result.key]; !ok {
 			continue
@@ -109,19 +167,12 @@ func (s *Server) refreshHiddenServiceNetwork(ctx context.Context, lookup string,
 			lastErr = err
 			continue
 		}
-		if !haveMatch {
-			bestRec = rec
-			bestKey = result.key
-			haveMatch = true
+		fp := hiddenDescriptorConsensusFingerprint(rec)
+		if _, ok := out[fp]; !ok {
+			out[fp] = hiddenDescriptorCandidate{record: rec, key: result.key}
 		}
 	}
-	if haveMatch {
-		return bestRec, bestKey, nil
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("hidden descriptor not found")
-	}
-	return record.ServiceRecord{}, "", lastErr
+	return out, lastErr
 }
 
 func buildHiddenLookupBatch(realKeys []string, now time.Time, parallel, batchSize int) []string {
@@ -334,6 +385,20 @@ func jitterDuration(base, jitter time.Duration) time.Duration {
 		return time.Second
 	}
 	return out
+}
+
+func hiddenDescriptorConsensusFingerprint(rec record.ServiceRecord) string {
+	sum := sha256.Sum256([]byte(
+		rec.NodeID + "\n" +
+			rec.NodeName + "\n" +
+			rec.ServiceName + "\n" +
+			rec.Alias + "\n" +
+			rec.PublicKey + "\n" +
+			rec.IssuedAt + "\n" +
+			rec.ExpiresAt + "\n" +
+			rec.Signature + "\n",
+	))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
 }
 
 func (s *Server) allowHiddenDescriptorRequest(remoteAddr, action string, now time.Time) bool {

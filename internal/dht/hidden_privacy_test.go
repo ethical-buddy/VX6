@@ -100,6 +100,29 @@ func TestCircuitRelayDiversityCountsGroups(t *testing.T) {
 	}
 }
 
+func TestHiddenDescriptorConsensusFingerprintStable(t *testing.T) {
+	rec := record.ServiceRecord{
+		NodeID:      "vx6_abc",
+		NodeName:    "alice",
+		ServiceName: "web",
+		Alias:       "ghost",
+		PublicKey:   "pub",
+		IssuedAt:    "2026-05-05T10:00:00Z",
+		ExpiresAt:   "2026-05-05T10:30:00Z",
+		Signature:   "sig",
+	}
+	a := hiddenDescriptorConsensusFingerprint(rec)
+	b := hiddenDescriptorConsensusFingerprint(rec)
+	if a != b {
+		t.Fatalf("fingerprint must be stable: %q != %q", a, b)
+	}
+	rec2 := rec
+	rec2.Signature = "sig2"
+	if hiddenDescriptorConsensusFingerprint(rec2) == a {
+		t.Fatal("fingerprint should change when signed descriptor changes")
+	}
+}
+
 type ASNResolverFunc func(ip net.IP) (string, bool)
 
 func (f ASNResolverFunc) Resolve(ip net.IP) (string, bool) {

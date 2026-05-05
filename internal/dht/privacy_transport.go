@@ -30,6 +30,8 @@ type HiddenDescriptorPrivacyConfig struct {
 	MinRelayNetworkGroups  int
 	MinRelayProviderGroups int
 	MinRelayASNGroups      int
+	ConsensusGroups        int
+	ConsensusMinMatches    int
 }
 
 func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
@@ -77,6 +79,15 @@ func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
 	}
 	if cfg.MinRelayASNGroups < 0 {
 		cfg.MinRelayASNGroups = 0
+	}
+	if cfg.ConsensusGroups <= 0 {
+		cfg.ConsensusGroups = 3
+	}
+	if cfg.ConsensusMinMatches <= 0 {
+		cfg.ConsensusMinMatches = 2
+	}
+	if cfg.ConsensusMinMatches > cfg.ConsensusGroups {
+		cfg.ConsensusMinMatches = cfg.ConsensusGroups
 	}
 	s.mu.Lock()
 	s.hidden = cfg
