@@ -1,9 +1,12 @@
 package dht
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vx6/vx6/internal/record"
 )
 
 func TestJitterDurationWithinBounds(t *testing.T) {
@@ -66,4 +69,39 @@ func TestBuildHiddenLookupBatchPadsAndRepeatsRealKeys(t *testing.T) {
 	if cover != 4 {
 		t.Fatalf("expected 4 cover keys, got %d", cover)
 	}
+}
+
+func TestCircuitRelayDiversityCountsGroups(t *testing.T) {
+	SetASNResolver(ASNResolverFunc(func(ip net.IP) (string, bool) {
+		if ip == nil {
+			return "", false
+		}
+		if ip.String() == "2001:db8:1::10" {
+			return "AS100", true
+		}
+		return "AS200", true
+	}), ASNResolverStatus{Loaded: true, Source: "test"})
+	t.Cleanup(func() { SetASNResolver(noASNResolver{}, ASNResolverStatus{}) })
+
+	nodes := []record.EndpointRecord{
+		{Address: "[2001:db8:1::10]:4242"},
+		{Address: "[2001:db8:2::10]:4242"},
+		{Address: "[2001:db8:2::20]:4242"},
+	}
+	nets, providers, asns := circuitRelayDiversity(nodes)
+	if nets < 2 {
+		t.Fatalf("expected at least 2 network groups, got %d", nets)
+	}
+	if providers < 1 {
+		t.Fatalf("expected at least 1 provider group, got %d", providers)
+	}
+	if asns < 2 {
+		t.Fatalf("expected at least 2 ASN groups in test map fallback, got %d", asns)
+	}
+}
+
+type ASNResolverFunc func(ip net.IP) (string, bool)
+
+func (f ASNResolverFunc) Resolve(ip net.IP) (string, bool) {
+	return f(ip)
 }
