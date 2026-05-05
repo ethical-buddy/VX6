@@ -25,12 +25,16 @@ type Server struct {
 	Values        map[string]string // The decentralized database
 	publisher     identity.Identity
 	hidden        HiddenDescriptorPrivacyConfig
+	adaptive      AdaptiveConfig
 	versions      map[string]StoredValueState
 	replicas      map[string]ReplicaObservation
 	hiddenCache   map[string]cachedHiddenService
 	hiddenWarmers map[string]struct{}
+	hiddenTracked map[string]struct{}
+	hiddenCoverOn bool
 	hiddenRates   map[string]rateWindow
 	storeRates    map[string]rateWindow
+	lookupEWMA    float64
 	mu            sync.RWMutex
 }
 
@@ -41,9 +45,12 @@ type lookupBranch struct {
 }
 
 const (
-	lookupAlpha                      = 3
-	lookupQueryBudget                = 12
-	replicationFactor                = 5
+	defaultLookupAlpha               = 3
+	defaultLookupQueryBudget         = 12
+	defaultReplicationFactor         = 5
+	lookupAlpha                      = defaultLookupAlpha
+	lookupQueryBudget                = defaultLookupQueryBudget
+	replicationFactor                = defaultReplicationFactor
 	hiddenDescriptorRotation         = time.Hour
 	hiddenLookupDelimiter            = "#"
 	hiddenDescriptorCacheWindow      = 45 * time.Second
@@ -54,6 +61,17 @@ const (
 	hiddenDescriptorStoreRateWindow  = 30 * time.Second
 	hiddenDescriptorStoreRateLimit   = 24
 )
+
+type AdaptiveConfig struct {
+	LookupAlphaBase      int
+	LookupAlphaMax       int
+	LookupBudgetBase     int
+	LookupBudgetMax      int
+	ReplicationBase      int
+	ReplicationMax       int
+	FailureEWMAWeight    float64
+	HighFailureThreshold float64
+}
 
 type StoredVersion struct {
 	Family          string
@@ -191,12 +209,27 @@ func NewServer(selfID string) *Server {
 	return &Server{
 		RT:            NewRoutingTable(selfID),
 		Values:        make(map[string]string),
+		adaptive:      defaultAdaptiveConfig(),
 		versions:      make(map[string]StoredValueState),
 		replicas:      make(map[string]ReplicaObservation),
 		hiddenCache:   make(map[string]cachedHiddenService),
 		hiddenWarmers: make(map[string]struct{}),
+		hiddenTracked: make(map[string]struct{}),
 		hiddenRates:   make(map[string]rateWindow),
 		storeRates:    make(map[string]rateWindow),
+	}
+}
+
+func defaultAdaptiveConfig() AdaptiveConfig {
+	return AdaptiveConfig{
+		LookupAlphaBase:      defaultLookupAlpha,
+		LookupAlphaMax:       6,
+		LookupBudgetBase:     defaultLookupQueryBudget,
+		LookupBudgetMax:      28,
+		ReplicationBase:      defaultReplicationFactor,
+		ReplicationMax:       8,
+		FailureEWMAWeight:    0.18,
+		HighFailureThreshold: 0.35,
 	}
 }
 
@@ -361,10 +394,11 @@ func (s *Server) MaintainReplicas(ctx context.Context, targetID, value string) (
 	report.LocalStored = true
 
 	candidates := selectReplicationNodes(s.RT.ClosestNodes(targetID, K), K)
-	if len(candidates) < replicationFactor {
+	desired := s.adaptiveReplicationTarget()
+	if len(candidates) < desired {
 		report.Desired = len(candidates)
 	} else {
-		report.Desired = replicationFactor
+		report.Desired = desired
 	}
 
 	for offset := 0; offset < len(candidates) && report.StoredRemotely < report.Desired; {
@@ -403,6 +437,72 @@ func (s *Server) MaintainReplicas(ctx context.Context, targetID, value string) (
 	}
 
 	return report, nil
+}
+
+func (s *Server) adaptiveLookupParams() (int, int) {
+	s.mu.RLock()
+	cfg := s.adaptive
+	failure := s.lookupEWMA
+	s.mu.RUnlock()
+
+	alpha := cfg.LookupAlphaBase
+	budget := cfg.LookupBudgetBase
+	if failure >= cfg.HighFailureThreshold {
+		alpha += 2
+		budget += 10
+	} else if failure >= cfg.HighFailureThreshold/2 {
+		alpha++
+		budget += 5
+	}
+
+	if alpha < 1 {
+		alpha = 1
+	}
+	if alpha > cfg.LookupAlphaMax {
+		alpha = cfg.LookupAlphaMax
+	}
+	if budget < alpha {
+		budget = alpha
+	}
+	if budget > cfg.LookupBudgetMax {
+		budget = cfg.LookupBudgetMax
+	}
+	return alpha, budget
+}
+
+func (s *Server) adaptiveReplicationTarget() int {
+	s.mu.RLock()
+	cfg := s.adaptive
+	failure := s.lookupEWMA
+	s.mu.RUnlock()
+
+	target := cfg.ReplicationBase
+	if failure >= cfg.HighFailureThreshold {
+		target += 2
+	} else if failure >= cfg.HighFailureThreshold/2 {
+		target++
+	}
+	if target < 1 {
+		target = 1
+	}
+	if target > cfg.ReplicationMax {
+		target = cfg.ReplicationMax
+	}
+	return target
+}
+
+func (s *Server) noteLookupResult(success bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	weight := s.adaptive.FailureEWMAWeight
+	if weight <= 0 || weight >= 1 {
+		weight = 0.18
+	}
+	sample := 1.0
+	if success {
+		sample = 0.0
+	}
+	s.lookupEWMA = (1.0-weight)*s.lookupEWMA + weight*sample
 }
 
 func (s *Server) prepareStoreValue(key, value string, now time.Time) (string, error) {
@@ -596,6 +696,7 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	candidates := s.RT.ClosestNodes(key, K)
 	collector := newLookupCollector(key, time.Now())
 	queried := 0
+	alpha, budget := s.adaptiveLookupParams()
 
 	s.mu.RLock()
 	if local, ok := s.Values[key]; ok && local != "" {
@@ -603,8 +704,8 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 	}
 	s.mu.RUnlock()
 
-	branches, spares, nextBranchID := buildLookupBranches(candidates, lookupAlpha)
-	for len(branches) > 0 && queried < lookupQueryBudget {
+	branches, spares, nextBranchID := buildLookupBranches(candidates, alpha)
+	for len(branches) > 0 && queried < budget {
 		type branchQuery struct {
 			branchID int
 			node     proto.NodeInfo
@@ -656,9 +757,11 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 			result := <-resultsCh
 			queried++
 			if result.err != nil {
+				s.noteLookupResult(false)
 				s.RT.NoteFailure(result.node.ID)
 				continue
 			}
+			s.noteLookupResult(true)
 			s.RT.AddNode(result.node)
 			if result.value != "" {
 				collector.Observe(sourceObservation{nodeID: result.node.ID, addr: result.node.Addr, trust: 1, branch: result.branchID}, result.value)
@@ -677,7 +780,13 @@ func (s *Server) RecursiveFindValueDetailed(ctx context.Context, key string) (Lo
 		}
 	}
 
-	return collector.Resolve(queried)
+	res, err := collector.Resolve(queried)
+	if err != nil {
+		s.noteLookupResult(false)
+		return res, err
+	}
+	s.noteLookupResult(true)
+	return res, nil
 }
 
 func (s *Server) QueryNode(ctx context.Context, addr, targetID string) ([]proto.NodeInfo, error) {

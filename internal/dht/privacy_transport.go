@@ -22,6 +22,10 @@ type HiddenDescriptorPrivacyConfig struct {
 	PollInterval    time.Duration
 	CacheWindow     time.Duration
 	CoverLookups    int
+	CoverInterval   time.Duration
+	PollJitter      time.Duration
+	FetchParallel   int
+	FetchBatchSize  int
 }
 
 func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
@@ -40,9 +44,28 @@ func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
 	if cfg.CoverLookups == 0 {
 		cfg.CoverLookups = hiddenDescriptorCoverLookups
 	}
+	if cfg.CoverInterval <= 0 {
+		cfg.CoverInterval = 18 * time.Second
+	}
+	if cfg.PollJitter < 0 {
+		cfg.PollJitter = 0
+	}
+	if cfg.PollJitter == 0 {
+		cfg.PollJitter = 3 * time.Second
+	}
+	if cfg.FetchParallel <= 0 {
+		cfg.FetchParallel = 2
+	}
+	if cfg.FetchBatchSize <= 0 {
+		cfg.FetchBatchSize = 6
+	}
+	if cfg.FetchBatchSize < cfg.FetchParallel {
+		cfg.FetchBatchSize = cfg.FetchParallel
+	}
 	s.mu.Lock()
 	s.hidden = cfg
 	s.mu.Unlock()
+	s.ensureHiddenCoverWorker()
 }
 
 func (s *Server) dialDHTConn(ctx context.Context, addr, key, action string) (net.Conn, error) {
