@@ -35,6 +35,7 @@ type Server struct {
 	hiddenRates   map[string]rateWindow
 	storeRates    map[string]rateWindow
 	lookupEWMA    float64
+	hiddenAnomalyEWMA float64
 	mu            sync.RWMutex
 }
 

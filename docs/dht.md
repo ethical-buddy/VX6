@@ -23,6 +23,9 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - ASN-aware diversity when a local ASN map is present
 - hidden descriptor caching, jittered refresh polling, and background cover lookups
 - tracked hidden-invite warmers to reduce purely on-demand lookup patterns
+- scheduled privacy traffic buckets (time-sliced baseline hidden descriptor cover activity)
+- anomaly-driven cover escalation (higher hidden cover load when lookup instability or consensus failures rise)
+- multi-group hidden descriptor consensus before acceptance
 - blinded rotating hidden keys
 - encrypted hidden descriptor payloads
 
@@ -55,6 +58,15 @@ The DHT now adjusts lookup and replication behavior from live lookup failure sig
 - replication target increases under churn to keep availability stable
 
 This reduces timeout risk in unstable WAN conditions without permanently paying high bandwidth cost in healthy periods.
+
+## Adversarial Test Harness
+
+The DHT package includes CI-safe adversarial tests for:
+
+- hidden cover escalation behavior under anomaly pressure
+- hidden descriptor consensus threshold behavior across independent groups
+
+These tests are intended to catch security-regression drift early without requiring privileged socket setup.
 
 ## ASN Diversity
 

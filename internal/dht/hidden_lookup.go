@@ -40,12 +40,14 @@ func (s *Server) ResolveHiddenService(ctx context.Context, lookup string, now ti
 
 	rec, key, err := s.refreshHiddenServiceNetwork(ctx, lookup, now)
 	if err != nil {
+		s.noteHiddenAnomaly(true)
 		if stale, ok := s.lookupStaleHiddenServiceCache(lookup, now); ok {
 			s.startHiddenDescriptorWarmer(lookup)
 			return stale.Record, nil
 		}
 		return record.ServiceRecord{}, err
 	}
+	s.noteHiddenAnomaly(false)
 
 	s.storeHiddenServiceCache(lookup, key, rec, now)
 	s.startHiddenDescriptorWarmer(lookup)
@@ -87,6 +89,7 @@ func (s *Server) refreshHiddenServiceNetwork(ctx context.Context, lookup string,
 		candidates, err := s.fetchHiddenDescriptorGroup(ctx, lookup, now, keys, realKeySet, cfg)
 		if err != nil {
 			lastErr = err
+			s.noteHiddenAnomaly(true)
 		}
 		for fp, candidate := range candidates {
 			entry, ok := seen[fp]
@@ -100,6 +103,7 @@ func (s *Server) refreshHiddenServiceNetwork(ctx context.Context, lookup string,
 			}
 			entry.groups[group] = struct{}{}
 			if len(entry.groups) >= minMatches {
+				s.noteHiddenAnomaly(false)
 				return entry.record, entry.key, nil
 			}
 		}
@@ -349,10 +353,11 @@ func (s *Server) ensureHiddenCoverWorker() {
 }
 
 func (s *Server) performHiddenDescriptorCoverLookups(cfg HiddenDescriptorPrivacyConfig, now time.Time) {
-	if cfg.CoverLookups <= 0 {
+	count := effectiveCoverLookupCount(cfg, now, s.hiddenAnomalySnapshot())
+	if count <= 0 {
 		return
 	}
-	for i := 0; i < cfg.CoverLookups; i++ {
+	for i := 0; i < count; i++ {
 		key, err := randomHiddenDescriptorCoverKey(now)
 		if err != nil {
 			return
@@ -361,6 +366,67 @@ func (s *Server) performHiddenDescriptorCoverLookups(cfg HiddenDescriptorPrivacy
 		_, _ = s.RecursiveFindValue(coverCtx, key)
 		cancel()
 	}
+}
+
+func (s *Server) noteHiddenAnomaly(anomaly bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	weight := s.hidden.AnomalyEWMAWeight
+	if weight <= 0 || weight >= 1 {
+		weight = 0.2
+	}
+	sample := 0.0
+	if anomaly {
+		sample = 1.0
+	}
+	s.hiddenAnomalyEWMA = (1.0-weight)*s.hiddenAnomalyEWMA + weight*sample
+}
+
+func (s *Server) hiddenAnomalySnapshot() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hiddenAnomalyEWMA
+}
+
+func effectiveCoverLookupCount(cfg HiddenDescriptorPrivacyConfig, now time.Time, anomalyEWMA float64) int {
+	base := cfg.CoverLookups
+	if base <= 0 {
+		base = hiddenDescriptorCoverLookups
+	}
+	base = base + scheduleBucketCover(cfg, now)
+	multiplier := 1
+	for _, th := range cfg.AnomalyEscalationSteps {
+		if anomalyEWMA >= th {
+			multiplier++
+		}
+	}
+	return base * multiplier
+}
+
+func scheduleBucketCover(cfg HiddenDescriptorPrivacyConfig, now time.Time) int {
+	if len(cfg.BucketBaseCover) == 0 {
+		return 0
+	}
+	period := cfg.BucketPeriod
+	if period <= 0 {
+		period = 10 * time.Minute
+	}
+	steps := len(cfg.BucketBaseCover)
+	if steps == 0 {
+		return 0
+	}
+	slotDur := period / time.Duration(steps)
+	if slotDur <= 0 {
+		slotDur = time.Minute
+	}
+	idx := int(now.UTC().Unix()/int64(slotDur/time.Second)) % steps
+	if idx < 0 {
+		idx += steps
+	}
+	if cfg.BucketBaseCover[idx] < 0 {
+		return 0
+	}
+	return cfg.BucketBaseCover[idx]
 }
 
 func randomHiddenDescriptorCoverKey(now time.Time) (string, error) {

@@ -48,6 +48,40 @@ func TestTrackHiddenLookupInviteRegistersInvite(t *testing.T) {
 	}
 }
 
+func TestScheduleBucketCoverDeterministic(t *testing.T) {
+	cfg := HiddenDescriptorPrivacyConfig{
+		BucketPeriod:    6 * time.Minute,
+		BucketBaseCover: []int{1, 3, 2},
+	}
+	ts := time.Unix(0, 0).UTC()
+	if got := scheduleBucketCover(cfg, ts); got != 1 {
+		t.Fatalf("unexpected bucket 0 cover %d", got)
+	}
+	if got := scheduleBucketCover(cfg, ts.Add(2*time.Minute)); got != 3 {
+		t.Fatalf("unexpected bucket 1 cover %d", got)
+	}
+	if got := scheduleBucketCover(cfg, ts.Add(4*time.Minute)); got != 2 {
+		t.Fatalf("unexpected bucket 2 cover %d", got)
+	}
+}
+
+func TestEffectiveCoverLookupCountEscalatesOnAnomaly(t *testing.T) {
+	cfg := HiddenDescriptorPrivacyConfig{
+		CoverLookups:           1,
+		BucketPeriod:           10 * time.Minute,
+		BucketBaseCover:        []int{1},
+		AnomalyEscalationSteps: []float64{0.2, 0.4, 0.6},
+	}
+	base := effectiveCoverLookupCount(cfg, time.Unix(0, 0).UTC(), 0.0)
+	if base != 2 {
+		t.Fatalf("unexpected base cover count %d", base)
+	}
+	escalated := effectiveCoverLookupCount(cfg, time.Unix(0, 0).UTC(), 0.61)
+	if escalated != 8 {
+		t.Fatalf("unexpected escalated cover count %d", escalated)
+	}
+}
+
 func TestBuildHiddenLookupBatchPadsAndRepeatsRealKeys(t *testing.T) {
 	now := time.Now()
 	real := []string{"hidden-desc/v1/1/a", "hidden-desc/v1/1/b"}

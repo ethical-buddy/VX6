@@ -32,6 +32,10 @@ type HiddenDescriptorPrivacyConfig struct {
 	MinRelayASNGroups      int
 	ConsensusGroups        int
 	ConsensusMinMatches    int
+	BucketPeriod           time.Duration
+	BucketBaseCover        []int
+	AnomalyEWMAWeight      float64
+	AnomalyEscalationSteps []float64
 }
 
 func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
@@ -88,6 +92,18 @@ func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
 	}
 	if cfg.ConsensusMinMatches > cfg.ConsensusGroups {
 		cfg.ConsensusMinMatches = cfg.ConsensusGroups
+	}
+	if cfg.BucketPeriod <= 0 {
+		cfg.BucketPeriod = 10 * time.Minute
+	}
+	if len(cfg.BucketBaseCover) == 0 {
+		cfg.BucketBaseCover = []int{1, 2, 1, 3, 2, 1}
+	}
+	if cfg.AnomalyEWMAWeight <= 0 || cfg.AnomalyEWMAWeight >= 1 {
+		cfg.AnomalyEWMAWeight = 0.2
+	}
+	if len(cfg.AnomalyEscalationSteps) == 0 {
+		cfg.AnomalyEscalationSteps = []float64{0.20, 0.35, 0.55}
 	}
 	s.mu.Lock()
 	s.hidden = cfg
