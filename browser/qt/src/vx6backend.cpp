@@ -1,12 +1,16 @@
 #include "vx6backend.h"
 
-#include <QCoreApplication>
+#include <QApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QStringList>
+
+#include <chrono>
+#include <thread>
 
 VX6Backend::VX6Backend(QString vx6Binary, QString configPath, QObject *parent)
     : QObject(parent), m_vx6Binary(std::move(vx6Binary)), m_configPath(std::move(configPath))
@@ -90,6 +94,95 @@ QString VX6Backend::resolveConfigPath() const
     return QStringLiteral("config.json");
 }
 
+bool VX6Backend::vx6BinaryExists() const
+{
+    const QString binPath = resolveBinaryPath();
+    return QFileInfo::exists(binPath) && QFileInfo(binPath).isExecutable();
+}
+
+bool VX6Backend::waitForProcessFinished(QProcess &proc, int msecs) const
+{
+    const auto start = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::milliseconds(msecs);
+    
+    while (proc.state() == QProcess::Running) {
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        if (elapsed > timeout) {
+            return false;  // Timeout
+        }
+        
+        // Process UI events to keep interface responsive
+        QApplication::processEvents(QEventLoop::AllEvents, 100);
+        
+        // Small sleep to avoid busy waiting
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    
+    return true;  // Process finished normally
+}
+
+QString VX6Backend::ensureVx6Binary()
+{
+    if (vx6BinaryExists()) {
+        emit logLine(QStringLiteral("vx6 binary already available"));
+        return QStringLiteral("vx6 binary already available");
+    }
+
+    emit logLine(QStringLiteral("vx6 binary not found, building from source..."));
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    QDir dir(appDir);
+    dir.cdUp();  // qt/build -> qt
+    dir.cdUp();  // qt -> browser
+    dir.cdUp();  // browser -> project root
+    const QString projectRoot = dir.path();
+    
+    const QString buildCmd = QStringLiteral("go build -o %1 ./cmd/vx6")
+        .arg(QDir(appDir).filePath("vx6"));
+
+    QProcess buildProc;
+    buildProc.setWorkingDirectory(projectRoot);
+    buildProc.setProgram(QStringLiteral("sh"));
+    buildProc.setArguments({QStringLiteral("-c"), buildCmd});
+
+    emit logLine(QStringLiteral("building vx6 in: %1").arg(projectRoot));
+    buildProc.start();
+
+    if (!buildProc.waitForStarted(5000)) {
+        const QString msg = QStringLiteral("failed to start build process");
+        emit logLine(msg);
+        return msg;
+    }
+
+    if (!buildProc.waitForFinished(300000)) {  // 5 minute timeout
+        buildProc.kill();
+        buildProc.waitForFinished(2000);
+        const QString msg = QStringLiteral("vx6 build timed out");
+        emit logLine(msg);
+        return msg;
+    }
+
+    const QString buildOutput = QString::fromUtf8(buildProc.readAllStandardOutput());
+    const QString buildError = QString::fromUtf8(buildProc.readAllStandardError());
+    const bool buildSuccess = buildProc.exitStatus() == QProcess::NormalExit && buildProc.exitCode() == 0;
+
+    if (!buildError.trimmed().isEmpty()) {
+        emit logLine(buildError);
+    }
+    if (!buildOutput.trimmed().isEmpty()) {
+        emit logLine(buildOutput);
+    }
+
+    if (buildSuccess && vx6BinaryExists()) {
+        emit logLine(QStringLiteral("vx6 binary built successfully"));
+        return QStringLiteral("vx6 binary built successfully");
+    }
+
+    const QString msg = QStringLiteral("failed to build vx6 binary (exit code %1)").arg(buildProc.exitCode());
+    emit logLine(msg);
+    return msg;
+}
+
 QString VX6Backend::runVX6(const QStringList &args, bool *ok) const
 {
     QProcess proc;
@@ -111,7 +204,9 @@ QString VX6Backend::runVX6(const QStringList &args, bool *ok) const
         emit logLine(msg);
         return msg;
     }
-    if (!proc.waitForFinished(120000)) {
+    
+    // Use responsive wait to keep UI responsive during long operations
+    if (!waitForProcessFinished(proc, 120000)) {
         proc.kill();
         proc.waitForFinished(2000);
         if (ok) {
@@ -494,6 +589,63 @@ QString VX6Backend::renameNode(const QString &name)
     if (ok) {
         const QString reloadOut = runVX6(QStringList{"reload"}, &ok);
         return output + QStringLiteral("\n") + reloadOut;
+    }
+    return output;
+}
+
+QString VX6Backend::initializeNode(const QString &name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("node init failed: empty name");
+    }
+    bool ok = false;
+    
+    // Step 1: Stop the running node
+    if (nodeRunning()) {
+        emit logLine(QStringLiteral("stopping running node..."));
+        m_nodeProcess.terminate();
+        if (!m_nodeProcess.waitForFinished(3000)) {
+            m_nodeProcess.kill();
+            m_nodeProcess.waitForFinished(2000);
+        }
+        updateNodeState();
+        emit logLine(QStringLiteral("node stopped"));
+    }
+    
+    // Step 2: Run init
+    emit logLine(QStringLiteral("initializing new node with name: %1").arg(trimmed));
+    emit logLine(QStringLiteral("generating keys... this may take a moment"));
+    
+    const QString initOut = runVX6(
+        QStringList{"init", "--name", trimmed, "--listen", "[::]:4242"},
+        &ok);
+    
+    if (!ok) {
+        emit logLine(QStringLiteral("initialization failed"));
+        emit logLine(initOut);
+        return initOut;
+    }
+    
+    // Step 3: Start the new node
+    emit logLine(QStringLiteral("node initialized, starting new node..."));
+    const QString startResult = startNode();
+    emit logLine(startResult);
+    
+    return QStringLiteral("node reinitialized successfully");
+}
+
+QString VX6Backend::connectService(const QString &target)
+{
+    const QString trimmed = target.trimmed();
+    if (trimmed.isEmpty()) {
+        return QStringLiteral("connect failed: empty target");
+    }
+    bool ok = false;
+    emit logLine(QStringLiteral("connecting to: %1").arg(trimmed));
+    const QString output = runVX6(QStringList{"connect", "--service", trimmed, "--listen", "127.0.0.1:9999"}, &ok);
+    if (ok) {
+        return QStringLiteral("Connected to %1 on 127.0.0.1:9999\n%2").arg(trimmed, output);
     }
     return output;
 }
