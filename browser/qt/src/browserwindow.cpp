@@ -226,6 +226,7 @@ BrowserWindow::BrowserWindow(const QString &vx6Binary,
       m_profile(new QWebEngineProfile("vx6-browser", this)),
       m_tabs(nullptr), m_address(nullptr),
       m_controlDock(nullptr), m_ipv6Field(nullptr), m_nodeNameField(nullptr), m_nodeIdField(nullptr),
+      m_initNodeNameField(nullptr), m_connectServiceField(nullptr),
       m_renameField(nullptr), m_lookupField(nullptr), m_hostNameField(nullptr), m_hostPortField(nullptr), m_lookupResult(nullptr),
       m_logView(nullptr), m_logDock(nullptr), m_shortcuts(nullptr)
 {
@@ -249,6 +250,16 @@ BrowserWindow::BrowserWindow(const QString &vx6Binary,
     buildDock();
     registerBrowserCallbacks();
     maybeShowPermissionPrompt();
+    
+    // Ensure vx6 binary exists (build if needed)
+    appendLog("Initializing VX6...");
+    appendLog(m_backend->ensureVx6Binary());
+    
+    // Auto-start the node on browser launch
+    if (!m_backend->nodeRunning()) {
+        appendLog(m_backend->startNode());
+    }
+    
     openHome();
 }
 
@@ -499,6 +510,32 @@ void BrowserWindow::buildControlDock()
     netLay->addWidget(refreshPanel);
     outer->addWidget(netFrame);
 
+    auto [initFrame, initLay] = makeFrame("INITIALIZE NODE");
+    m_initNodeNameField = new QLineEdit(initFrame);
+    m_initNodeNameField->setPlaceholderText("New node name");
+    m_initNodeNameField->setStyleSheet(m_ipv6Field->styleSheet());
+    initLay->addWidget(m_initNodeNameField);
+    auto *initBtn = makeSideBtn("Init New Node", initFrame);
+    auto *initHint = new QLabel("Creates a new node with fresh keys. This will stop the current node.", initFrame);
+    initHint->setWordWrap(true);
+    initHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    initLay->addWidget(initBtn);
+    initLay->addWidget(initHint);
+    outer->addWidget(initFrame);
+
+    auto [connectFrame, connectLay] = makeFrame("CONNECT");
+    m_connectServiceField = new QLineEdit(connectFrame);
+    m_connectServiceField->setPlaceholderText("Service name or address");
+    m_connectServiceField->setStyleSheet(m_ipv6Field->styleSheet());
+    connectLay->addWidget(m_connectServiceField);
+    auto *connectBtn = makeSideBtn("Connect", connectFrame);
+    auto *connectHint = new QLabel("Connect to a VX6 service by name or address.", connectFrame);
+    connectHint->setWordWrap(true);
+    connectHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    connectLay->addWidget(connectBtn);
+    connectLay->addWidget(connectHint);
+    outer->addWidget(connectFrame);
+
     auto [renameFrame, renameLay] = makeFrame("NODE NAME");
     m_renameField = new QLineEdit(renameFrame);
     m_renameField->setPlaceholderText("Enter a new node name");
@@ -578,6 +615,8 @@ void BrowserWindow::buildControlDock()
 
     connect(copyIpv6, &QPushButton::clicked, this, &BrowserWindow::copyCurrentIpv6);
     connect(refreshPanel, &QPushButton::clicked, this, &BrowserWindow::refreshControlPanel);
+    connect(initBtn, &QPushButton::clicked, this, &BrowserWindow::initializeNodeFromPanel);
+    connect(connectBtn, &QPushButton::clicked, this, &BrowserWindow::connectServiceFromPanel);
     connect(renameBtn, &QPushButton::clicked, this, &BrowserWindow::renameNodeFromPanel);
     connect(serviceBtn, &QPushButton::clicked, this, &BrowserWindow::lookupServiceFromPanel);
     connect(nodeBtn, &QPushButton::clicked, this, &BrowserWindow::lookupNodeFromPanel);
@@ -587,6 +626,8 @@ void BrowserWindow::buildControlDock()
     connect(m_lookupField, &QLineEdit::returnPressed, this, &BrowserWindow::lookupServiceFromPanel);
     connect(m_renameField, &QLineEdit::returnPressed, this, &BrowserWindow::renameNodeFromPanel);
     connect(m_hostNameField, &QLineEdit::returnPressed, this, &BrowserWindow::hostServiceFromPanel);
+    connect(m_initNodeNameField, &QLineEdit::returnPressed, this, &BrowserWindow::initializeNodeFromPanel);
+    connect(m_connectServiceField, &QLineEdit::returnPressed, this, &BrowserWindow::connectServiceFromPanel);
     connect(m_controlDock, &QDockWidget::visibilityChanged, this, [this](bool visible)
             {
                 if (visible)
@@ -890,6 +931,40 @@ void BrowserWindow::stopHostedServiceFromPanel()
     refreshControlPanel();
     refreshStatus();
     navigateTo("vx6://services", false);
+}
+
+void BrowserWindow::initializeNodeFromPanel()
+{
+    if (!m_initNodeNameField) {
+        return;
+    }
+    const QString name = m_initNodeNameField->text().trimmed();
+    if (name.isEmpty()) {
+        appendLog("node init skipped: empty node name");
+        return;
+    }
+    appendLog(QString("initializing new node as %1…").arg(name));
+    const QString result = m_backend->initializeNode(name);
+    appendLog(result.trimmed());
+    m_initNodeNameField->clear();
+    refreshControlPanel();
+    refreshStatus();
+}
+
+void BrowserWindow::connectServiceFromPanel()
+{
+    if (!m_connectServiceField) {
+        return;
+    }
+    const QString target = m_connectServiceField->text().trimmed();
+    if (target.isEmpty()) {
+        appendLog("connect skipped: empty service name or address");
+        return;
+    }
+    appendLog(QString("connecting to %1…").arg(target));
+    const QString result = m_backend->connectService(target);
+    appendLog(result.trimmed());
+    m_connectServiceField->clear();
 }
 
 // backend callbacks

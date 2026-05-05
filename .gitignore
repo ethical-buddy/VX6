@@ -1,7 +1,7 @@
 /vx6
 /chat
 internal/ebpf/onion_relay.o
-
+cmd/vx6/vx6
 .codex
 .codex/
 data/

@@ -38,6 +38,8 @@ private slots:
     void lookupHiddenFromPanel();
     void hostServiceFromPanel();
     void stopHostedServiceFromPanel();
+    void initializeNodeFromPanel();
+    void connectServiceFromPanel();
     void reloadNode();
     void startNode();
     void stopNode();
@@ -65,6 +67,8 @@ private:
     QLineEdit *m_ipv6Field;
     QLineEdit *m_nodeNameField;
     QLineEdit *m_nodeIdField;
+    QLineEdit *m_initNodeNameField;
+    QLineEdit *m_connectServiceField;
     QLineEdit *m_renameField;
     QLineEdit *m_lookupField;
     QLineEdit *m_hostNameField;
