@@ -1295,7 +1295,6 @@ func runIdentity(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("node_name\t%s\n", cfg.Node.Name)
 	fmt.Printf("node_id\t%s\n", id.NodeID)
-	fmt.Printf("advertise_addr\t%s\n", cfg.Node.AdvertiseAddr)
 	fmt.Printf("endpoint_publish\t%s\n", endpointPublishMode(cfg.Node.HideEndpoint))
 	fmt.Printf("transport_config\t%s\n", cfg.Node.TransportMode)
 	fmt.Printf("transport_active\t%s\n", vxtransport.EffectiveMode(cfg.Node.TransportMode))

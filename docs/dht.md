@@ -17,10 +17,12 @@ The VX6 DHT is the distributed lookup layer behind public, private, and hidden d
 - conflict candidate reporting for same-name lookups
 - interactive user choice support in the CLI when multiple candidates are returned
 - bounded replication
+- adaptive replication target under churn/failure pressure
 - refresh tracking
 - conservative store admission with signed trusted writes, authoritative publisher checks, stale-write rejection, and per-source throttling
 - ASN-aware diversity when a local ASN map is present
-- hidden descriptor caching and cover lookups
+- hidden descriptor caching, jittered refresh polling, and background cover lookups
+- tracked hidden-invite warmers to reduce purely on-demand lookup patterns
 - blinded rotating hidden keys
 - encrypted hidden descriptor payloads
 
@@ -43,6 +45,16 @@ Hidden descriptors are stronger than plain alias lookup because:
 Still, the responsible DHT holders can observe timing and volume on a blinded descriptor key. That is one of the main remaining privacy limits.
 
 VX6 reduces the obvious alias leak, but it does not hide all metadata from a powerful observer yet.
+
+## WAN/Churn Adaptation
+
+The DHT now adjusts lookup and replication behavior from live lookup failure signals:
+
+- lookup fanout (`alpha`) increases when recent failures rise
+- lookup query budget (`beta`-style budget) increases under churn
+- replication target increases under churn to keep availability stable
+
+This reduces timeout risk in unstable WAN conditions without permanently paying high bandwidth cost in healthy periods.
 
 ## ASN Diversity
 

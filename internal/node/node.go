@@ -622,6 +622,7 @@ func publishDHTRecords(ctx context.Context, server *dht.Server, signer identity.
 		}
 		if svc.IsHidden && svc.Alias != "" {
 			lookupSecret := hiddenLookupSecrets[svc.ServiceName]
+			server.TrackHiddenLookupInvite(dht.ComposeHiddenLookupInvite(svc.Alias, lookupSecret))
 			for _, key := range dht.HiddenServicePublishKeys(svc.Alias, lookupSecret, now) {
 				payload, err := dht.EncodeHiddenServiceDescriptor(svc, key, lookupSecret)
 				if err != nil {

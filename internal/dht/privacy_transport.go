@@ -15,13 +15,23 @@ import (
 const hiddenDescriptorRelayHopCount = 3
 
 type HiddenDescriptorPrivacyConfig struct {
-	TransportMode   string
-	RelayHopCount   int
-	RelayCandidates func() []record.EndpointRecord
-	ExcludeAddrs    func() []string
-	PollInterval    time.Duration
-	CacheWindow     time.Duration
-	CoverLookups    int
+	TransportMode          string
+	RelayHopCount          int
+	RelayCandidates        func() []record.EndpointRecord
+	ExcludeAddrs           func() []string
+	PollInterval           time.Duration
+	CacheWindow            time.Duration
+	CoverLookups           int
+	CoverInterval          time.Duration
+	PollJitter             time.Duration
+	FetchParallel          int
+	FetchBatchSize         int
+	DiversityAttempts      int
+	MinRelayNetworkGroups  int
+	MinRelayProviderGroups int
+	MinRelayASNGroups      int
+	ConsensusGroups        int
+	ConsensusMinMatches    int
 }
 
 func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
@@ -40,9 +50,49 @@ func (s *Server) SetHiddenDescriptorPrivacy(cfg HiddenDescriptorPrivacyConfig) {
 	if cfg.CoverLookups == 0 {
 		cfg.CoverLookups = hiddenDescriptorCoverLookups
 	}
+	if cfg.CoverInterval <= 0 {
+		cfg.CoverInterval = 18 * time.Second
+	}
+	if cfg.PollJitter < 0 {
+		cfg.PollJitter = 0
+	}
+	if cfg.PollJitter == 0 {
+		cfg.PollJitter = 3 * time.Second
+	}
+	if cfg.FetchParallel <= 0 {
+		cfg.FetchParallel = 2
+	}
+	if cfg.FetchBatchSize <= 0 {
+		cfg.FetchBatchSize = 6
+	}
+	if cfg.FetchBatchSize < cfg.FetchParallel {
+		cfg.FetchBatchSize = cfg.FetchParallel
+	}
+	if cfg.DiversityAttempts <= 0 {
+		cfg.DiversityAttempts = 4
+	}
+	if cfg.MinRelayNetworkGroups <= 0 {
+		cfg.MinRelayNetworkGroups = minInt(cfg.RelayHopCount, 3)
+	}
+	if cfg.MinRelayProviderGroups <= 0 {
+		cfg.MinRelayProviderGroups = minInt(cfg.RelayHopCount, 2)
+	}
+	if cfg.MinRelayASNGroups < 0 {
+		cfg.MinRelayASNGroups = 0
+	}
+	if cfg.ConsensusGroups <= 0 {
+		cfg.ConsensusGroups = 3
+	}
+	if cfg.ConsensusMinMatches <= 0 {
+		cfg.ConsensusMinMatches = 2
+	}
+	if cfg.ConsensusMinMatches > cfg.ConsensusGroups {
+		cfg.ConsensusMinMatches = cfg.ConsensusGroups
+	}
 	s.mu.Lock()
 	s.hidden = cfg
 	s.mu.Unlock()
+	s.ensureHiddenCoverWorker()
 }
 
 func (s *Server) dialDHTConn(ctx context.Context, addr, key, action string) (net.Conn, error) {
@@ -82,14 +132,43 @@ func (s *Server) dialHiddenDescriptorConn(ctx context.Context, targetAddr, key, 
 		return nil, true, fmt.Errorf("not enough relay candidates to anonymize hidden descriptor %s", action)
 	}
 
-	plan, err := onion.PlanAutomatedCircuit(record.ServiceRecord{Address: targetAddr}, relays, hopCount, exclude)
-	if err != nil {
-		return nil, true, err
+	var (
+		bestPlan   onion.CircuitPlan
+		bestScore  = -1
+		planErr    error
+		maxAttempt = cfg.DiversityAttempts
+	)
+	for attempt := 0; attempt < maxAttempt; attempt++ {
+		plan, err := onion.PlanAutomatedCircuit(record.ServiceRecord{Address: targetAddr}, relays, hopCount, exclude)
+		if err != nil {
+			planErr = err
+			continue
+		}
+		networkGroups, providerGroups, asnGroups := circuitRelayDiversity(plan.Relays)
+		score := networkGroups*100 + providerGroups*10 + asnGroups
+		if score > bestScore {
+			bestScore = score
+			bestPlan = plan
+		}
+		if networkGroups >= cfg.MinRelayNetworkGroups &&
+			providerGroups >= cfg.MinRelayProviderGroups &&
+			(asnGroups >= cfg.MinRelayASNGroups || cfg.MinRelayASNGroups == 0) {
+			bestPlan = plan
+			planErr = nil
+			break
+		}
+		planErr = fmt.Errorf("hidden descriptor circuit diversity below threshold")
 	}
-	plan.Purpose = "dht-hidden-desc-" + action
+	if len(bestPlan.Relays) == 0 {
+		if planErr != nil {
+			return nil, true, planErr
+		}
+		return nil, true, fmt.Errorf("failed to build hidden descriptor circuit plan")
+	}
+	bestPlan.Purpose = "dht-hidden-desc-" + action
 
 	opts := onion.ClientOptions{TransportMode: cfg.TransportMode}
-	conn, err := onion.DialPlannedCircuit(ctx, plan, opts)
+	conn, err := onion.DialPlannedCircuit(ctx, bestPlan, opts)
 	return conn, true, err
 }
 
@@ -122,4 +201,30 @@ func filterRelayCandidates(nodes []record.EndpointRecord, excludeAddrs []string)
 		return filtered[i].NodeID < filtered[j].NodeID
 	})
 	return filtered
+}
+
+func circuitRelayDiversity(relays []record.EndpointRecord) (networkGroups int, providerGroups int, asnGroups int) {
+	networks := map[string]struct{}{}
+	providers := map[string]struct{}{}
+	asns := map[string]struct{}{}
+	for _, relay := range relays {
+		src := sourceObservation{addr: relay.Address}
+		if n := src.networkKey(); n != "" {
+			networks[n] = struct{}{}
+		}
+		if p := src.providerKey(); p != "" {
+			providers[p] = struct{}{}
+		}
+		if a := src.asnKey(); a != "" {
+			asns[a] = struct{}{}
+		}
+	}
+	return len(networks), len(providers), len(asns)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
