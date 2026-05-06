@@ -13,6 +13,8 @@ data/
 VX6WEB/
 main/
 apps/
+!apps/vx6share/
+!apps/vx6share/**
 platform/
 
 # Content/editor scratch that should not block core VX6 development.

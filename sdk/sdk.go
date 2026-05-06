@@ -29,16 +29,17 @@ type Client struct {
 }
 
 type InitOptions struct {
-	Name          string
-	ListenAddr    string
-	AdvertiseAddr string
-	TransportMode string
-	HideEndpoint  bool
-	RelayMode     string
-	RelayPercent  int
-	DataDir       string
-	DownloadsDir  string
-	Peers         []string
+	Name            string
+	ListenAddr      string
+	AdvertiseAddr   string
+	TransportMode   string
+	HideEndpoint    bool
+	RelayMode       string
+	RelayPercent    int
+	DataDir         string
+	DownloadsDir    string
+	Peers           []string
+	FileReceiveMode string
 }
 
 type StartOptions struct {
@@ -107,6 +108,9 @@ func (c *Client) Init(ctx context.Context, opts InitOptions) (identity.Identity,
 	}
 	cfg.Node.RelayMode = relayMode
 	cfg.Node.RelayResourcePercent = config.NormalizeRelayResourcePercent(opts.RelayPercent)
+	if opts.FileReceiveMode != "" {
+		cfg.Node.FileReceiveMode = config.NormalizeFileReceiveMode(opts.FileReceiveMode)
+	}
 	if opts.DataDir != "" {
 		cfg.Node.DataDir = opts.DataDir
 	}
