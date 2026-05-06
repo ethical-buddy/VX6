@@ -237,6 +237,8 @@ browser/qt/build/vx6-browser
 - [Services](./docs/services.md)
 - [Identity](./docs/identity.md)
 - [GUI](./docs/GUI.md)
+- [SDK](./docs/SDK.md)
+- [Proxy Launcher](./docs/PROXY.md)
 - [Browser Frontend](./browser/qt/README.md)
 - [eBPF Status](./docs/ebpf.md)
 - [Systemd](./docs/systemd.md)
