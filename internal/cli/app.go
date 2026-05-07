@@ -1010,6 +1010,12 @@ func runReceiveStatus(args []string) error {
 		return err
 	}
 
+	configPath, err := config.DefaultPath()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("config_path\t%s\n", configPath)
+
 	store, err := config.NewStore("")
 	if err != nil {
 		return err
@@ -1019,10 +1025,30 @@ func runReceiveStatus(args []string) error {
 		return err
 	}
 
+	downloadDir := cfg.Node.DownloadDir
+	if downloadDir == "" {
+		downloadDir, err = config.DefaultDownloadDir()
+		if err != nil {
+			return err
+		}
+	}
+	fmt.Printf("download_dir\t%s\n", downloadDir)
 	fmt.Printf("file_receive_mode\t%s\n", strings.ToUpper(cfg.Node.FileReceiveMode))
-	fmt.Printf("allowed_senders\t%d\n", len(cfg.Node.AllowedFileSenders))
-	for _, sender := range cfg.Node.AllowedFileSenders {
-		fmt.Printf("allow\t%s\n", sender)
+
+	switch strings.ToLower(cfg.Node.FileReceiveMode) {
+	case config.FileReceiveOpen:
+		fmt.Printf("allowed_senders\t%d\n", len(cfg.Node.AllowedFileSenders))
+		fmt.Println("allowed_senders_note\topen mode: all senders are allowed")
+	case config.FileReceiveTrusted:
+		fmt.Printf("allowed_senders\t%d\n", len(cfg.Node.AllowedFileSenders))
+		for _, sender := range cfg.Node.AllowedFileSenders {
+			fmt.Printf("allow\t%s\n", sender)
+		}
+	default:
+		fmt.Printf("allowed_senders\t%d\n", len(cfg.Node.AllowedFileSenders))
+		if strings.ToLower(cfg.Node.FileReceiveMode) == config.FileReceiveOff {
+			fmt.Println("allowed_senders_note\treceiving disabled")
+		}
 	}
 	return nil
 }

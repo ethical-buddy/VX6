@@ -11,6 +11,7 @@ class QListWidget;
 class QSpinBox;
 class QTabWidget;
 class QTextEdit;
+class QPushButton;
 class QWebEnginePage;
 class QWebEngineProfile;
 class QWebEngineView;
@@ -40,6 +41,10 @@ private slots:
     void stopHostedServiceFromPanel();
     void initializeNodeFromPanel();
     void connectServiceFromPanel();
+    void chooseFileFromPanel();
+    void sendFileFromPanel();
+    void toggleReceiveFromPanel();
+    void showFileTransferPage();
     void reloadNode();
     void startNode();
     void stopNode();
@@ -73,6 +78,9 @@ private:
     QLineEdit *m_lookupField;
     QLineEdit *m_hostNameField;
     QSpinBox *m_hostPortField;
+    QLineEdit *m_sendFileField;
+    QLineEdit *m_sendTargetField;
+    QPushButton *m_toggleReceiveBtn;
     QTextEdit *m_lookupResult;
     QTextEdit *m_logView;
     QDockWidget *m_logDock;

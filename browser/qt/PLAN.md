@@ -32,12 +32,20 @@ The current browser app already provides:
   - node rename
   - service / node / hidden lookup
   - service hosting and stop controls
+  - file send with target address
+  - receive mode toggle (enable/disable)
+  - receive status page
 - a side drawer for runtime logs
 - a side drawer for node control
 - a node start button
 - a node stop button
 - reload and status actions
 - first-run permission guidance for Windows and macOS
+- `vx6://files` page showing:
+  - receive status (mode, allowed senders)
+  - config path
+  - download directory
+  - received files grouped by sender folder (`sender_name_nodeID_vx6`)
 
 ## How It Is Built Today
 
@@ -91,9 +99,16 @@ Planned follow-up work:
 - better inline error pages when VX6 lookup fails
 - richer service pages for public, private, and hidden records
 - a browser home page that can show local services and recent connections
-- downloads and file handling inside the browser shell
 - safer web permissions prompts
-- better integrated localhost and internet navigation rules
+- better integrated localhost and internet navigation rules 
+- file transfer progress indicators and download speed display
+- a button to open received file folders directly on the filesystem
+- structured receive storage where incoming files are grouped into sender-specific VX6 directories      (`sender_name_nodeID_vx6`)
+- browser-side visualization for sender-grouped received file folders
+- automatic creation of sender-specific receive directories during incoming file transfers
+- safer receive storage organization instead of mixing VX6 files into the global Downloads directory
+- debugging and validation work for ensuring the active runtime receive path correctly creates sender-specific receive folders
+- future transfer history and per-sender download tracking support
 
 ## How To Contribute
 
@@ -110,6 +125,7 @@ Good browser contributions are usually one of these:
 - a new VX6 page
 - a layout improvement
 - a node control improvement
+- file transfer UI or download status support
 - a safer browser permission rule
 - a better cross-platform build fix
 - a clearer error page

@@ -3,7 +3,10 @@
 #include <QApplication>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
@@ -664,6 +667,162 @@ QString VX6Backend::hostService(const QString &serviceName, int port)
         return output + QStringLiteral("\n") + reloadOut;
     }
     return output;
+}
+
+QString VX6Backend::sendFile(const QString &filePath, const QString &target, bool proxy)
+{
+    const QString trimmedFile = filePath.trimmed();
+    const QString trimmedTarget = target.trimmed();
+    if (trimmedFile.isEmpty()) {
+        return QStringLiteral("send file failed: empty file path");
+    }
+    if (trimmedTarget.isEmpty()) {
+        return QStringLiteral("send file failed: empty target");
+    }
+    if (!QFileInfo(trimmedFile).exists()) {
+        return QStringLiteral("send file failed: file does not exist");
+    }
+
+    QStringList args = {QStringLiteral("send"), QStringLiteral("--file"), trimmedFile};
+    if (trimmedTarget.contains(QLatin1Char(':'))) {
+        args << QStringLiteral("--addr") << trimmedTarget;
+    } else {
+        args << QStringLiteral("--to") << trimmedTarget;
+    }
+    if (proxy) {
+        args << QStringLiteral("--proxy");
+    }
+
+    bool ok = false;
+    const QString result = runVX6(args, &ok);
+    if (ok) {
+        return QStringLiteral("file send complete:\n%1").arg(result.trimmed());
+    }
+    return QStringLiteral("file send failed:\n%1").arg(result.trimmed());
+}
+
+QString VX6Backend::receiveStatus() const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{QStringLiteral("receive"), QStringLiteral("status")}, &ok);
+    if (ok) {
+        return QStringLiteral("receive status:\n%1").arg(output.trimmed());
+    }
+    return QStringLiteral("receive status failed:\n%1").arg(output.trimmed());
+}
+
+bool VX6Backend::receiveEnabled() const
+{
+    bool ok = false;
+    const QString output = runVX6(QStringList{QStringLiteral("receive"), QStringLiteral("status")}, &ok);
+    if (!ok) {
+        return false;
+    }
+    for (const QString &line : output.split('\n', Qt::SkipEmptyParts)) {
+        if (line.startsWith(QStringLiteral("file_receive_mode\t"))) {
+            const QString mode = line.section('\t', 1, 1).trimmed();
+            return mode == QStringLiteral("OPEN") || mode == QStringLiteral("TRUSTED");
+        }
+    }
+    return false;
+}
+
+QString VX6Backend::toggleReceive(bool enable)
+{
+    QStringList args;
+    if (enable) {
+        args = {QStringLiteral("receive"), QStringLiteral("allow"), QStringLiteral("--all")};
+    } else {
+        args = {QStringLiteral("receive"), QStringLiteral("disable")};
+    }
+    bool ok = false;
+    const QString output = runVX6(args, &ok);
+    if (ok) {
+        return QStringLiteral("receive %1 successfully:\n%2").arg(enable ? QStringLiteral("enabled") : QStringLiteral("disabled"), output.trimmed());
+    }
+    return QStringLiteral("receive %1 failed:\n%2").arg(enable ? QStringLiteral("enable") : QStringLiteral("disable"), output.trimmed());
+}
+
+QString VX6Backend::currentDownloadPath() const
+{
+    const QString cfgPath = resolveConfigPath();
+    QFile configFile(cfgPath);
+    if (configFile.open(QIODevice::ReadOnly)) {
+        const QByteArray data = configFile.readAll();
+        configFile.close();
+        const QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (!doc.isNull() && doc.isObject()) {
+            const QJsonObject root = doc.object();
+            if (root.contains(QStringLiteral("node")) && root.value(QStringLiteral("node")).isObject()) {
+                const QJsonObject nodeObj = root.value(QStringLiteral("node")).toObject();
+                const QString downloadDir = nodeObj.value(QStringLiteral("download_dir")).toString().trimmed();
+                if (!downloadDir.isEmpty()) {
+                    const QDir dir(downloadDir);
+                    if (dir.isAbsolute()) {
+                        return QDir::cleanPath(downloadDir);
+                    }
+                    return QDir(QFileInfo(cfgPath).absolutePath()).absoluteFilePath(downloadDir);
+                }
+            }
+        }
+    }
+
+    const QString defaultDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (!defaultDir.isEmpty()) {
+        return QDir::cleanPath(defaultDir);
+    }
+    return QDir::homePath() + QDir::separator() + QStringLiteral("Downloads");
+}
+
+QString VX6Backend::downloadedFilesHtml(const QString &downloadDir) const
+{
+    const QDir dir(downloadDir);
+    if (!dir.exists()) {
+        return QStringLiteral("<div class=\"output\">No download directory found: %1</div>").arg(downloadDir.toHtmlEscaped());
+    }
+
+    const QFileInfoList dirs = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    QStringList sections;
+    for (const QFileInfo &folder : dirs) {
+        if (!folder.fileName().endsWith(QStringLiteral("_vx6"))) {
+            continue;
+        }
+        const QDir subdir(folder.filePath());
+        const QFileInfoList files = subdir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        if (files.isEmpty()) {
+            sections.append(QStringLiteral("<div class=\"hint\"><strong>%1</strong> — no received files yet.</div>").arg(folder.fileName().toHtmlEscaped()));
+            continue;
+        }
+        QStringList rows;
+        for (const QFileInfo &info : files) {
+            rows.append(QStringLiteral("<li><strong>%1</strong> — %2</li>")
+                .arg(info.fileName().toHtmlEscaped(), QString::number(info.size())));
+        }
+        sections.append(QStringLiteral("<div class=\"hint\"><strong>%1</strong></div><ul style=\"margin:0 0 16px 20px;\">%2</ul>")
+            .arg(folder.fileName().toHtmlEscaped(), rows.join(QString())));
+    }
+
+    if (sections.isEmpty()) {
+        return QStringLiteral("<div class=\"output\">No sender-specific received folders found. Received files are stored in sender subdirectories ending with <code>_vx6</code>.</div>");
+    }
+
+    return QStringLiteral("<div class=\"output\">%1</div>").arg(sections.join(QString()));
+}
+
+QString VX6Backend::filesPageHtml() const
+{
+    const QString status = receiveStatus();
+    const QString configPath = resolveConfigPath();
+    const QString downloadDir = currentDownloadPath();
+    const QString filesHtml = downloadedFilesHtml(downloadDir);
+    const QString body = QStringLiteral(
+        "<div class=\"hint\">This page shows file receive/download status and quick file transfer actions.</div>"
+        "<div class=\"section\"><h2>Receive Status</h2>%1</div>"
+        "<div class=\"section\"><h2>Config Path</h2>%2</div>"
+        "<div class=\"section\"><h2>Download Directory</h2>%3</div>"
+        "<div class=\"section\"><h2>Downloaded Files</h2>%4</div>")
+        .arg(commandBlock(status), commandBlock(configPath), commandBlock(downloadDir), filesHtml);
+    return makePageShell("VX6 Files", "File transfer and receive status", body, "#ff9f43");
 }
 
 QString VX6Backend::stopHostedService(const QString &serviceName)

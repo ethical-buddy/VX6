@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDockWidget>
+#include <QFileDialog>
+#include <QScrollArea>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLineEdit>
@@ -459,7 +461,14 @@ void BrowserWindow::buildControlDock()
         "QDockWidget::title { background: #0e1118; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; }"
         "QDockWidget::close-button { background: transparent; border: none; image: none; }");
 
-    auto *root = new QWidget(m_controlDock);
+    auto *scrollArea = new QScrollArea(m_controlDock);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scrollArea->setStyleSheet("QScrollArea { background: transparent; border: none; }");
+
+    auto *root = new QWidget();
     root->setStyleSheet("QWidget { background: #12151a; color: #e8eaf0; }");
 
     auto *outer = new QVBoxLayout(root);
@@ -536,6 +545,34 @@ void BrowserWindow::buildControlDock()
     connectLay->addWidget(connectHint);
     outer->addWidget(connectFrame);
 
+    auto [fileFrame, fileLay] = makeFrame("FILE TRANSFER");
+    m_sendFileField = new QLineEdit(fileFrame);
+    m_sendFileField->setPlaceholderText("File path e.g. /home/user/Downloads/sample.txt");
+    m_sendFileField->setStyleSheet(m_ipv6Field->styleSheet());
+    fileLay->addWidget(m_sendFileField);
+    auto *fileRow = new QWidget(fileFrame);
+    auto *fileRowLay = new QHBoxLayout(fileRow);
+    fileRowLay->setContentsMargins(0, 0, 0, 0);
+    fileRowLay->setSpacing(8);
+    auto *browseBtn = makeSideBtn("Browse", fileRow);
+    auto *sendBtn = makeSideBtn("Send File", fileRow);
+    fileRowLay->addWidget(browseBtn);
+    fileRowLay->addWidget(sendBtn);
+    fileLay->addWidget(fileRow);
+    m_sendTargetField = new QLineEdit(fileFrame);
+    m_sendTargetField->setPlaceholderText("Receiver name or address e.g. alice or [ipv6]:4242");
+    m_sendTargetField->setStyleSheet(m_ipv6Field->styleSheet());
+    fileLay->addWidget(m_sendTargetField);
+    auto *receiveStatusBtn = makeSideBtn("Receive Status", fileFrame);
+    fileLay->addWidget(receiveStatusBtn);
+    m_toggleReceiveBtn = makeSideBtn("Toggle Receive", fileFrame);
+    fileLay->addWidget(m_toggleReceiveBtn);
+    auto *fileHint = new QLabel("Use a local file path and target name or address. For direct send, use [ipv6]:4242.", fileFrame);
+    fileHint->setWordWrap(true);
+    fileHint->setStyleSheet("QLabel { color: #7f889b; font-size: 11px; }");
+    fileLay->addWidget(fileHint);
+    outer->addWidget(fileFrame);
+
     auto [renameFrame, renameLay] = makeFrame("NODE NAME");
     m_renameField = new QLineEdit(renameFrame);
     m_renameField->setPlaceholderText("Enter a new node name");
@@ -610,7 +647,8 @@ void BrowserWindow::buildControlDock()
     outer->addWidget(spacer, 1);
 
     root->setLayout(outer);
-    m_controlDock->setWidget(root);
+    scrollArea->setWidget(root);
+    m_controlDock->setWidget(scrollArea);
     addDockWidget(Qt::LeftDockWidgetArea, m_controlDock);
 
     connect(copyIpv6, &QPushButton::clicked, this, &BrowserWindow::copyCurrentIpv6);
@@ -623,11 +661,16 @@ void BrowserWindow::buildControlDock()
     connect(hiddenBtn, &QPushButton::clicked, this, &BrowserWindow::lookupHiddenFromPanel);
     connect(forwardBtn, &QPushButton::clicked, this, &BrowserWindow::hostServiceFromPanel);
     connect(stopBtn, &QPushButton::clicked, this, &BrowserWindow::stopHostedServiceFromPanel);
+    connect(browseBtn, &QPushButton::clicked, this, &BrowserWindow::chooseFileFromPanel);
+    connect(sendBtn, &QPushButton::clicked, this, &BrowserWindow::sendFileFromPanel);
+    connect(receiveStatusBtn, &QPushButton::clicked, this, &BrowserWindow::showFileTransferPage);
+    connect(m_toggleReceiveBtn, &QPushButton::clicked, this, &BrowserWindow::toggleReceiveFromPanel);
     connect(m_lookupField, &QLineEdit::returnPressed, this, &BrowserWindow::lookupServiceFromPanel);
     connect(m_renameField, &QLineEdit::returnPressed, this, &BrowserWindow::renameNodeFromPanel);
     connect(m_hostNameField, &QLineEdit::returnPressed, this, &BrowserWindow::hostServiceFromPanel);
     connect(m_initNodeNameField, &QLineEdit::returnPressed, this, &BrowserWindow::initializeNodeFromPanel);
     connect(m_connectServiceField, &QLineEdit::returnPressed, this, &BrowserWindow::connectServiceFromPanel);
+    connect(m_sendTargetField, &QLineEdit::returnPressed, this, &BrowserWindow::sendFileFromPanel);
     connect(m_controlDock, &QDockWidget::visibilityChanged, this, [this](bool visible)
             {
                 if (visible)
@@ -723,6 +766,7 @@ void BrowserWindow::buildDock()
         "vx6://services",
         "vx6://peers",
         "vx6://identity",
+        "vx6://files",
         "vx6://permissions",
     });
     m_shortcuts->setFocusPolicy(Qt::NoFocus);
@@ -805,6 +849,10 @@ void BrowserWindow::refreshControlPanel()
     }
     if (m_nodeIdField) {
         m_nodeIdField->setText(nodeId.isEmpty() ? QStringLiteral("(identity unavailable)") : nodeId);
+    }
+    if (m_toggleReceiveBtn) {
+        const bool enabled = m_backend->receiveEnabled();
+        m_toggleReceiveBtn->setText(enabled ? QStringLiteral("Disable Receive") : QStringLiteral("Enable Receive"));
     }
 }
 
@@ -965,6 +1013,53 @@ void BrowserWindow::connectServiceFromPanel()
     const QString result = m_backend->connectService(target);
     appendLog(result.trimmed());
     m_connectServiceField->clear();
+}
+
+void BrowserWindow::chooseFileFromPanel()
+{
+    const QString filePath = QFileDialog::getOpenFileName(this, "Choose file to send", QString(), QStringLiteral("All files (*)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+    if (m_sendFileField) {
+        m_sendFileField->setText(filePath);
+    }
+}
+
+void BrowserWindow::sendFileFromPanel()
+{
+    if (!m_sendFileField || !m_sendTargetField) {
+        return;
+    }
+    const QString filePath = m_sendFileField->text().trimmed();
+    const QString target = m_sendTargetField->text().trimmed();
+    if (filePath.isEmpty()) {
+        appendLog("send file skipped: no file selected");
+        return;
+    }
+    if (target.isEmpty()) {
+        appendLog("send file skipped: no receiver specified");
+        return;
+    }
+    appendLog(QString("sending file %1 to %2…").arg(filePath, target));
+    const QString result = m_backend->sendFile(filePath, target);
+    appendLog(result.trimmed());
+}
+
+void BrowserWindow::toggleReceiveFromPanel()
+{
+    if (!m_toggleReceiveBtn) {
+        return;
+    }
+    const bool enabled = m_backend->receiveEnabled();
+    const QString result = m_backend->toggleReceive(!enabled);
+    appendLog(result.trimmed());
+    refreshControlPanel();
+}
+
+void BrowserWindow::showFileTransferPage()
+{
+    navigateTo("vx6://files", false);
 }
 
 // backend callbacks
