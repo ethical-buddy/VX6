@@ -87,7 +87,7 @@ func TestReceiveFile(t *testing.T) {
 		t.Fatalf("unexpected bytes received: %d", result.BytesReceived)
 	}
 
-	receivedPath := filepath.Join(receiveDir, "hello.txt")
+	receivedPath := filepath.Join(receiveDir, "alpha_unknownid_vx6", "hello.txt")
 	received, err := os.ReadFile(receivedPath)
 	if err != nil {
 		t.Fatalf("read received file: %v", err)
@@ -145,7 +145,11 @@ func TestReceiveFileResumesPartialDownload(t *testing.T) {
 
 	payload := []byte("vx6 resumable transfer payload")
 	receiveDir := t.TempDir()
-	filePath := filepath.Join(receiveDir, "resume.txt")
+	receiverDir := filepath.Join(receiveDir, "alpha_unknownid_vx6")
+	if err := os.MkdirAll(receiverDir, 0o755); err != nil {
+		t.Fatalf("create receiver directory: %v", err)
+	}
+	filePath := filepath.Join(receiverDir, "resume.txt")
 	if err := os.WriteFile(filePath, payload[:10], 0o644); err != nil {
 		t.Fatalf("seed partial file: %v", err)
 	}
@@ -188,7 +192,8 @@ func TestReceiveFileResumesPartialDownload(t *testing.T) {
 		t.Fatalf("unexpected bytes received %d", result.BytesReceived)
 	}
 
-	received, err := os.ReadFile(filePath)
+	receivedPath := filepath.Join(receiveDir, "alpha_unknownid_vx6", "resume.txt")
+	received, err := os.ReadFile(receivedPath)
 	if err != nil {
 		t.Fatalf("read resumed file: %v", err)
 	}

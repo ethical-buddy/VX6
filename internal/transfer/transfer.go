@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/vx6/vx6/internal/identity"
 	"github.com/vx6/vx6/internal/proto"
@@ -130,6 +131,32 @@ func SendFileWithConn(ctx context.Context, conn net.Conn, req SendRequest) (Send
 	}, nil
 }
 
+func sanitizeReceiverDirName(nodeName, nodeID string) string {
+	if nodeName == "" {
+		nodeName = "unknown"
+	}
+	if nodeID == "" {
+		nodeID = "unknownid"
+	}
+	cleanName := strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ', '\t', '\n', '\r':
+			return '_'
+		default:
+			return r
+		}
+	}, nodeName)
+	cleanID := strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ', '\t', '\n', '\r':
+			return '_'
+		default:
+			return r
+		}
+	}, nodeID)
+	return fmt.Sprintf("%s_%s_vx6", cleanName, cleanID)
+}
+
 func ReceiveFile(conn net.Conn, dataDir string) (ReceiveResult, error) {
 	return ReceiveFileWithPolicy(conn, dataDir, ReceivePolicy{Mode: ReceiveModeOpen})
 }
@@ -144,11 +171,16 @@ func ReceiveFileWithPolicy(conn net.Conn, dataDir string, policy ReceivePolicy) 
 		return ReceiveResult{}, err
 	}
 
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return ReceiveResult{}, fmt.Errorf("create directory: %w", err)
+	senderID := "unknownid"
+	if secureConn, ok := conn.(*secure.Conn); ok {
+		senderID = secureConn.PeerNodeID()
+	}
+	receiverDir := filepath.Join(dataDir, sanitizeReceiverDirName(meta.NodeName, senderID))
+	if err := os.MkdirAll(receiverDir, 0755); err != nil {
+		return ReceiveResult{}, fmt.Errorf("create receiver directory: %w", err)
 	}
 
-	filePath := filepath.Join(dataDir, filepath.Base(meta.FileName))
+	filePath := filepath.Join(receiverDir, filepath.Base(meta.FileName))
 	offset := int64(0)
 	if info, err := os.Stat(filePath); err == nil {
 		switch {

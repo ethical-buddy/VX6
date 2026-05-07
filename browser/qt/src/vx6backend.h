@@ -30,8 +30,15 @@ public:
     QString currentNodeName() const;
     QString currentNodeID() const;
     QString currentAdvertiseAddr() const;
+    QString sendFile(const QString &filePath, const QString &target, bool proxy = false);
+    QString receiveStatus() const;
+    bool receiveEnabled() const;
+    QString toggleReceive(bool enable);
+    QString filesPageHtml() const;
 
     bool nodeRunning() const;
+    QString currentDownloadPath() const;
+    QString downloadedFilesHtml(const QString &downloadDir) const;
     QString startNode();
     QString stopNode();
     QString renameNode(const QString &name);

@@ -62,6 +62,10 @@ void VX6SchemeHandler::requestStarted(QWebEngineUrlRequestJob *job)
     {
         html = m_backend->identityPageHtml();
     }
+    else if (target == "files")
+    {
+        html = m_backend->filesPageHtml();
+    }
     else if (target == "permissions")
     {
         html = m_backend->permissionPromptHtml();
