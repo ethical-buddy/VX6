@@ -43,6 +43,8 @@ type state struct {
 	local    localState
 	selected int32
 	mediaSel int32
+	rtc      map[string]*rtcSession
+	rtcMark  map[string]string
 }
 
 type mediaIndexEntry struct {
@@ -73,6 +75,8 @@ func main() {
 		},
 		selected: -1,
 		mediaSel: -1,
+		rtc:      map[string]*rtcSession{},
+		rtcMark:  map[string]string{},
 	}
 
 	a := app.NewWithID("com.vx6.comms")
@@ -279,7 +283,11 @@ func main() {
 			dialog.ShowError(err, w)
 			return
 		}
-		dialog.ShowInformation("Call Invite", "Call signal sent. RTP/media plane is next phase.", w)
+		if err := st.initiateWebRTCCall(cs[idx]); err != nil {
+			dialog.ShowError(err, w)
+			return
+		}
+		dialog.ShowInformation("Call Invite", "Call signal + WebRTC offer sent.", w)
 	})
 
 	mediaList := widget.NewList(
@@ -405,6 +413,7 @@ func main() {
 		for range t.C {
 			_ = st.publishPresence()
 			_ = st.syncInboxAndRequests(w, chatLog, int(atomic.LoadInt32(&st.selected)))
+			_ = st.pollRTCSignals()
 			_ = st.retryPending()
 			if idx := int(atomic.LoadInt32(&st.selected)); idx >= 0 {
 				cs := st.sortedContacts()
@@ -1162,14 +1171,14 @@ func (s *state) checkCallSignals(win fyne.Window) error {
 		return nil
 	}
 	fyne.Do(func() {
-		dialog.ShowConfirm("Incoming Call", sig.FromName+" is inviting you to a VX6 call. Accept signaling?", func(ok bool) {
+		dialog.ShowConfirm("Incoming Call", sig.FromName+" is inviting you to a VX6 call. Accept?", func(ok bool) {
 			peer := s.findContactByID(sig.FromID)
 			if peer.NodeID == "" {
 				return
 			}
 			if ok {
 				_ = s.sendCallSignal(peer, "accept")
-				dialog.ShowInformation("Call", "Accepted. RTP/WebRTC media channel wiring is next.", win)
+				dialog.ShowInformation("Call", "Accepted. WebRTC session negotiated.", win)
 			} else {
 				_ = s.sendCallSignal(peer, "decline")
 			}
@@ -1182,6 +1191,36 @@ func (s *state) findContactByID(id string) peerContact {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.contacts[id]
+}
+
+func (s *state) rtcStore(peerID string, sess *rtcSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rtc[peerID] = sess
+}
+
+func (s *state) rtcLoad(peerID string) (*rtcSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.rtc[peerID]
+	return v, ok
+}
+
+func (s *state) rtcDelete(peerID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.rtc, peerID)
+}
+
+func (s *state) rtcSeen(fromID, sigID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := fromID
+	if s.rtcMark[key] == sigID {
+		return true
+	}
+	s.rtcMark[key] = sigID
+	return false
 }
 
 func (s *state) listReceivedFiles(limit int) ([]string, error) {
