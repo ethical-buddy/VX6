@@ -24,6 +24,7 @@ Native desktop communications app over VX6 SDK (Linux-first baseline).
   - dedupe tracking
   - retry queue for pending sends
   - unread counters persisted locally
+- Per-message key evolution with sequence-based ratchet key derivation (foundation for full Double Ratchet)
 - Presence + typing protocol over DHT keys
 - Call signaling over DHT (`invite` stage) for upcoming RTP/WebRTC media plane
 - Local offline state persistence (`vx6comms-state.json`)
@@ -71,4 +72,7 @@ Windows/macOS binaries can be cross-built, but native packaging/signing and plat
 
 - No central server is required for basic peer chat flow.
 - True phone/email OTP verification cannot be trustless without a verification service; current profile fields are metadata only.
-- Full Signal-grade E2EE ratchet (X3DH + Double Ratchet), full video RTP stack, and polished media previews are still next phases.
+- Remaining for full Signal/Tor-grade chat parity:
+  - X3DH prekey bundles + true Double Ratchet (DH ratchet + skipped message key handling)
+  - Full RTP/WebRTC media transport (beyond current decentralized call signaling)
+  - richer media previews/stream playback controls

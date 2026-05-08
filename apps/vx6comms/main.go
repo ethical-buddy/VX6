@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
@@ -38,6 +40,7 @@ type state struct {
 	contacts map[string]peerContact
 	local    localState
 	selected int32
+	mediaSel int32
 }
 
 func main() {
@@ -56,8 +59,11 @@ func main() {
 			ReadByPeer:   map[string]bool{},
 			Outbox:       []queuedMessage{},
 			ActiveGroups: map[string]groupRoom{},
+			SendSeq:      map[string]uint64{},
+			RecvSeq:      map[string]uint64{},
 		},
 		selected: -1,
+		mediaSel: -1,
 	}
 
 	a := app.NewWithID("com.vx6.comms")
@@ -280,7 +286,19 @@ func main() {
 			o.(*widget.Label).SetText(items[i])
 		},
 	)
+	mediaList.OnSelected = func(id widget.ListItemID) {
+		atomic.StoreInt32(&st.mediaSel, int32(id))
+	}
 	refreshMediaBtn := widget.NewButton("Refresh Inbox", func() { mediaList.Refresh() })
+	previewMediaBtn := widget.NewButton("Preview/Open", func() {
+		items, _ := st.listReceivedFiles(80)
+		idx := int(atomic.LoadInt32(&st.mediaSel))
+		if idx < 0 || idx >= len(items) || items[idx] == "(no files yet)" {
+			dialog.ShowInformation("Media", "Select a file first.", w)
+			return
+		}
+		st.showMediaPreview(items[idx], w)
+	})
 
 	groupName := widget.NewEntry()
 	groupName.SetPlaceHolder("Group name")
@@ -349,7 +367,7 @@ func main() {
 	rightPanel := container.NewVBox(
 		widget.NewCard("Invite Link", "", container.NewVBox(genInviteBtn, inviteBox)),
 		widget.NewCard("Add Contact", "", container.NewVBox(inviteIn, addInviteBtn)),
-		widget.NewCard("Media", "", container.NewVBox(filePath, sendFileBtn, refreshMediaBtn, mediaList)),
+		widget.NewCard("Media", "", container.NewVBox(filePath, sendFileBtn, container.NewGridWithColumns(2, refreshMediaBtn, previewMediaBtn), mediaList)),
 		widget.NewCard("Groups", "", container.NewVBox(
 			groupName, createGroupBtn, groupIDInput, groupMemberInput,
 			container.NewGridWithColumns(2, addMemberBtn, removeMemberBtn),
@@ -572,6 +590,12 @@ func (s *state) loadLocalState() error {
 	if st.ActiveGroups == nil {
 		st.ActiveGroups = map[string]groupRoom{}
 	}
+	if st.SendSeq == nil {
+		st.SendSeq = map[string]uint64{}
+	}
+	if st.RecvSeq == nil {
+		st.RecvSeq = map[string]uint64{}
+	}
 	s.local = st
 	return nil
 }
@@ -627,10 +651,12 @@ func (s *state) acceptInvite(link string) error {
 }
 
 func (s *state) sendMessage(c peerContact, text string) error {
-	env, err := sealMessage(c.Secret, chatMessage{Text: text}, s.id.NodeID, c.NodeID, "msg")
+	seq := s.local.SendSeq[c.NodeID] + 1
+	env, err := sealMessage(c.Secret, chatMessage{Text: text}, s.id.NodeID, c.NodeID, "msg", seq)
 	if err != nil {
 		return err
 	}
+	s.local.SendSeq[c.NodeID] = seq
 	if err := s.publishEnvelope(c, env); err != nil {
 		s.queueMessage(c.NodeID, env, 1)
 		return err
@@ -797,6 +823,12 @@ func (s *state) syncContactLedger(c peerContact) error {
 		if s.local.SeenMessage[m.ID] {
 			continue
 		}
+		if m.From == c.NodeID && m.Seq > 0 {
+			if m.Seq <= s.local.RecvSeq[c.NodeID] {
+				continue
+			}
+			s.local.RecvSeq[c.NodeID] = m.Seq
+		}
 		s.local.SeenMessage[m.ID] = true
 		if m.From != s.id.NodeID {
 			s.local.Unread[c.NodeID] = s.local.Unread[c.NodeID] + 1
@@ -898,6 +930,16 @@ func (s *state) groupMemberChange(groupID, targetID, action string) error {
 	if err != nil {
 		return err
 	}
+	members, admins := groupStateFromLedger(ledger)
+	if !admins[s.id.NodeID] {
+		return fmt.Errorf("only admins can change membership")
+	}
+	if action == "add" && members[targetID] {
+		return fmt.Errorf("member already exists")
+	}
+	if action == "remove" && !members[targetID] {
+		return fmt.Errorf("member not found")
+	}
 	ledger.Events = append(ledger.Events, groupEvent{
 		ID: fmt.Sprintf("gev-%d", time.Now().UnixNano()), GroupID: groupID, Type: action,
 		ActorID: s.id.NodeID, TargetID: targetID, CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -913,6 +955,10 @@ func (s *state) publishGroupMessage(groupID, text string) error {
 	ledger, err := s.loadGroupLedger(groupID)
 	if err != nil {
 		return err
+	}
+	members, _ := groupStateFromLedger(ledger)
+	if !members[s.id.NodeID] {
+		return fmt.Errorf("only group members can send group messages")
 	}
 	ledger.Events = append(ledger.Events, groupEvent{
 		ID: fmt.Sprintf("gev-%d", time.Now().UnixNano()), GroupID: groupID, Type: "msg",
@@ -941,6 +987,32 @@ func (s *state) saveGroupLedger(groupID string, ledger groupLedger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	return s.client.DHTPut(ctx, groupKey(groupID), marshalJSON(ledger))
+}
+
+func groupStateFromLedger(ledger groupLedger) (map[string]bool, map[string]bool) {
+	members := map[string]bool{}
+	admins := map[string]bool{}
+	for _, ev := range ledger.Events {
+		switch ev.Type {
+		case "create":
+			members[ev.ActorID] = true
+			admins[ev.ActorID] = true
+		case "add":
+			if ev.TargetID != "" {
+				members[ev.TargetID] = true
+			}
+		case "remove":
+			delete(members, ev.TargetID)
+			delete(admins, ev.TargetID)
+		case "promote":
+			if members[ev.TargetID] {
+				admins[ev.TargetID] = true
+			}
+		case "demote":
+			delete(admins, ev.TargetID)
+		}
+	}
+	return members, admins
 }
 
 func (s *state) publishReadReceipt(c peerContact, msgID string) error {
@@ -1025,10 +1097,25 @@ func (s *state) checkCallSignals(win fyne.Window) error {
 	}
 	fyne.Do(func() {
 		dialog.ShowConfirm("Incoming Call", sig.FromName+" is inviting you to a VX6 call. Accept signaling?", func(ok bool) {
-			_ = ok // media plane hookup is next phase
+			peer := s.findContactByID(sig.FromID)
+			if peer.NodeID == "" {
+				return
+			}
+			if ok {
+				_ = s.sendCallSignal(peer, "accept")
+				dialog.ShowInformation("Call", "Accepted. RTP/WebRTC media channel wiring is next.", win)
+			} else {
+				_ = s.sendCallSignal(peer, "decline")
+			}
 		}, win)
 	})
 	return nil
+}
+
+func (s *state) findContactByID(id string) peerContact {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.contacts[id]
 }
 
 func (s *state) listReceivedFiles(limit int) ([]string, error) {
@@ -1059,6 +1146,24 @@ func (s *state) listReceivedFiles(limit int) ([]string, error) {
 		return []string{"(no files yet)"}, nil
 	}
 	return entries, nil
+}
+
+func (s *state) showMediaPreview(path string, win fyne.Window) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		img := canvas.NewImageFromFile(path)
+		img.FillMode = canvas.ImageFillContain
+		img.SetMinSize(fyne.NewSize(640, 420))
+		dialog.ShowCustom("Image Preview", "Close", container.NewStack(
+			canvas.NewRectangle(color.Black),
+			img,
+		), win)
+	case ".mp4", ".mkv", ".webm", ".mov":
+		dialog.ShowInformation("Video Preview", "Video inline playback is not wired yet. File path:\n"+path, win)
+	default:
+		dialog.ShowInformation("File", path, win)
+	}
 }
 
 func refreshMyInfo(s *state, out *widget.Entry) {

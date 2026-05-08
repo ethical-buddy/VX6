@@ -17,7 +17,7 @@ func TestInviteRoundTrip(t *testing.T) {
 }
 
 func TestSealAndOpenMessage(t *testing.T) {
-	env, err := sealMessage("s3", chatMessage{Text: "hello"}, "node-a", "node-b", "msg")
+	env, err := sealMessage("s3", chatMessage{Text: "hello"}, "node-a", "node-b", "msg", 1)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}

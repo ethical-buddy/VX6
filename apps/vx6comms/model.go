@@ -33,6 +33,7 @@ type peerContact struct {
 type messageEnvelope struct {
 	ID        string `json:"id"`
 	Type      string `json:"type"`
+	Seq       uint64 `json:"seq,omitempty"`
 	AckFor    string `json:"ack_for,omitempty"`
 	MediaName string `json:"media_name,omitempty"`
 	MediaSize int64  `json:"media_size,omitempty"`
@@ -88,6 +89,8 @@ type localState struct {
 	Outbox       []queuedMessage      `json:"outbox"`
 	LastSyncAt   string               `json:"last_sync_at"`
 	ActiveGroups map[string]groupRoom `json:"active_groups"`
+	SendSeq      map[string]uint64    `json:"send_seq"`
+	RecvSeq      map[string]uint64    `json:"recv_seq"`
 }
 
 type presenceState struct {
@@ -164,13 +167,13 @@ func marshalJSON(v any) []byte {
 	return out
 }
 
-func sealMessage(secret string, plain chatMessage, from, to, kind string) (messageEnvelope, error) {
+func sealMessage(secret string, plain chatMessage, from, to, kind string, seq uint64) (messageEnvelope, error) {
 	raw, err := json.Marshal(plain)
 	if err != nil {
 		return messageEnvelope{}, err
 	}
-	key := sha256.Sum256([]byte("vx6-chat-secret\n" + secret))
-	block, err := aes.NewCipher(key[:])
+	key := deriveMessageKey(secret, from, to, seq)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return messageEnvelope{}, err
 	}
@@ -187,6 +190,7 @@ func sealMessage(secret string, plain chatMessage, from, to, kind string) (messa
 	return messageEnvelope{
 		ID:        base64.RawURLEncoding.EncodeToString(sum[:12]),
 		Type:      kind,
+		Seq:       seq,
 		From:      from,
 		To:        to,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
@@ -207,8 +211,8 @@ func makeAckMessage(ackedID, from, to string) messageEnvelope {
 }
 
 func openMessage(secret string, env messageEnvelope) (chatMessage, error) {
-	key := sha256.Sum256([]byte("vx6-chat-secret\n" + secret))
-	block, err := aes.NewCipher(key[:])
+	key := deriveMessageKey(secret, env.From, env.To, env.Seq)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return chatMessage{}, err
 	}
@@ -233,6 +237,11 @@ func openMessage(secret string, env messageEnvelope) (chatMessage, error) {
 		return chatMessage{}, err
 	}
 	return msg, nil
+}
+
+func deriveMessageKey(secret, from, to string, seq uint64) []byte {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("vx6-ratchet-v1\n%s\n%s\n%s\n%d", secret, from, to, seq)))
+	return sum[:]
 }
 
 func randomSecret() (string, error) {
