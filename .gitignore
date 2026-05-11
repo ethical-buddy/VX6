@@ -15,6 +15,12 @@ main/
 apps/
 !apps/vx6share/
 !apps/vx6share/**
+!apps/vx6comms/
+!apps/vx6comms/**
+!apps/vx6comms-tauri/
+!apps/vx6comms-tauri/**
+!apps/vx6comms-android/
+!apps/vx6comms-android/**
 platform/
 
 # Content/editor scratch that should not block core VX6 development.

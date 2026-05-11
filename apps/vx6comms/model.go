@@ -33,6 +33,7 @@ type peerContact struct {
 }
 
 type messageEnvelope struct {
+	Version   int    `json:"version"`
 	ID        string `json:"id"`
 	Type      string `json:"type"`
 	Seq       uint64 `json:"seq,omitempty"`
@@ -59,6 +60,7 @@ type chatMessage struct {
 }
 
 type friendRequest struct {
+	Version   int    `json:"version"`
 	RequestID string `json:"request_id"`
 	FromID    string `json:"from_id"`
 	FromName  string `json:"from_name"`
@@ -253,6 +255,7 @@ func sealMessage(secret string, plain chatMessage, from, to, kind string, seq ui
 	ciphertext := gcm.Seal(nil, nonce, raw, []byte(from+"\n"+to))
 	sum := sha256.Sum256(append(nonce, ciphertext...))
 	return messageEnvelope{
+		Version:   1,
 		ID:        base64.RawURLEncoding.EncodeToString(sum[:12]),
 		Type:      kind,
 		Seq:       seq,
@@ -266,6 +269,7 @@ func sealMessage(secret string, plain chatMessage, from, to, kind string, seq ui
 
 func makeAckMessage(ackedID, from, to string) messageEnvelope {
 	return messageEnvelope{
+		Version:   1,
 		ID:        base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("ack-%s-%d", ackedID, time.Now().UnixNano()))),
 		Type:      "ack",
 		AckFor:    ackedID,
@@ -295,6 +299,7 @@ func sealMessageWithKey(msgKey []byte, plain chatMessage, from, to, kind string,
 	ciphertext := gcm.Seal(nil, nonce, raw, []byte(from+"\n"+to))
 	sum := sha256.Sum256(append(nonce, ciphertext...))
 	return messageEnvelope{
+		Version:   1,
 		ID:        base64.RawURLEncoding.EncodeToString(sum[:12]),
 		Type:      kind,
 		Seq:       seq,
@@ -418,6 +423,7 @@ func randomSecret() (string, error) {
 
 func inviteLink(nodeID, nodeName, addr, secret string) string {
 	req := friendRequest{
+		Version:   1,
 		RequestID: base64.RawURLEncoding.EncodeToString([]byte(nodeID))[:8] + fmt.Sprintf("%d", time.Now().UnixNano()%100000),
 		FromID:    nodeID,
 		FromName:  nodeName,

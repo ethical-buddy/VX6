@@ -20,6 +20,7 @@ import (
 )
 
 type rtcSignal struct {
+	Version   int    `json:"version"`
 	FromID    string `json:"from_id"`
 	ToID      string `json:"to_id"`
 	Type      string `json:"type"` // offer|answer|candidate|hangup
@@ -128,6 +129,7 @@ func (s *state) ensureRTCSession(peer peerContact) (*rtcSession, error) {
 		}
 		init := c.ToJSON()
 		_ = s.publishRTCSignal(peer.NodeID, rtcSignal{
+			Version:   1,
 			FromID:    s.id.NodeID,
 			ToID:      peer.NodeID,
 			Type:      "candidate",
@@ -523,6 +525,7 @@ func (s *state) initiateWebRTCCall(peer peerContact) error {
 		return err
 	}
 	return s.publishRTCSignal(peer.NodeID, rtcSignal{
+		Version:   1,
 		FromID:    s.id.NodeID,
 		ToID:      peer.NodeID,
 		Type:      "offer",
@@ -564,6 +567,7 @@ func (s *state) pollRTCSignals() error {
 		if err == nil {
 			_ = ss.pc.SetLocalDescription(answer)
 			_ = s.publishRTCSignal(peer.NodeID, rtcSignal{
+				Version: 1,
 				FromID: s.id.NodeID, ToID: peer.NodeID, Type: "answer", SDP: answer.SDP,
 				ID: fmt.Sprintf("rtc-%d", time.Now().UnixNano()), CreatedAt: time.Now().UTC().Format(time.RFC3339),
 			})
