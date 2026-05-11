@@ -1,0 +1,85 @@
+:root {
+  font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+  color: #142018;
+  background: #f6f7f4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2rem 1rem 3rem;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+.top p {
+  margin: 0.4rem 0 1.2rem;
+  color: #355045;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #d9dfd7;
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.4rem;
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  border: 1px solid #cad5cb;
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+}
+
+.row {
+  margin-top: 0.8rem;
+  display: flex;
+  gap: 0.6rem;
+}
+
+button {
+  border: 1px solid #98b1a0;
+  background: #0f7b6c;
+  color: #fff;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(0.95);
+}
+
+.status {
+  margin-top: 0;
+  color: #1f4d40;
+}
+
+pre {
+  margin: 0;
+  background: #11161b;
+  color: #d8e2eb;
+  padding: 0.8rem;
+  border-radius: 8px;
+  min-height: 140px;
+  white-space: pre-wrap;
+}
+

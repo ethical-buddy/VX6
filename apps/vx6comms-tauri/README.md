@@ -2,6 +2,20 @@
 
 This directory is reserved for the desktop UI frontend layer (Tauri + web UI) that sits on top of VX6 core (`main`, `internal`, `sdk`) without coupling protocol internals to frontend code.
 
+## Run (Linux/macOS/Windows)
+
+```bash
+cd apps/vx6comms-tauri
+npm install
+npm run tauri:dev
+```
+
+Build desktop bundles:
+
+```bash
+npm run tauri:build
+```
+
 ## Goals
 
 - Cross-platform desktop app for Linux, Windows, macOS
@@ -31,4 +45,3 @@ This directory is reserved for the desktop UI frontend layer (Tauri + web UI) th
    - `.AppImage/.deb` (Linux)
    - `.msi` (Windows)
    - `.dmg` (macOS)
-
