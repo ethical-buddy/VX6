@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.7.3
 	github.com/pion/rtp v1.10.1
 	github.com/pion/webrtc/v3 v3.2.40
+	github.com/quic-go/quic-go v0.59.1
 )
 
 require (
@@ -45,7 +46,6 @@ require (
 	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/turn/v2 v2.1.6 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/rymdport/portal v0.4.2 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
